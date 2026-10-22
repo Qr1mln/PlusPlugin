@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build / deploy artifacts
+*.bak
+*.new
+
+# Secrets (if any)
+.env
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

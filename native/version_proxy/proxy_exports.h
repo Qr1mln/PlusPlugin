@@ -1,0 +1,22 @@
+// auto-generated, do not edit
+#pragma once
+
+#define PROXY_EXPORT_LIST(X) \
+    X(GetFileVersionInfoA) \
+    X(GetFileVersionInfoByHandle) \
+    X(GetFileVersionInfoExA) \
+    X(GetFileVersionInfoExW) \
+    X(GetFileVersionInfoSizeA) \
+    X(GetFileVersionInfoSizeExA) \
+    X(GetFileVersionInfoSizeExW) \
+    X(GetFileVersionInfoSizeW) \
+    X(GetFileVersionInfoW) \
+    X(VerFindFileA) \
+    X(VerFindFileW) \
+    X(VerInstallFileA) \
+    X(VerInstallFileW) \
+    X(VerLanguageNameA) \
+    X(VerLanguageNameW) \
+    X(VerQueryValueA) \
+    X(VerQueryValueW)
+
