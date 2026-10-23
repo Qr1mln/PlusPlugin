@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "name": "console",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "enabled": true,
   "priority": 5,
-  "dll": "log_console.dll"
+  "dll": "console.dll"
 }

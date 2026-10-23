@@ -1,6 +1,6 @@
 # TTVoice 插件框架设计文档
 
-> 本文件描述 `native/version_proxy` 下的插件框架架构，是被 `sdk/ttplugin.h` 引用的权威说明。
+> 本文件描述 `../version_proxy` 下的插件框架架构，是被 `sdk/ttplugin.h` 引用的权威说明。
 > 设计目标：在**无源码**条件下，把原来写死在 `dllmain.cpp` 里的"叠加层 + 点击脚本 + 界面日志"
 > 改造成**可热加载/热卸载的插件**，让 `version.dll` 代理本身只做"转发 + 引导 + 持有 hook"。
 
@@ -8,8 +8,8 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | 框架骨架：ABI 契约 / 能力表 / 扫描-加载-卸载-控制 / 日志分发 | ✅ 已落地（`framework/`、`sdk/`、`plugin_example/`、`plugin_console/`） |
-| M1 | 渲染派发层 + overlay 功能迁移为插件 | 🟡 规划中（`framework/render.inc` 未写；`overlay.inc`/`script_engine.inc` 待迁移） |
+| M0 | 框架骨架：ABI 契约 / 能力表 / 扫描-加载-卸载-控制 / 日志分发 | ✅ 已落地（`framework/`、`sdk/`、`../plugin/example/`、`../plugin/`） |
+| M1 | 渲染派发层 + overlay 功能迁移为插件 | 🟡 进行中：接缝层 `framework/render.inc` 已写并被 `overlay.inc` 调用；hook 未搬离、overlay 未迁插件 |
 
 ---
 
@@ -38,7 +38,7 @@
    ┌─────────────────────────────────────────────┐
    │  plugins（%APPDATA%\TTVoice\plugins\<NNN-name>）│
    │   · 000-empty   （empty_plugin.cpp，验 M0 通路）│
-   │   · 010-console （log_console.cpp，日志窗口）   │
+   │   · console       （log_console.cpp → console.dll）│
    │   · [M1] plugin_overlay/（按钮+脚本+屏上日志）  │  ← 由 overlay.inc 迁移而来
    └─────────────────────────────────────────────┘
 ```
@@ -59,9 +59,9 @@
 | `sdk/ttplugin.h` | **ABI 契约**：插件与框架的共同语言，纯 ASCII、POD、`extern "C"`。 |
 | `framework/plugin_api.inc` | host 侧实现 `TTPluginHost` 能力表、日志扇出、吊销、生命周期状态。 |
 | `framework/plugin_loader.inc` | 扫描 / 校验 / 加载 / 卸载 / 任务派发 / `control.txt` 控制；单一 loader 线程。 |
-| `framework/render.inc` **[M1]** | Present hook + 每帧遍历 `draws[]` 调 `addDraw` + 输入子类化后按 `regions[]` 命中测试派发点击。当前未编写，hook 暂留 `overlay.inc`。 |
-| `plugin_example/empty_plugin.cpp` | 最小插件，验证 M0 加载/卸载。 |
-| `plugin_console/log_console.cpp` | 日志窗口插件，验证 `addLogSink` + `tick` 消息泵。 |
+| `framework/render.inc` **[M1]** | 派发层接缝：`RenderFrame` 每帧按 priority 调 `addDraw`、`DispatchClick` 按 `regions[]` 命中派发点击（沿用 inflight 守卫）。**已编写**，由 `overlay.inc` 的 `DrawD2D`/`ViewProc` 双轨调用；Present/vtable/BGRA hook 尚未搬入（仍在 `overlay.inc`）。 |
+| `../plugin/example/empty_plugin.cpp` | 最小插件，验证 M0 加载/卸载。 |
+| `../plugin/console/log_console.cpp` | 日志面板插件（产物 `console.dll`）：**自持窗口**（`WS_EX_LAYERED` popup + D2D DC 渲染目标 + `UpdateLayeredWindow`），只订阅 `addLogSink`，用 `tick` 泵消息并重绘，脱离应用帧率；面板带标题栏、只能拖标题栏、位置不受应用窗口限制。 |
 | `plugin_overlay/` **[M1]** | 由 `overlay.inc`+`script_engine.inc` 迁移而来的产品插件（按钮 / 点击脚本 / 屏上日志）。 |
 
 ---
@@ -103,6 +103,7 @@
 | `submitTask(fn, user)` | 向框架线程投送任务（队列满返回 `TTPLUGIN_ERR_FULL`） |
 | `query(capability)` | 能力协商，目前 reserved，统一返回 null |
 | `addLogSink(fn, user)` | 订阅框架日志流（每写一行都投递；每插件一个 sink） |
+| `addPointerSink(fn, user)` | 订阅指针事件（hover / 拖拽）；每插件一个。命中测试与鼠标捕获都由框架负责 |
 
 ### 3.3 回调与结果码
 
@@ -112,7 +113,20 @@ typedef void (__cdecl *TTPluginClickFn)(int kind, float x, float y, void* user);
 typedef void (__cdecl *TTPluginHotkeyFn)(int vk, void* user);
 typedef void (__cdecl *TTPluginTaskFn)(void* user);
 typedef void (__cdecl *TTPluginLogFn)(const char* line, void* user);
+typedef int  (__cdecl *TTPluginPointerFn)(int kind, float x, float y, void* user);
+// kind: TTPLUGIN_POINTER_MOVE=0 / DOWN=1 / UP=2；返回非 0 表示消费该事件
 ```
+
+**指针 / 拖拽语义**（`addPointerSink`，MOVE 派发给所有活跃 sink，返回非 0 即消费）：
+消费 `DOWN` 的插件**捕获指针**：框架 `SetCapture(viewWindow)`，后续 `MOVE`/`UP` 只发给它且一律吞掉（不会漏给 Flutter），
+直到 `UP` 或 `WM_CAPTURECHANGED`（alt-tab 等）自动释放；插件被卸载时捕获同样被丢弃。
+坐标是逻辑像素，与 `addDraw`/`addRegion` 同一坐标系；回调在窗口线程执行，插件自己不需要碰消息循环或鼠标状态。
+
+**为什么拖拽时 MOVE 还要转发给应用（实测约束，别"优化"掉）**：叠加层只在应用的 `Present` 里绘制，而 Flutter 只在自己
+需要时才出帧。若把拖拽中的 `MOVE` 全部吞掉，应用就得不到任何输入、不再出帧，面板只能等下一次偶然刷新——实测一次 578ms
+的拖拽**画了 0 帧**，手感就是"严重延迟"。现在的做法是：插件照样消费 `MOVE`，但消息继续传给原窗口过程，Flutter 因此保持
+出帧，同一次拖拽从 0 帧变成 45~75fps。`DOWN`/`UP` 仍然吞掉，所以应用不会启动自己的手势。
+日志里每次拖拽都会留一行 `overlay: drag <ms> ms, <n> overlay frame(s)`，n 接近 0 就是绘制饥饿而不是输入延迟。
 
 结果码：`TTPLUGIN_OK=0` / `TTPLUGIN_ERR_FULL=-1` / `TTPLUGIN_ERR_STATE=-2` / `TTPLUGIN_ERR_PARAM=-3`。
 容量：`TTPLUGIN_MAX_DRAWS=8` / `TTPLUGIN_MAX_REGIONS=16` / `TTPLUGIN_MAX_HOTKEYS=8`。
@@ -155,7 +169,7 @@ kEmpty ──scan──▶ kDiscovered ──(enabled=false)──▶ kDisabled
   "version": "0.1.0",
   "enabled": true,
   "priority": 5,
-  "dll": "log_console.dll"
+  "dll": "console.dll"
 }
 ```
 
@@ -169,7 +183,7 @@ kEmpty ──scan──▶ kDiscovered ──(enabled=false)──▶ kDisabled
 | `dll` | 相对目录的 DLL 名；`IsSafeRelativeName` 拒绝绝对路径/`..`/通配符，防越目录加载 |
 | `sha256` | **现状**：M3 才强制信任链，目前仅容忍并打日志"has no sha256 (trust check arrives in M3)" |
 
-目录按 `FindFirstFile` 收集后**排序**，`NNN-` 前缀保证加载顺序可复现（`000-empty` → `010-console`）。
+目录按 `FindFirstFile` 收集后**排序**；需要固定加载顺序时用 `NNN-` 前缀（如 `000-empty` → `010-console`），单个插件用普通名字即可（当前为 `console`）。
 
 ---
 
@@ -185,9 +199,33 @@ loader 线程每 `kControlPollMs=500ms` 轮询。命令执行前文件被**截�
 
 ---
 
+## 6.1 热重载（`plugin.json` / dll 自动重载）
+
+loader 线程每 `kWatchPollMs=500ms` 检查每个插件的 `plugin.json` 与清单里 `dll` 指向的文件
+（最后写入时间 + 大小）。**变化必须在 `kReloadSettleMs=400ms` 内不再变化**才生效，避免读到
+部署写了一半的 dll（映射半截文件会直接崩宿主）。
+
+| 变化 | 行为 |
+|---|---|
+| json：`enabled` 变 `false` | 卸载该插件，状态转 `kDisabled` |
+| json：`enabled` 变 `true` | （重新）加载 —— 所以**保存 json 就是重载触发器** |
+| json：`dll` 指向别的文件 | 卸载旧模块，按新文件名加载 |
+| dll 时间/大小变（已加载） | 卸载 + 重新加载 |
+| dll 变化（未加载） | 忽略，没有需要重启的东西 |
+
+- 加载失败会重试 `kReloadMaxRetries=3` 次、间隔 `kReloadRetryMs=2000ms`（旧实例 `FreeLibrary`
+  后文件可能还被占一小会儿）。
+- 失败最终放弃时会记 `plugin: <dir> reload gave up after N tries`，此后需要再改一次文件或重启。
+- 日志特征：`plugin: <dir> changed on disk (json+dll), hot reloading` / `plugin: loaded <name> v...`。
+- **运行中的 dll 无法被覆盖**（文件锁），所以热更新流程是：先写 `enabled=false` 等框架卸载并释放
+  文件 → 覆盖 dll/json → 再写 `enabled=true`。`plugin/console/build_console.py` 已实现这套流程，
+  应用开着直接跑它即可自动重载，无需重启。
+
+---
+
 ## 7. 编写插件（作者指南）
 
-最小骨架（`plugin_example/empty_plugin.cpp`）：
+最小骨架（`../plugin/example/empty_plugin.cpp`）：
 
 ```cpp
 #include "../sdk/ttplugin.h"
@@ -211,12 +249,15 @@ extern "C" __declspec(dllexport) const TTPluginDesc* __cdecl TTPlugin_GetDesc(vo
 BOOL APIENTRY DllMain(HMODULE m, DWORD r, LPVOID) { (void)m; (void)r; return TRUE; } // 必须空
 ```
 
-要点（来自 `plugin_console/log_console.cpp` 的踩坑）：
+要点（来自 `../plugin/console/log_console.cpp` 的踩坑）：
 
 - **`DllMain` 必须为空**：所有资源在 `init` 建、`shutdown` 放。
 - **取自身模块句柄用 `GetModuleHandleExW(UNCHANGED_REFCOUNT | FROM_ADDRESS, &SomeLocalFn, &mod)`**：
   普通 `GetModuleHandleEx` 会 +1 引用，导致框架 `FreeLibrary` 永远卸不掉你。
-- **需要窗口就用 `tick` 泵消息**：框架线程就是你的 UI 线程，`PeekMessage/DispatchMessage` 放进 `tick()`。
+- **需要窗口就自己建 + 在 `tick` 里泵消息，但窗口必须在 `tick` 里建**：窗口消息队列属于创建它的线程，而 `init()`
+  跑在 `PayloadThread`、`tick()` 跑在 `PluginControlThread`——**不是同一个线程**。在 `init` 里建窗口会得到一个没人
+  dispatch 的窗口（看起来就是"点了没反应"）。正确做法：首次 `tick` 里 `CreateWindowExW`，之后每次 `tick` 里
+  `PeekMessage/DispatchMessage`。`../plugin/console/` 就是这么做的，可以照抄。
 - **日志 sink 可跑在任意线程**：只往环形缓冲写 + `PostMessage` 唤醒，绝不直接碰窗口。
 - **不要自己建线程 / 装 hook**：这些是框架的职责。
 - 只依赖 `user32.lib` / `gdi32.lib`（系统库，`/MT` 静态链接）。
@@ -234,10 +275,7 @@ cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 xxx.cpp ^
 
 ## 8. M1 渲染派发层（规划）
 
-**现状缺口**：`plugin_api.inc` 已能存 `draws[]` / `regions[]`，但**没有任何地方调用它们**；
-`plugin_loader.inc` 的 `RunPendingTicks` / `RunPendingTasks` 已就位，注释明确写
-"draw and region fan-out lands in M1"。而 Present hook、vtable 补丁、D3D11 BGRA hook、
-`FLUTTERVIEW` 子类化、区域命中测试目前仍全部写在 `overlay.inc` 里。
+**进度（接缝层已写）**：`framework/render.inc` 的 `RenderFrame`/`DispatchClick` 现在**会**调用 `draws[]`/`regions[]`——由 `overlay.inc` 的 `DrawD2D`（每帧，设好 DPI scale 后）和 `ViewProc`（点击未被胶囊吃掉时）调用，沿用 `RunPendingTicks` 的 inflight 守卫；无插件 region 时点击行为与原来一致。**仍未搬离**的是 hook：Present hook、vtable 补丁、D3D11 BGRA hook、`FLUTTERVIEW` 子类化、区域命中测试目前仍全部写在 `overlay.inc` 里（灰度双轨，`render.inc` 只做派发）。
 
 **设计（`framework/render.inc`）**：
 
@@ -252,7 +290,7 @@ cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 xxx.cpp ^
 
 - 按钮绘制 + 屏上日志 → `addDraw`；
 - 按钮点击 → `addRegion`（在 `init` 注册顶栏矩形）；
-- 屏上日志订阅 → `addLogSink`（复用 `plugin_console` 那套 ring + 绘制逻辑）；
+- 屏上日志订阅 → `addLogSink`（复用 `plugin` 那套 ring + 绘制逻辑）；
 - 点击脚本引擎（`script_engine.inc`）作为插件内模块：`tick` 里轮询 / `submitTask` 投递执行。
 - 迁移完成后，`overlay.inc` / `script_engine.inc` 从顶层删除，`dllmain.cpp` 不再 `#include` 它们。
 
@@ -266,11 +304,11 @@ cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 xxx.cpp ^
   ├─ overlay.ini              # 旧单体路径的按钮配置；M1 后由插件自行管理
   └─ plugins\
        ├─ 000-empty\  {plugin.json, empty.dll}
-       ├─ 010-console\{plugin.json, log_console.dll}
+       ├─ console\{plugin.json, console.dll}
        └─ [M1] <NNN>-overlay\{plugin.json, overlay.dll}
 ```
 
-- `build.bat`：`ml64` 汇编 `stubs.asm` + `cl` 链接产出 `version.dll`。
+- `build.bat`：`ml64` 汇编 `stubs.asm` + `cl /I"%~dp0.."` 链接产出 `version.dll`（`/I..` 把仓库根加入包含路径，让 `dllmain.cpp` 的 `framework/...` 与 `sdk/...` 解析，因为它们不在 `version_proxy/` 下）。
 - 各插件 `build_plugin.bat`：编译并安装到对应 `plugins\<NNN-name>` 目录。
 - 回滚：删除 `%APPDATA%\TTVoice\version.dll` 即可（安装目录原本无此文件）。
 
@@ -278,7 +316,7 @@ cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 xxx.cpp ^
 
 ## 10. 已知边界 / 待办
 
-- [ ] **M1 render.inc 未写**，`addDraw`/`addRegion` 暂无人调用；overlay 仍是单体老路径。
+- [ ] **hook 未搬离 `overlay.inc`**：`render.inc` 派发层已写并被调用，但 Present/vtable/BGRA hook、`FLUTTERVIEW` 子类化仍在 `overlay.inc`；overlay 仍是单体老路径（灰度双轨）。
 - [ ] `overlay.inc`(1566 行) + `script_engine.inc`(832 行) 待迁移为 `plugin_overlay`。
 - [ ] `viewWindow()` 当前返回主窗口占位，待 M1 的 Present hook 记录真实子窗口后修正（见 `plugin_api.inc` 注释）。
 - [ ] 信任链 `sha256`（plugin.json 已容忍字段，M3 强制）。

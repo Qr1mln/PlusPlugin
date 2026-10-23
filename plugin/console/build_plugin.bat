@@ -1,7 +1,7 @@
 @echo off
 rem ===========================================================================
-rem build_plugin.bat - builds the log console plugin and installs it.
-rem Installed as 010-console so it loads after the empty sample.
+rem build_plugin.bat - builds the console plugin and installs it.
+rem Output is console.dll, installed into plugins\console.
 rem ===========================================================================
 setlocal
 cd /d "%~dp0"
@@ -24,18 +24,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if exist log_console.dll del /q log_console.dll
+if exist console.dll del /q console.dll
 
-cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 log_console.cpp ^
-   /link /OUT:log_console.dll /MACHINE:X64 user32.lib gdi32.lib
+rem /I"%~dp0.." puts plugin/ on the include path so the source's
+rem "../sdk/ttplugin.h" resolves to the repo-root sdk/ directory.
+cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 /I"%~dp0.." log_console.cpp ^
+   /link /OUT:console.dll /MACHINE:X64 d2d1.lib dwrite.lib
 if errorlevel 1 (
     echo [ERROR] build failed
     exit /b 1
 )
 
-set "DEST=%APPDATA%\TTVoice\plugins\010-console"
+set "DEST=%APPDATA%\TTVoice\plugins\console"
 if not exist "%DEST%" mkdir "%DEST%"
-copy /y log_console.dll "%DEST%\" >nul
+copy /y console.dll "%DEST%\" >nul
 copy /y plugin.json "%DEST%\" >nul
 
 echo.

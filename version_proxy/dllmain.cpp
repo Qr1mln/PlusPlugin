@@ -46,6 +46,25 @@ static const wchar_t* kLogFile = L"tt_version_proxy.log";
 static void (*g_logFanout)(const char* line) = nullptr;
 static const int kLogLineChars = 1024;
 
+// Resolve the log file path: next to our own DLL (version.dll) by default, so
+// it sits beside the deployed artifact (e.g. %APPDATA%\TTVoice\). Falls back to
+// %TEMP% when the module path cannot be resolved.
+static void LogFilePath(wchar_t* out, size_t cap) {
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&LogFilePath), &self);
+    if (self != nullptr && GetModuleFileNameW(self, out, (DWORD)cap) > 0) {
+        wchar_t* slash = wcsrchr(out, L'\\');
+        if (slash != nullptr) {
+            *(slash + 1) = L'\0';
+            if (wcscat_s(out, cap, kLogFile) == 0) return;
+        }
+    }
+    GetTempPathW((DWORD)cap, out);
+    wcscat_s(out, cap, kLogFile);
+}
+
 static void Log(const char* fmt, ...) {
     char line[kLogLineChars] = {};
 
@@ -54,12 +73,8 @@ static void Log(const char* fmt, ...) {
     vsnprintf_s(line, sizeof(line), _TRUNCATE, fmt, ap);
     va_end(ap);
 
-    wchar_t temp[MAX_PATH] = {};
-    DWORD n = GetTempPathW(MAX_PATH, temp);
-    if (n == 0 || n >= MAX_PATH) return;
-
     wchar_t path[MAX_PATH + 32] = {};
-    swprintf_s(path, L"%s%s", temp, kLogFile);
+    LogFilePath(path, sizeof(path) / sizeof(path[0]));
 
     FILE* fp = nullptr;
     if (_wfopen_s(&fp, path, L"a") != 0 || fp == nullptr) return;
@@ -101,13 +116,14 @@ static int ResolveRealDll() {
     return missing;
 }
 
-#include "overlay.inc"
-#include "framework/plugin_loader.inc"  // pulls plugin_api.inc and sdk/ttplugin.h
+#include "framework/plugin_api.inc"     // g_slots / entries / PluginState (guarded; also pulled by the loader)
+#include "framework/render.inc"         // M1 seam: plugins::RenderFrame / DispatchClick (needs plugin_api.inc)
+#include "overlay.inc"                  // old monolithic overlay; calls the render.inc seam (draw + click)
+#include "framework/plugin_loader.inc"  // lifecycle / control.txt (re-includes plugin_api.inc, no-op)
 
 namespace ov {
 static void LogFromOverlay(const char* text) {
-    Log("%s", text);
-    PushScreenLog(text);  // mirror onto the overlay when log_on_screen=1
+    Log("%s", text);   // file only: the log panel is the console plugin's window
 }
 }  // namespace ov
 

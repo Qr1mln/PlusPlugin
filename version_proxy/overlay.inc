@@ -22,6 +22,7 @@
 #include <tlhelp32.h>
 #include <winternl.h>
 #include <windowsx.h>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 
@@ -56,6 +57,20 @@ static WNDPROC g_origViewProc = nullptr;
 static volatile LONG g_hover = 0;
 static volatile LONG g_pressed = 0;
 static volatile LONG g_clicks = 0;
+
+// Plugin pointer capture: set while a plugin owns the drag, plus the last
+// logical position it saw, so CAPTURECHANGED can close the drag in place.
+// Window thread only.
+static bool  g_viewCapture = false;
+static float g_lastLx = 0.0f;
+static float g_lastLy = 0.0f;
+
+// Present counter. The overlay only paints inside the app's Present, so this is
+// the real "how often could a drag update be seen" number. One line per drag
+// reports it, which is how we tell a paint-starvation stall from input lag.
+static volatile LONG g_presents = 0;
+static ULONGLONG g_dragStartMs = 0;
+static LONG      g_dragStartFrames = 0;
 
 // Button geometry in logical (96 dpi) units; overridden by overlay.ini.
 // Defaults match the app's own top-bar pills as measured on a 150% display.
@@ -117,11 +132,6 @@ static ComPtr<ID2D1SolidColorBrush> g_brush;
 static ComPtr<IDWriteFactory>       g_dw;
 static ComPtr<IDWriteTextFormat>    g_textFmt;
 static ComPtr<IDWriteFontCollection1> g_fontColl;  // keeps the private font set alive
-
-// On-screen log: a second, left-aligned format and brush so mirroring the
-// log never fights the button's own text/colour state.
-static ComPtr<IDWriteTextFormat>      g_logFmt;
-static ComPtr<ID2D1SolidColorBrush>   g_logBrush;
 
 // Per-backbuffer cache (flip model).
 struct BufEntry {
@@ -344,210 +354,27 @@ static void InitTextFormat() {
 }
 
 // ---------------------------------------------------------------------------
-// On-screen log
+// Script status -> pill label
 //
-// Mirrors what goes into %TEMP%\tt_version_proxy.log onto the overlay, so click
-// results and gate hits can be watched without leaving the app. It is a tail -f
-// view: the panel is always there once something has been logged, every new
-// line is painted at the bottom and the oldest visible one scrolls out. There is
-// no fade-out any more (the old log_seconds knob is gone; a leftover line in an
-// old overlay.ini is simply ignored).
-// Everything is driven by overlay.ini:
-//   log_on_screen=1   mirror the log onto the overlay (0 = file only)
-//   log_lines=6       how many of the newest lines are painted (max 24)
-//   log_size=12       logical px
-// The block is pinned to the bottom-left corner; lines that look like failures
-// (fail / timeout / ignored / not seen) are painted amber.
-// Every mirrored line carries a [HH:MM:SS.mmm] prefix: a repeated click error is
-// byte-for-byte identical, so without the clock the panel reads as frozen even
-// though the ring keeps scrolling.
+// The overlay no longer draws a log panel: that lives in the console plugin's
+// own window now (plugin/console). All the framework keeps is the one bit the
+// button itself needs - "there is no usable script" - which switches the pill
+// text to no_script_text. Details go to the log file only.
 // ---------------------------------------------------------------------------
 
-static const int kScreenLogMax = 24;      // ring depth, also the display limit
-static const int kScreenLogLen = 200;
-static const int kStampLen = 16;          // "[00:00:00.000] " plus slack
-
-static wchar_t   g_screenLog[kScreenLogMax][kScreenLogLen];
-static int       g_screenLogCount = 0;
-static SRWLOCK   g_screenLogLock = SRWLOCK_INIT;
-
-static bool  g_logOnScreen = true;
-static int   g_logLines = 6;
-static float g_logSize = 12.0f;
-
-// Pinned line above the log mirror. Set by script_engine.inc.
-static wchar_t g_statusLine[kScreenLogLen] = {};
-
-// Same "[HH:MM:SS.mmm] " prefix as the log file, so the panel visibly advances.
-static void StampPrefix(wchar_t* dst, size_t dstCount, const wchar_t* body) {
-    SYSTEMTIME st = {};
-    GetLocalTime(&st);
-    if (swprintf_s(dst, dstCount, L"[%02u:%02u:%02u.%03u] %s",
-                   static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute),
-                   static_cast<unsigned>(st.wSecond), static_cast<unsigned>(st.wMilliseconds),
-                   body) > 0) {
-        return;
-    }
-    wcscpy_s(dst, dstCount, body);   // no stamp is better than no line
-}
-
-// Called from LogFromOverlay, which runs on every thread that logs.
-static void PushScreenLog(const char* text) {
-    if (!g_logOnScreen || !text || !text[0]) return;
-
-    // A line longer than the room left after the stamp is cut, never dropped.
-    // Manual cap: strncpy_s/_TRUNCATE would run the CRT invalid-parameter handler
-    // on overflow, and that would take the host process down with us.
-    char narrow[kScreenLogLen - kStampLen] = {};
-    size_t len = strlen(text);
-    if (len >= sizeof(narrow)) len = sizeof(narrow) - 1;
-    memcpy(narrow, text, len);
-    narrow[len] = 0;
-
-    wchar_t body[kScreenLogLen - kStampLen] = {};
-    if (MultiByteToWideChar(CP_UTF8, 0, narrow, -1, body, kScreenLogLen - kStampLen) <= 0) {
-        if (MultiByteToWideChar(CP_ACP, 0, narrow, -1, body, kScreenLogLen - kStampLen) <= 0) return;
-    }
-    body[kScreenLogLen - kStampLen - 1] = 0;
-    if (!body[0]) return;
-
-    wchar_t wide[kScreenLogLen] = {};
-    StampPrefix(wide, kScreenLogLen, body);
-
-    AcquireSRWLockExclusive(&g_screenLogLock);
-    if (g_screenLogCount >= kScreenLogMax) {
-        memmove(g_screenLog[0], g_screenLog[1],
-                sizeof(g_screenLog[0]) * (kScreenLogMax - 1));
-        g_screenLogCount = kScreenLogMax - 1;
-    }
-    wcscpy_s(g_screenLog[g_screenLogCount], wide);
-    ++g_screenLogCount;
-    ReleaseSRWLockExclusive(&g_screenLogLock);
-}
-
-// Pinned one-line state about the script engine, written by ScriptReload.
-//   0 = a script loaded fine and owns the button (line cleared)
-//   1 = no script file at all -> clicking the button does nothing
+// Script state -> pill label, written by ScriptReload in script_engine.inc.
+//   0 = a script loaded fine and owns the button
+//   1 = no script file at all -> the pill reads no_script_text
 //   2 = a script file was picked but rejected (bad json / empty events)
-// Only code 1 touches the pill label: "no script file" is the one state that
-// is worth showing on the button itself, every other problem stays in the log.
+// Only code 1 touches the pill label; the reason for a rejected script goes to
+// the log file, which the console plugin renders in its own window.
 static void SetScriptStatus(int code, const char* reason) {
-    wchar_t line[kScreenLogLen] = {};
-    // ", clicking the button does nothing" (there is no fallback chain any more)
-    const wchar_t* kTail = L"\xFF0C\x70B9\x6309\x94AE\x4E0D\x4F1A\x6709\x52A8\x4F5C";
-    if (code == 1) {
-        wcscpy_s(line, L"\x6CA1\x6709\x6FC0\x6D3B\x7684\x811A\x672C");
-        wcscat_s(line, kTail);
-    } else if (code == 2) {
-        wchar_t why[96] = {};
-        if (reason && reason[0]) {
-            if (MultiByteToWideChar(CP_UTF8, 0, reason, -1, why, 96) <= 0) why[0] = 0;
-        }
-        // "script unusable (reason), clicking the button does nothing"
-        wcscpy_s(line, L"\x811A\x672C\x4E0D\x53EF\x7528");
-        if (why[0]) {
-            wchar_t tmp[kScreenLogLen] = {};
-            swprintf_s(tmp, L"\xFF08%s\xFF09", why);
-            wcscat_s(line, tmp);
-        }
-        wcscat_s(line, kTail);
+    if (code == 2 && reason != nullptr && reason[0] != 0) {
+        char line[128] = {};
+        sprintf_s(line, "script: unusable (%s)", reason);
+        LogFromOverlay(line);
     }
-
-    AcquireSRWLockExclusive(&g_screenLogLock);
-    g_statusLine[0] = 0;
-    // The pinned line is a state, not an event, so it does not scroll - the
-    // stamp on it therefore means "when this state last changed".
-    if (line[0]) StampPrefix(g_statusLine, kScreenLogLen, line);
-    ReleaseSRWLockExclusive(&g_screenLogLock);
     InterlockedExchange(&g_noScriptFile, (code == 1) ? 1 : 0);
-}
-
-static bool IsWarnLine(const wchar_t* s) {
-    static const wchar_t* kMarks[] = {L"fail", L"timeout", L"busy", L"ignored",
-                                      L"skipped", L"WARN", L"not seen", L"no json"};
-    for (int i = 0; i < static_cast<int>(sizeof(kMarks) / sizeof(kMarks[0])); ++i) {
-        if (wcsstr(s, kMarks[i])) return true;
-    }
-    return false;
-}
-
-// Same face as the button, smaller, left/top aligned, single line.
-static bool CreateLogFormat(IDWriteFontCollection* coll) {
-    if (!g_dw) return false;
-
-    const float size = ((g_logSize > 6.0f) ? g_logSize : 12.0f) * g_scale;
-    ComPtr<IDWriteTextFormat> fmt;
-    if (FAILED(g_dw->CreateTextFormat(g_fontFamily, coll,
-                                      DWRITE_FONT_WEIGHT_NORMAL,
-                                      DWRITE_FONT_STYLE_NORMAL,
-                                      DWRITE_FONT_STRETCH_NORMAL,
-                                      size, L"zh-cn", fmt.GetAddressOf()))) {
-        return false;
-    }
-    fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-    fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-    fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    g_logFmt = fmt;
-    return true;
-}
-
-static void InitLogFormat() {
-    if (!g_dw || !g_logOnScreen) return;
-    if (g_fontColl && CreateLogFormat(g_fontColl.Get())) return;
-    if (CreateLogFormat(nullptr)) return;
-    g_logOnScreen = false;
-    LogFromOverlay("log: no text format for the on-screen log");
-}
-
-static void DrawScreenLog(float width, float height) {
-    if (!g_d2dCtx || !g_logFmt || !g_logBrush) return;
-    if (!g_logOnScreen) return;
-
-    // Snapshot: the pinned status line first, then the newest ring lines. The
-    // newest one always ends up at the bottom of the panel, so the view reads
-    // like tail -f: a new message scrolls the oldest visible line out.
-    wchar_t lines[kScreenLogMax + 1][kScreenLogLen];
-    int count = 0;
-    AcquireSRWLockShared(&g_screenLogLock);
-    const int pinned = g_statusLine[0] ? 1 : 0;
-    if (pinned) wcscpy_s(lines[count++], g_statusLine);
-    const int want = (g_logLines > kScreenLogMax) ? kScreenLogMax : g_logLines;
-    if (want > 0) {
-        const int start = (g_screenLogCount > want) ? (g_screenLogCount - want) : 0;
-        for (int i = start; i < g_screenLogCount; ++i) {
-            wcscpy_s(lines[count++], g_screenLog[i]);
-        }
-    }
-    ReleaseSRWLockShared(&g_screenLogLock);
-    if (count <= 0) return;
-
-    const float pad = 7.0f * g_scale;
-    const float lineH = (g_logSize + 5.0f) * g_scale;
-    const float boxH = lineH * static_cast<float>(count) + pad * 2.0f;
-    const float margin = 12.0f * g_scale;
-    float boxW = width * 0.55f;
-    const float maxW = 980.0f * g_scale;
-    if (boxW > maxW) boxW = maxW;
-    if (boxW > width - margin * 2.0f) boxW = width - margin * 2.0f;
-    if (boxW < 120.0f * g_scale) return;
-
-    const D2D1_RECT_F box = D2D1::RectF(margin, height - margin - boxH,
-                                       margin + boxW, height - margin);
-    const float radius = 5.0f * g_scale;
-    g_logBrush->SetColor(D2D1::ColorF(0.04f, 0.05f, 0.07f, 0.78f));
-    g_d2dCtx->FillRoundedRectangle(D2D1::RoundedRect(box, radius, radius),
-                                   g_logBrush.Get());
-
-    const D2D1_COLOR_F normalColor = D2D1::ColorF(0.88f, 0.91f, 0.95f, 1.0f);
-    const D2D1_COLOR_F warnColor = D2D1::ColorF(1.00f, 0.72f, 0.28f, 1.0f);
-
-    for (int i = 0; i < count; ++i) {
-        const float top = box.top + pad + lineH * static_cast<float>(i);
-        const D2D1_RECT_F lr = D2D1::RectF(box.left + pad, top, box.right - pad, top + lineH);
-        g_logBrush->SetColor((i < pinned || IsWarnLine(lines[i])) ? warnColor : normalColor);
-        g_d2dCtx->DrawText(lines[i], static_cast<UINT32>(wcslen(lines[i])),
-                           g_logFmt.Get(), &lr, g_logBrush.Get());
-    }
 }
 
 static void InitD2D() {
@@ -594,15 +421,9 @@ static void InitD2D() {
         return;
     }
 
-    if (FAILED(g_d2dCtx->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1),
-                                               g_logBrush.GetAddressOf()))) {
-        g_logBrush.Reset();  // optional feature: the button still draws
-    }
-
     if (SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                                       reinterpret_cast<IUnknown**>(g_dw.GetAddressOf())))) {
         InitTextFormat();
-        InitLogFormat();
     }
 }
 
@@ -715,7 +536,16 @@ static bool DrawD2D(IDXGISwapChain* sc) {
                            g_textFmt.Get(), &r, g_brush.Get());
     }
 
-    DrawScreenLog(static_cast<float>(e->w), static_cast<float>(e->h));
+    // M1 seam: dispatch plugin draws on the shared D2D context. Plugins draw in
+    // logical pixels, so scale the transform and pass logical width/height; the
+    // overlay itself keeps only the pill now - the log panel is the console
+    // plugin's own window (gray release).
+    if (g_scale > 0.0f) {
+        g_d2dCtx->SetTransform(D2D1::Matrix3x2F::Scale(g_scale, g_scale));
+        plugins::RenderFrame(g_d2dCtx.Get(), static_cast<float>(e->w) / g_scale,
+                             static_cast<float>(e->h) / g_scale);
+        g_d2dCtx->SetTransform(D2D1::Matrix3x2F::Identity());
+    }
 
     if (FAILED(g_d2dCtx->EndDraw())) {
         ResetTargets();
@@ -923,8 +753,9 @@ static void OnButtonClick() {
     (void)ScriptTryRun(true);
 }
 
-// Runs on the window's own thread. Only clicks inside the button rect are
-// consumed; everything else is forwarded to Flutter untouched.
+// Runs on the window's own thread. Consumed here: the overlay pill, plugin
+// regions (clicks) and plugin pointer captures (hover/drag). Everything else is
+// forwarded to Flutter untouched.
 static LRESULT CALLBACK ViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_MOUSEMOVE: {
@@ -939,6 +770,20 @@ static LRESULT CALLBACK ViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrackMouseEvent(&tme);
         }
         if (inside != g_hover) g_hover = inside;
+        if (g_scale > 0.0f) {
+            const float lx = static_cast<float>(x) / g_scale;
+            const float ly = static_cast<float>(y) / g_scale;
+            g_lastLx = lx;
+            g_lastLy = ly;
+            // Drag in progress: the plugin consumes the move, but the app still
+            // gets it. Flutter only paints when it schedules a frame, and the
+            // overlay can only repaint inside Present, so feeding motion back
+            // is what keeps the panel tracking the cursor. DOWN/UP stay
+            // swallowed, so the app never starts a gesture of its own.
+            if (plugins::DispatchPointer(TTPLUGIN_POINTER_MOVE, lx, ly)) {
+                break;
+            }
+        }
         break;
     }
     case WM_LBUTTONDOWN: {
@@ -948,6 +793,21 @@ static LRESULT CALLBACK ViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_pressed = 1;
             return 0;
         }
+        if (g_scale > 0.0f) {
+            const float lx = static_cast<float>(x) / g_scale;
+            const float ly = static_cast<float>(y) / g_scale;
+            g_lastLx = lx;
+            g_lastLy = ly;
+            if (plugins::DispatchPointer(TTPLUGIN_POINTER_DOWN, lx, ly)) {
+                // The plugin owns the pointer until UP; capture keeps MOVE
+                // coming while the cursor leaves the window.
+                SetCapture(hwnd);
+                g_viewCapture = true;
+                g_dragStartMs = GetTickCount64();
+                g_dragStartFrames = g_presents;
+                return 0;
+            }
+        }
         break;
     }
     case WM_LBUTTONUP: {
@@ -955,16 +815,55 @@ static LRESULT CALLBACK ViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         const int y = GET_Y_LPARAM(lp);
         const LONG was = g_pressed;
         g_pressed = 0;
-        if (was) {
-            if (HitTestButton(x, y)) {
-                InterlockedIncrement(&g_clicks);
-                LogFromOverlay("overlay: button clicked");
-                OnButtonClick();
-            }
+        if (was && HitTestButton(x, y)) {
+            InterlockedIncrement(&g_clicks);
+            LogFromOverlay("overlay: button clicked");
+            OnButtonClick();
             return 0;
         }
+        if (g_scale > 0.0f) {
+            const float lx = static_cast<float>(x) / g_scale;
+            const float ly = static_cast<float>(y) / g_scale;
+            g_lastLx = lx;
+            g_lastLy = ly;
+            // Release order matters: dispatch UP first (that clears the plugin
+            // capture), then hand the mouse back so CAPTURECHANGED sees no drag.
+            if (plugins::DispatchPointer(TTPLUGIN_POINTER_UP, lx, ly)) {
+                if (g_viewCapture) {
+                    g_viewCapture = false;
+                    ReleaseCapture();
+                }
+                // Diagnostics: how many overlay frames the drag could actually
+                // be painted on. A long drag with 0-2 frames means the panel is
+                // waiting for the app to present, not for the mouse.
+                char line[160] = {};
+                _snprintf_s(line, sizeof(line), _TRUNCATE,
+                            "overlay: drag %llu ms, %ld overlay frame(s)",
+                            static_cast<unsigned long long>(GetTickCount64() - g_dragStartMs),
+                            g_presents - g_dragStartFrames);
+                LogFromOverlay(line);
+                return 0;
+            }
+        }
+        // M1 seam: clicks the overlay pill did not take are offered to plugin
+        // regions (logical px). A region that claims the point consumes it;
+        // otherwise the event keeps flowing to Flutter unchanged.
+        if (g_scale > 0.0f &&
+            plugins::DispatchClick(static_cast<float>(x) / g_scale,
+                                   static_cast<float>(y) / g_scale, 0)) {
+            return 0;
+        }
+        if (was) return 0;  // pressed in the pill, released outside: swallow as before
         break;
     }
+    case WM_CAPTURECHANGED:
+        if (g_viewCapture) {
+            g_viewCapture = false;
+            // Alt-tab or another window grabbed the mouse mid drag: close the
+            // plugin's drag at the last known point instead of leaving it latched.
+            plugins::CancelPointerCapture(g_lastLx, g_lastLy);
+        }
+        break;
     case WM_MOUSELEAVE:
         g_hover = 0;
         g_pressed = 0;
@@ -1037,6 +936,7 @@ static void OnPresent(IDXGISwapChain* sc) {
 
     HWND view = nullptr;
     if (!IsTargetSwapChain(sc, &view)) return;
+    InterlockedIncrement(&g_presents);
     if (g_hits++ == 0) LogFromOverlay("present hook hit");
     if (view) EnsureViewSubclass(view);
     Draw(sc);
@@ -1422,18 +1322,7 @@ static void LoadConfig() {
                 "; does nothing and the label reads no_script_text.\r\n"
                 "script=\r\n"
                 "; gate_poll_ms = visual gate capture interval (ms, min 30)\r\n"
-                "gate_poll_ms=120\r\n"
-                "; --- on-screen log (tail -f panel, mirror of the log file) ---\r\n"
-                "; log_on_screen 1 = draw the newest lines on the overlay (0 = file only)\r\n"
-                "; log_lines    how many lines are painted (max 24)\r\n"
-                ";              0 = no mirrored lines, the pinned status line still shows\r\n"
-                "; log_size     logical px\r\n"
-                "; The panel never fades: a new line scrolls the oldest visible\r\n"
-                "; one out of the window, like tail -f. Each line is stamped\r\n"
-                "; with [HH:MM:SS.mmm] so repeated messages still move.\r\n"
-                "log_on_screen=1\r\n"
-                "log_lines=6\r\n"
-                "log_size=12\r\n";
+                "gate_poll_ms=120\r\n";
             fwrite(tmpl, 1, strlen(tmpl), fp);
             fclose(fp);
         }
@@ -1444,13 +1333,6 @@ static void LoadConfig() {
     const size_t got = fread(buf, 1, sizeof(buf) - 1, fp);
     fclose(fp);
     buf[got] = 0;
-
-    // Probe the raw text BEFORE parsing: the loop below overwrites every '='
-    // with a NUL, so a later strstr for "log_on_screen=" always failed and the
-    // block was appended again on every single start (the ini filled up with
-    // duplicate sections).
-    const bool hasLogKeys = (strstr(buf, "log_on_screen=") != nullptr);
-    const bool hasFadeKey = (strstr(buf, "log_seconds") != nullptr);
 
     char* next = nullptr;
     for (char* line = strtok_s(buf, "\r\n", &next); line != nullptr;
@@ -1501,42 +1383,9 @@ static void LoadConfig() {
             g_gatePollMs = (n < 30) ? 30 : n;   // below 30 the capture costs dominate
         } else if (_stricmp(key, "script") == 0) {
             Utf8ToWide(val, g_scriptName, 64);
-        } else if (_stricmp(key, "log_on_screen") == 0) {
-            g_logOnScreen = (atoi(val) != 0);
-        } else if (_stricmp(key, "log_lines") == 0) {
-            const int n = atoi(val);
-            g_logLines = (n < 0) ? 0 : ((n > kScreenLogMax) ? kScreenLogMax : n);
-        } else if (_stricmp(key, "log_size") == 0) {
-            const float v = static_cast<float>(atof(val));
-            if (v > 6.0f && v < 40.0f) g_logSize = v;
         }
-    }
-
-    // log_seconds used to fade the panel out after a while. The panel is a
-    // permanent tail -f view now, so the key is gone and an old ini that still
-    // has it just ignores the line - say so once so nobody hunts for it.
-    if (hasFadeKey) {
-        LogFromOverlay("config: log_seconds is gone, the log panel stays on screen");
-    }
-
-    // Ini files written by older builds have no log keys; append them (with the
-    // same values as the defaults) so the knobs are discoverable in the file.
-    if (!hasLogKeys) {
-        FILE* ap = nullptr;
-        if (_wfopen_s(&ap, path, L"ab") == 0 && ap != nullptr) {
-            const char* extra =
-                "\r\n"
-                "; --- on-screen log (tail -f panel, mirror of the log file) ---\r\n"
-                "; log_on_screen 0 = file only; log_lines 0 = no mirrored lines\r\n"
-                "; the panel never fades; log_size = logical px\r\n"
-                "; each line is prefixed with [HH:MM:SS.mmm] like the log file\r\n"
-                "log_on_screen=1\r\n"
-                "log_lines=6\r\n"
-                "log_size=12\r\n";
-            fwrite(extra, 1, strlen(extra), ap);
-            fclose(ap);
-            LogFromOverlay("config: appended the on-screen log keys to overlay.ini");
-        }
+        // log_on_screen / log_lines / log_size / log_seconds are gone: the log
+        // panel is the console plugin's own window now. Old keys are ignored.
     }
 }
 

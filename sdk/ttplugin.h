@@ -65,6 +65,21 @@ typedef void (__cdecl *TTPluginTaskFn)(void* user);
  * arbitrary framework thread and must not call TTPluginHost::log. */
 typedef void (__cdecl *TTPluginLogFn)(const char* line, void* user);
 
+/* Pointer event kinds, see TTPluginPointerFn. */
+#define TTPLUGIN_POINTER_MOVE 0
+#define TTPLUGIN_POINTER_DOWN 1
+#define TTPLUGIN_POINTER_UP   2
+
+/* Pointer callback. Coordinates are logical pixels, same space as regions and
+ * draws; runs on the window thread. Return non-zero to consume the event so it
+ * is not forwarded to the app.
+ *
+ * Consuming a DOWN captures the pointer for that plugin: the framework calls
+ * SetCapture on the view window and keeps routing MOVE/UP to the same plugin
+ * until UP arrives, even when the cursor leaves the window. That is what makes
+ * dragging a plugin owned panel possible without the plugin touching input. */
+typedef int (__cdecl *TTPluginPointerFn)(int kind, float x, float y, void* user);
+
 /* ---------------------------------------------------------------------------
  * TTPluginHost - the capability table handed to a plugin in init().
  *
@@ -128,6 +143,18 @@ typedef struct TTPluginHost {
      * of another plugin's call. A UI plugin must marshal the line to its own
      * window thread. fn must not call TTPluginHost::log. */
     int         (__cdecl *addLogSink)(TTPluginLogFn fn, void* user);
+
+    /* Book the pointer sink used for hover / drag. One per plugin; a second
+     * call returns TTPLUGIN_ERR_FULL. The framework owns the hit test, the
+     * capture and the release, so an unload can never leave a drag latched.
+     *
+     * A sink that consumes DOWN receives the following MOVE/UP even when the
+     * cursor leaves the view window; MOVE events reach every active sink until
+     * one of them consumes them, so hover reporting is cheap for the others.
+     *
+     * Appended after addLogSink: check host->structSize before using it against
+     * an older framework build. */
+    int         (__cdecl *addPointerSink)(TTPluginPointerFn fn, void* user);
 } TTPluginHost;
 
 /* ---------------------------------------------------------------------------

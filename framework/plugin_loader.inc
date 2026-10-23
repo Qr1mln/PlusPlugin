@@ -36,6 +36,14 @@ static const char* const    kManifestName  = "plugin.json";
 static const wchar_t       kDisabledPrefix = L'_';
 static const int            kControlLineChars = 128;
 
+// Hot reload cadence. The quiet period is what keeps a half written dll (a
+// deploy copies it in chunks) from being mapped: a change only counts once the
+// file has stopped moving for this long.
+static const int kWatchPollMs     = 500;
+static const int kReloadSettleMs  = 400;
+static const int kReloadRetryMs   = 2000;
+static const int kReloadMaxRetries = 3;
+
 using TTPluginGetDescFn = const TTPluginDesc* (__cdecl *)(void);
 
 // Manifest text reuse. Loader thread only, so a single buffer is enough.
@@ -599,6 +607,215 @@ static void HandleControlLine(const char* line) {
     Log("plugin: control command '%s' ignored", command);
 }
 
+// ---------------------------------------------------------------------------
+// Hot reload: watch plugin.json (enabled flag + write time) and the plugin dll.
+//
+// A rebuild or a manifest edit should not need a restart, but a deploy copies
+// files in chunks and mapping a half written dll is fatal. Every observed change
+// therefore has to stay quiet for kReloadSettleMs before it is acted on; until
+// then the newest stamps replace the pending ones and the timer restarts.
+//
+// Rules:
+//   json: enabled=false -> unload and stay kDisabled
+//   json: enabled=true  -> (re)load, so saving the json is the reload trigger
+//   dll newer + loaded  -> unload + load
+//   dll newer + unloaded-> ignored, nothing to restart
+// A failed load retries a few times, because the previous instance can still
+// hold the file for a moment after FreeLibrary.
+// ---------------------------------------------------------------------------
+
+static bool FileStamp(const wchar_t* path, FILETIME* time, DWORD* size) {
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (path == nullptr || !GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) {
+        return false;
+    }
+    if (time != nullptr) *time = fad.ftLastWriteTime;
+    if (size != nullptr) *size = fad.nFileSizeLow;
+    return true;
+}
+
+static bool SameStamp(const FILETIME& a, DWORD as, const FILETIME& b, DWORD bs) {
+    return a.dwLowDateTime == b.dwLowDateTime &&
+           a.dwHighDateTime == b.dwHighDateTime && as == bs;
+}
+
+static void SlotManifestPath(const PluginSlot& slot, wchar_t* out, size_t cap) {
+    swprintf_s(out, cap, L"%s\\%s", slot.dir, kManifestNameW);
+}
+
+static void SlotDllPath(const PluginSlot& slot, wchar_t* out, size_t cap) {
+    wchar_t leaf[kPathChars] = {};
+    Utf8ToWide(slot.dllName, leaf, kPathChars);
+    swprintf_s(out, cap, L"%s\\%s", slot.dir, leaf);
+}
+
+// Reads only the fields a reload decides on and never touches slot.state: the
+// slot may still be kActive while we look at the new manifest.
+// Snapshot the file stamps the slot should be compared against. Called once for
+// the baseline and again after a reload, because the reload may have switched
+// the manifest's dll name (that would otherwise trigger a second reload).
+static void RecordStamps(PluginSlot& slot) {
+    wchar_t jsonPath[kPathChars] = {};
+    wchar_t dllPath[kPathChars] = {};
+    SlotManifestPath(slot, jsonPath, kPathChars);
+    SlotDllPath(slot, dllPath, kPathChars);
+    FileStamp(jsonPath, &slot.jsonTime, &slot.jsonSize);
+    FileStamp(dllPath, &slot.dllTime, &slot.dllSize);
+    slot.pendAt = 0;
+}
+
+static void ReadManifestFlags(const PluginSlot& slot, bool* enabled, int* priority,
+                              char* dllName, int dllCap) {
+    wchar_t manifest[kPathChars] = {};
+    SlotManifestPath(slot, manifest, kPathChars);
+    if (!ReadTextFile(manifest, s_manifestBuf, kManifestMaxBytes, nullptr)) {
+        return;   // no manifest any more: keep the caller's current defaults
+    }
+    *enabled = JsonReadBool(s_manifestBuf, "enabled", true);
+    *priority = JsonReadInt(s_manifestBuf, "priority", *priority);
+    char text[kPathChars] = {};
+    if (JsonReadString(s_manifestBuf, "dll", text, static_cast<int>(sizeof(text)))) {
+        strncpy_s(dllName, static_cast<size_t>(dllCap), text, _TRUNCATE);
+    }
+}
+
+static void ReloadSlot(int index, bool jsonChanged) {
+    PluginSlot& slot = g_slots[index];
+    const bool wasActive = (slot.state == PluginState::kActive);
+
+    if (jsonChanged) {
+        bool enabled = true;
+        int priority = slot.priority;
+        char dllName[kPathChars] = {};
+        strcpy_s(dllName, slot.dllName);
+        ReadManifestFlags(slot, &enabled, &priority, dllName,
+                          static_cast<int>(sizeof(dllName)));
+        slot.priority = priority;
+
+        if (!enabled) {
+            if (wasActive) UnloadPlugin(index);
+            if (slot.state != PluginState::kQuarantined) {
+                slot.state = PluginState::kDisabled;
+                Log("plugin: %s disabled by plugin.json", slot.dirUtf8);
+            }
+            return;
+        }
+        if (_stricmp(dllName, slot.dllName) != 0) {
+            strcpy_s(slot.dllName, dllName);
+            Log("plugin: %s manifest points at %s", slot.dirUtf8, slot.dllName);
+        }
+        if (wasActive) {
+            UnloadPlugin(index);
+        } else if (slot.state == PluginState::kRejected) {
+            slot.state = PluginState::kDisabled;   // let the load below retry it
+        }
+    } else if (!wasActive) {
+        return;   // dll touched while it was not loaded: nothing to restart
+    } else {
+        UnloadPlugin(index);
+    }
+
+    if (slot.state == PluginState::kQuarantined) {
+        Log("plugin: %s stays quarantined, not reloading it", slot.dirUtf8);
+        return;
+    }
+
+    LoadPlugin(index);
+    if (slot.state == PluginState::kRejected) {
+        slot.wantLoad = true;
+        slot.retryAt = GetTickCount64() + static_cast<ULONGLONG>(kReloadRetryMs);
+    }
+}
+
+// Polled from the loader thread.
+static void WatchPlugins() {
+    const ULONGLONG now = GetTickCount64();
+    for (int i = 0; i < g_slotCount; ++i) {
+        PluginSlot& slot = g_slots[i];
+        if (slot.state == PluginState::kLoading ||
+            slot.state == PluginState::kDraining ||
+            slot.state == PluginState::kQuarantined) {
+            continue;   // already moving, or never callable again
+        }
+
+        if (slot.wantLoad) {
+            if (now < slot.retryAt) continue;
+            slot.wantLoad = false;
+            slot.state = PluginState::kDisabled;
+            LoadPlugin(i);
+            if (slot.state == PluginState::kRejected) {
+                ++slot.retries;
+                if (slot.retries < kReloadMaxRetries) {
+                    slot.wantLoad = true;
+                    slot.retryAt = now + static_cast<ULONGLONG>(kReloadRetryMs);
+                    Log("plugin: %s reload retry %d/%d", slot.dirUtf8, slot.retries,
+                        kReloadMaxRetries);
+                } else {
+                    Log("plugin: %s reload gave up after %d tries", slot.dirUtf8,
+                        slot.retries);
+                    slot.retries = 0;
+                }
+            } else if (slot.state == PluginState::kActive) {
+                slot.retries = 0;
+            }
+            continue;
+        }
+
+        wchar_t jsonPath[kPathChars] = {};
+        wchar_t dllPath[kPathChars] = {};
+        SlotManifestPath(slot, jsonPath, kPathChars);
+        SlotDllPath(slot, dllPath, kPathChars);
+
+        FILETIME jt = {};
+        DWORD js = 0;
+        FILETIME dt = {};
+        DWORD ds = 0;
+        const bool hasJson = FileStamp(jsonPath, &jt, &js);
+        const bool hasDll = FileStamp(dllPath, &dt, &ds);
+
+        if (!slot.stampsValid) {
+            RecordStamps(slot);
+            slot.stampsValid = true;
+            continue;   // baseline only, never a reload on the first look
+        }
+
+        const bool jsonChanged = hasJson && !SameStamp(jt, js, slot.jsonTime, slot.jsonSize);
+        const bool dllChanged = hasDll && !SameStamp(dt, ds, slot.dllTime, slot.dllSize);
+        if (!jsonChanged && !dllChanged) {
+            slot.pendAt = 0;
+            continue;
+        }
+
+        const bool stillMoving = slot.pendAt == 0 ||
+            !SameStamp(jt, js, slot.pendJsonTime, slot.pendJsonSize) ||
+            !SameStamp(dt, ds, slot.pendDllTime, slot.pendDllSize);
+        if (stillMoving) {
+            slot.pendJsonTime = jt;
+            slot.pendJsonSize = js;
+            slot.pendDllTime = dt;
+            slot.pendDllSize = ds;
+            slot.pendAt = now;
+            continue;
+        }
+        if (now - slot.pendAt < static_cast<ULONGLONG>(kReloadSettleMs)) {
+            continue;   // quiet period not over yet
+        }
+
+        slot.pendAt = 0;
+        slot.pendJsonTime = jt;
+        slot.pendJsonSize = js;
+        slot.pendDllTime = dt;
+        slot.pendDllSize = ds;
+        Log("plugin: %s changed on disk (%s%s), hot reloading", slot.dirUtf8,
+            jsonChanged ? "json" : "",
+            dllChanged ? (jsonChanged ? "+dll" : "dll") : "");
+        ReloadSlot(i, jsonChanged);
+        // The reload may have changed the dll name, so baseline against the
+        // paths the slot uses now instead of the ones we just compared.
+        RecordStamps(slot);
+    }
+}
+
 static void ProcessControlFile() {
     wchar_t root[kPathChars] = {};
     if (!GetPluginsRoot(root, kPathChars)) {
@@ -635,15 +852,20 @@ static void ProcessControlFile() {
 // Loader thread.
 // ---------------------------------------------------------------------------
 static DWORD WINAPI PluginControlThread(LPVOID) {
-    Log("plugin: loader thread up, tick=%dms control=%dms drain=%dms",
-        kTickIntervalMs, kControlPollMs, kDrainTimeoutMs);
+    Log("plugin: loader thread up, tick=%dms control=%dms watch=%dms drain=%dms",
+        kTickIntervalMs, kControlPollMs, kWatchPollMs, kDrainTimeoutMs);
 
     ULONGLONG lastControl = 0;
+    ULONGLONG lastWatch = 0;
     for (;;) {
         RunPendingTicks();
         RunPendingTasks();
 
         const ULONGLONG now = GetTickCount64();
+        if (now - lastWatch >= static_cast<ULONGLONG>(kWatchPollMs)) {
+            lastWatch = now;
+            WatchPlugins();
+        }
         if (now - lastControl >= static_cast<ULONGLONG>(kControlPollMs)) {
             lastControl = now;
             ProcessControlFile();

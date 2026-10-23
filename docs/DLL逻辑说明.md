@@ -1,7 +1,7 @@
 # TTVoice DLL 当前逻辑说明
 
 > 本文是**现状描述**（代码读出来的事实），不是待办计划。开发/里程碑/踩坑见 `改造开发-进度与交接.md`。
-> 对应源码：`native/version_proxy/`（工作区）= `C:\native\version_proxy\`（VM 编译机）。
+> 对应源码：`../version_proxy/`（工作区）= `C:\native\version_proxy\`（VM 编译机）。
 
 ---
 
@@ -215,7 +215,7 @@ poll  = gate_poll_ms < 30 ? 120 : 值        （ini 键，默认 120）
 
 抓帧与判色：`CaptureView` 用 `PrintWindow(view, dc, PW_RENDERFULLCONTENT)` 打到一个**顶朝下 32bpp DIB**（尺寸没变就复用），`CountCreamBand` 在目标点周围 **±200 × ±40 物理 px** 的带里数 `R>228 && G>210 && B<228 && R-B>22` 的像素，并返回命中质心（日志里那个 `at 2359,131` 就是它，用来区分「没出现」和「位置变了」）。连续 3 次是为了滤掉淡入/滑入的中间帧。
 
-旧的 `ClickChainThread` 是「先判断再睡」，`WaitForCreamAt` 是「先睡再判断」——编辑器 `tools/script_editor.py` 复刻的是后者（含日志字样），见 §10 的 parity 表。
+旧的 `ClickChainThread` 是「先判断再睡」，`WaitForCreamAt` 是「先睡再判断」——编辑器 `../script_editor.py` 复刻的是后者（含日志字样），见 §10 的 parity 表。
 
 ---
 
@@ -299,7 +299,7 @@ for round in 1..loop:
 两条输出，同一个入口 `ov::LogFromOverlay`（[dllmain.cpp L85](file:///D:/AIProjects/TTVoice/native/version_proxy/dllmain.cpp#L85)）：
 
 ```
-LogFromOverlay(text) → Log()        写 %TEMP%\tt_version_proxy.log，前缀 [HH:MM:SS.mmm][pid][tid]
+LogFromOverlay(text) → Log()        写 tt_version_proxy.log（默认 version.dll 同目录 %APPDATA%\TTVoice\，回退 %TEMP%），前缀 [HH:MM:SS.mmm][pid][tid]
                    → PushScreenLog() 进界面环形缓冲（自己拼 [HH:MM:SS.mmm] 前缀，见 §9）
 ```
 
@@ -349,7 +349,7 @@ LogFromOverlay(text) → Log()        写 %TEMP%\tt_version_proxy.log，前缀 [
 
 ### parity 常量（改 DLL 就得改编辑器）
 
-`tools/script_editor.py` 顶部有一组带「改一边必须改另一边」注释的常量，与 DLL 严格对应：
+`../script_editor.py` 顶部有一组带「改一边必须改另一边」注释的常量，与 DLL 严格对应：
 
 | 编辑器 | DLL 位置 | 值 |
 |---|---|---|
@@ -396,7 +396,7 @@ copy /y "C:\native\version_proxy\version.dll" "%APPDATA%\TTVoice\version.dll"
 start "" "%APPDATA%\TTVoice\TTVoice.exe"
 
 :: 看日志
-type "%TEMP%\tt_version_proxy.log"
+type "%APPDATA%\TTVoice\tt_version_proxy.log"   REM 默认 version.dll 同目录；回退则在 %TEMP%
 ```
 
 **回滚**：删 `%APPDATA%\TTVoice\version.dll`。安装目录本来没有这个文件，删掉即恢复原样。
@@ -407,9 +407,9 @@ type "%TEMP%\tt_version_proxy.log"
 |---|---|
 | `%APPDATA%\TTVoice\version.dll` | 部署产物 |
 | `%APPDATA%\TTVoice\overlay.ini` | 首次运行由 `LoadConfig` 生成的模板；老 ini 缺 `log_*` 键时追加一次（修好 `=` 被改 NUL 的探测 bug 后不再每次启动都追加） |
-| `%APPDATA%\TTVoice\scripts\<名称>.json` | `tools/script_editor.py` 保存 |
+| `%APPDATA%\TTVoice\scripts\<名称>.json` | `../script_editor.py` 保存 |
 | `%APPDATA%\TTVoice\scripts\active.txt` | 编辑器保存时写，DLL 按它选脚本 |
-| `%TEMP%\tt_version_proxy.log` | DLL 日志 |
+| `%APPDATA%\TTVoice\tt_version_proxy.log` | DLL 日志（默认 version.dll 同目录；模块路径取不到时回退 `%TEMP%\tt_version_proxy.log`） |
 | `%TEMP%\ttvoice_probe_line<N>.bmp` | 编辑器「门控检查」存的抓帧（DLL 不产生） |
 
 ---

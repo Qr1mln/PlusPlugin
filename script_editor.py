@@ -116,7 +116,7 @@ MAX_TEXT = 255            # kScriptText-1：更长的 text 会被 DLL 截断
 MAX_LOOP = 99             # loop 上限
 
 # DLL 的日志文件（LogFromOverlay 写）与 ini（script= 会覆盖 active.txt）
-DLL_LOG = os.path.join(os.environ.get("TEMP", "."), "tt_version_proxy.log")
+DLL_LOG = os.path.join(os.environ.get("TEMP", "tools"), "tt_version_proxy.log")
 OVERLAY_INI = os.path.join(os.environ.get("APPDATA", ""), "TTVoice", "overlay.ini")
 
 # 与 overlay.inc IsWarnLine 同一批关键字：命中的日志行画琥珀色
@@ -1396,7 +1396,7 @@ class App:
         self.msg_queue.put("probe: 行%d 物理 %d,%d need=%dpx（不发任何点击）"
                            % (index, px, py, need))
         hit = self._gate_wait(cap, px, py, need, int(ev.get("wait_max_ms") or 0))
-        path = os.path.join(os.environ.get("TEMP", "."),
+        path = os.path.join(os.environ.get("TEMP", "tools"),
                             "ttvoice_probe_line%d.bmp" % index)
         if cap.save_bmp(path):
             self.msg_queue.put("probe: 抓帧已存 %s" % path)

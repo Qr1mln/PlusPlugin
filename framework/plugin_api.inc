@@ -100,6 +100,11 @@ struct LogSinkEntry {
     void* user = nullptr;
 };
 
+struct PointerEntry {
+    TTPluginPointerFn fn = nullptr;
+    void* user = nullptr;
+};
+
 // ---------------------------------------------------------------------------
 // One resident plugin.
 // ---------------------------------------------------------------------------
@@ -132,9 +137,30 @@ struct PluginSlot {
     // One log subscription per plugin; revoked by ClearRegistrations().
     LogSinkEntry logSink;
 
+    // One pointer subscription per plugin (hover / drag); same lifetime rule.
+    PointerEntry pointer;
+
     // Bumped around every callback that may run off the loader thread, so an
     // unload can prove that no plugin code is on a stack any more.
     LONG inflight = 0;
+
+    // Hot reload bookkeeping: loader thread only. The stamps are what the files
+    // looked like when we last acted on them; pending* is the newer state we
+    // keep seeing while a deploy is still writing, and pendAt is when we first
+    // saw it (used for the quiet period before acting).
+    bool stampsValid = false;
+    FILETIME jsonTime = {};
+    DWORD    jsonSize = 0;
+    FILETIME dllTime = {};
+    DWORD    dllSize = 0;
+    FILETIME pendJsonTime = {};
+    DWORD    pendJsonSize = 0;
+    FILETIME pendDllTime = {};
+    DWORD    pendDllSize = 0;
+    ULONGLONG pendAt = 0;
+    bool      wantLoad = false;     // set when a reload failed and should retry
+    ULONGLONG retryAt = 0;
+    int       retries = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -305,6 +331,19 @@ static int __cdecl HostAddLogSink(TTPluginLogFn fn, void* user) {
     return TTPLUGIN_OK;
 }
 
+static int __cdecl HostAddPointerSink(TTPluginPointerFn fn, void* user) {
+    if (g_activeSlot < 0 || fn == nullptr) {
+        return TTPLUGIN_ERR_PARAM;
+    }
+    PluginSlot& slot = g_slots[g_activeSlot];
+    if (slot.pointer.fn != nullptr) {
+        return TTPLUGIN_ERR_FULL;
+    }
+    slot.pointer.fn = fn;
+    slot.pointer.user = user;
+    return TTPLUGIN_OK;
+}
+
 // The table handed to plugins. Filled once, never mutated afterwards.
 static const TTPluginHost g_host = {
     TTPLUGIN_ABI,
@@ -319,7 +358,8 @@ static const TTPluginHost g_host = {
     &HostAddHotkey,
     &HostSubmitTask,
     &HostQuery,
-    &HostAddLogSink
+    &HostAddLogSink,
+    &HostAddPointerSink
 };
 
 // ---------------------------------------------------------------------------
@@ -369,6 +409,8 @@ static void ClearRegistrations(PluginSlot* slot) {
     slot->taskTail = 0;
     slot->logSink.fn = nullptr;
     slot->logSink.user = nullptr;
+    slot->pointer.fn = nullptr;
+    slot->pointer.user = nullptr;
 }
 
 static void SetHostContext(HWND mainHwnd, float uiScale) {
