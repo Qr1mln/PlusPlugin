@@ -433,3 +433,82 @@ version.dll（代理）
       ├─ ScriptTryRun(true) 成功 ─→ ScriptRunThread：门控 → 滚轮 → 粘贴 → 点击 → delay，×loop
       └─ 失败（没脚本 / 被拒收）→ 什么都不做，但每次点击都重打一行原因（no json found / parse failed）
 ```
+
+---
+
+## 14. `script` 插件（点击脚本执行器）
+
+`version.dll` 里的脚本引擎焊在叠加层上：要 sideload 代理、要 `InstallHooks` 成功、要人点胶囊。`script` 插件是同一套执行语义的**插件形态**——同一个 JSON、同一批输入动作、同一个门控算法，装进 `plugins\script\` 由框架热加载，不渲染、不装 hook、不建线程（§3.1 契约）。
+
+### 14.1 文件
+
+| 文件 | 职责 |
+|---|---|
+| [`plugin/script/script_plugin.cpp`](file:///D:/AIProjects/TTVoice/plugin/script/script_plugin.cpp) | 插件本体：`TTPlugin_GetDesc`/init/tick/shutdown、`script_engine.inc` 需要的同名 shim（`LogFromOverlay`/`SetScriptStatus`/`g_hwnd`/`g_viewHwnd`/`g_scale`/`g_gatePollMs`）、`CaptureView`/`CountCreamBand`、**分步执行器**、热键轮询、`run.txt` 触发 |
+| [`plugin/script/plugin.json`](file:///D:/AIProjects/TTVoice/plugin/script/plugin.json) | 清单：`name=script`、`dll=script.dll`、`priority=10`、`enabled=true` |
+| [`plugin/script/build_plugin.bat`](file:///D:/AIProjects/TTVoice/plugin/script/build_plugin.bat) | VM 侧编译（`cl /LD /MT /O2 /EHsc /W4 /utf-8`） |
+| [`build_plugin.py`](file:///D:/AIProjects/TTVoice/build_plugin.py) | 通用插件流水线：建 `C:\native` → 上传 → 编译 → 回填项目 → 装到 `%APPDATA%\TTVoice\plugins\<name>\` |
+| 产物 `plugin/script/script.dll` | x64 单文件 |
+
+引擎仍是**同一份源码**：`script_plugin.cpp` 直接 `#include "../../version_proxy/script_engine.inc"`（`overlay.inc` 在 include 之前提供的东西，这里由插件的 shim 提供同名同义的一份）。所以 §8 的 JSON 契约、§10 的 parity 常量表对它逐条成立，改引擎两边同步生效。引擎里「起线程跑整份脚本」和「`RegisterHotKey` 热键线程」这两半被**刻意不使用**（编译器会给 C4505，文件里已用 pragma 局部关掉）。
+
+### 14.2 生命周期与线程归属
+
+```
+PayloadThread（框架）                 PluginControlThread（框架，每 16ms）
+  plugins::Start()                      tick()
+    └─ ScanPlugins()                      ├─ 每 1s：ScriptReload(false)（stat 一次，静默）
+         └─ LoadPlugin("script")          ├─ 每 tick：轮询 hotkey（GetAsyncKeyState 边沿）
+              ├─ LoadLibraryExW           └─ 每 300ms：看 scripts\run.txt
+              ├─ TTPlugin_GetDesc()
+              └─ init(host)              RunPendingTasks()
+                   ├─ LoadConfig()           └─ RunStep()：延迟/门控/动作，各一步
+                   ├─ RefreshView()               └─ 自己 submitTask 再排下一步
+                   └─ ScriptReload(true)
+```
+
+- **init 不建窗口、不建线程**：只存 `host`、读 ini、找 `FLUTTERVIEW`、解析一次脚本、打一行 `script: init abi=... scale=... view=found events=... loop=...`。
+- **执行 = submitTask 分步推进**：`kStageDelay` / `kStageGate` / `kStageAct` 三态，每次回调只做一步再把自己重新入队。所以即使门控要等 4 秒，也只是每 `gate_poll_ms` 抓一帧，`tick`、热重载、console 面板泵消息都不被阻塞（这正是 `plugin-framework.md` §8 计划里的「`tick` 里轮询 / `submitTask` 投递执行」）。
+- **卸载天然安全**：没有插件线程可 join；`shutdown()` 只把 stage 复位成 idle（丢弃后续步骤）、放掉 DIB/DC、清 host 指针。框架的 `ClearRegistrations` 已先吊销排队任务。
+- `g_scale` 取 `GetDpiForWindow(FLUTTERVIEW)/96`，取不到退 `host->scale()`；`host->viewWindow()` 目前还返回主窗口（M1 才记真实子窗口），所以子窗口由插件 `EnumChildWindows` 自己找。
+
+### 14.3 触发方式
+
+| 触发 | 说明 |
+|---|---|
+| JSON 里的 `hotkey` | `tick` 里 `GetAsyncKeyState` 边沿检测 + 去抖。**不是** `RegisterHotKey`（框架的 `addHotkey` 目前只登记、不派发，等 M1），所以这个键应用自己也会收到 |
+| `%APPDATA%\TTVoice\scripts\run.txt` | 文件出现即跑当前选中的脚本，**先删再跑**（崩了不会重放）。脚本/测试脚本用这个，不占键 |
+
+选择脚本的规则与代理完全一致（§8.1）：`overlay.ini` 的 `script=` > `scripts\active.txt` > 最新的 `*.json`；ini 里只认 `script=` 和 `gate_poll_ms` 两个键。
+
+### 14.4 与 `version.dll` 内置引擎的差异
+
+| 方面 | version.dll（§7/§8） | script 插件 |
+|---|---|---|
+| 加载 | sideload 代理，进程启动期 | 框架扫描 `plugins\` 后 `LoadLibraryEx` |
+| 触发 | 胶囊点击 / 自有热键线程 | hotkey 轮询 / `run.txt` |
+| 绘制、屏上日志、胶囊状态行 | 有 | 无（`SetScriptStatus` 只记 code + 原因写日志） |
+| 执行线程 | 自建 `ScriptRunThread` | 框架线程上的分步 task |
+| 门控等待 | `Sleep` 轮询（阻塞该线程） | 每步一帧（不阻塞） |
+| 日志 | `%APPDATA%\TTVoice\tt_version_proxy.log` | 同一条日志（走 `host->log`）：`init`/`shutdown` 带 `[plugin:script]`，`tick`/task 带 `[plugin:framework]`（框架只在 init/shutdown 期设置 `g_activeSlot`），正文一律以 `script: ` 开头 |
+| 中止 | 没有 | 没有（编辑器才有停止），但卸载插件即可丢弃后续步骤 |
+
+### 14.5 构建 / 安装
+
+```bat
+:: 编译 + 回填项目 + 装到 %APPDATA%\TTVoice\plugins\script\（应用在跑会走热重载）
+python build_plugin.py script
+python build_plugin.py console          :: 同一脚本也支持 console
+python build_plugin.py script console   :: 依次编
+```
+
+**全新插件目录不会被运行中的框架发现**（`ScanPlugins` 只在 `Start()` 跑一次，之后只有热重载已扫描到的槽位），所以第一次装上 `script` 后需要重启一次 TTVoice；之后改代码重编，`build_plugin.py` 会用 `enabled=false → 覆盖 → enabled=true` 让框架自动加载新版本。
+
+### 14.6 已知边界
+
+- **两套引擎会同时响应同一份 JSON**：代理的胶囊/热键（`RegisterHotKey`）和本插件的 hotkey 轮询都会触发；`plugin_overlay` 迁移完成前，要么 JSON 的 `hotkey` 留空、只用 `run.txt` 触发插件，要么只用胶囊。日志里两边的行都能看到（`[plugin:script]` 前缀可区分）。
+- **热键抢不到**：轮询实现意味着按键仍会送进应用；`addHotkey` 派发落地后应改成真正的全局热键。
+- **门控是硬阈值**（§11 同一条）：±200×±40 物理 px 带 + `R>228,G>210,B<228,R-B>22`，换主题/分辨率要重新取样。
+- **DPI**：`g_scale` 在 `RefreshView` 时刷新（每次 run 前都刷），但一次 run 中途不重算。
+- 粘贴仍要求 TTVoice 在前台（`SetForegroundWindow` 受焦点策略限制），与代理一模一样。
+

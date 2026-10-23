@@ -7,6 +7,7 @@ TTVoice 运行时部署脚本（把项目里的 version.dll 装到运行时目�
   3) 用项目 version_proxy\version.dll 覆盖运行时 version.dll（占用重试）
   4) 启动 TTVoice（可在配置区关闭）
 说明：不编译、不连 VM。编译 + 回填项目请先跑 build.py。
+      插件（plugin\ 下）用 build_plugin.py 编译并安装。
 """
 import os
 import time
