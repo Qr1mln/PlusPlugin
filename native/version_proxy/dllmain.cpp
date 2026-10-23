@@ -1,4 +1,4 @@
-// version.dll proxy payload (stub mode)
+// version.dll proxy payload: forwarding shell + early hooks + plugin loader.
 // Target process: TTVoice.exe (x64), Flutter + ANGLE(D3D11)
 //
 // Forwarding model:
@@ -10,6 +10,15 @@
 // call these APIs before the main window exists. Keep the dependency chain of
 // the real DLL trivial (kernel32 only) so early loading cannot disturb the
 // graphics stack.
+//
+// Framework duties (this module is the framework, see ttplugin.h):
+//   1. Forward every version.dll export to the real one (stubs.asm).
+//   2. Own every hook installation: the D3D11 present patch and the early
+//      GetProcAddress interception. Plugins never install hooks themselves,
+//      which is exactly what makes a plugin unloadable at runtime.
+//   3. Load and unload plugins from %APPDATA%\TTVoice\plugins. A plugin only
+//      books callbacks through TTPluginHost, so the loader can revoke the
+//      whole set and then FreeLibrary it.
 //
 // NOTE: keep this file pure ASCII.
 
@@ -32,7 +41,19 @@ static int g_resolveMiss = -1;
 static const wchar_t* kTargetDll = L"version.dll";
 static const wchar_t* kLogFile = L"tt_version_proxy.log";
 
+// Installed by the framework package once plugins may be loaded. Declared
+// before Log() so the logger can mirror every line to the plugin log sinks.
+static void (*g_logFanout)(const char* line) = nullptr;
+static const int kLogLineChars = 1024;
+
 static void Log(const char* fmt, ...) {
+    char line[kLogLineChars] = {};
+
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf_s(line, sizeof(line), _TRUNCATE, fmt, ap);
+    va_end(ap);
+
     wchar_t temp[MAX_PATH] = {};
     DWORD n = GetTempPathW(MAX_PATH, temp);
     if (n == 0 || n >= MAX_PATH) return;
@@ -49,14 +70,15 @@ static void Log(const char* fmt, ...) {
             static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute),
             static_cast<unsigned>(st.wSecond), static_cast<unsigned>(st.wMilliseconds),
             GetCurrentProcessId(), GetCurrentThreadId());
-
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(fp, fmt, ap);
-    va_end(ap);
-
+    fprintf(fp, "%s", line);
     fputc('\n', fp);
     fclose(fp);
+
+    // Mirror to plugins. The fan-out guards against re-entry, so a log sink
+    // can never recurse into Log().
+    if (g_logFanout != nullptr) {
+        g_logFanout(line);
+    }
 }
 
 static int ResolveRealDll() {
@@ -80,6 +102,7 @@ static int ResolveRealDll() {
 }
 
 #include "overlay.inc"
+#include "framework/plugin_loader.inc"  // pulls plugin_api.inc and sdk/ttplugin.h
 
 namespace ov {
 static void LogFromOverlay(const char* text) {
@@ -173,6 +196,11 @@ static DWORD WINAPI PayloadThread(LPVOID) {
 
     const bool overlayReady = ov::Init(hwnd);
     Log("overlay init=%d scale=%.2f", overlayReady ? 1 : 0, ov::g_scale);
+
+    // Plugins load only after the UI exists and never under the loader lock:
+    // a plugin may touch user32 or create a thread in its own DllMain.
+    plugins::SetHostContext(hwnd, ov::g_scale);
+    plugins::Start();
 
     return 0;
 }

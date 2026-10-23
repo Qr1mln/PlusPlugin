@@ -358,10 +358,14 @@ static void InitTextFormat() {
 //   log_size=12       logical px
 // The block is pinned to the bottom-left corner; lines that look like failures
 // (fail / timeout / ignored / not seen) are painted amber.
+// Every mirrored line carries a [HH:MM:SS.mmm] prefix: a repeated click error is
+// byte-for-byte identical, so without the clock the panel reads as frozen even
+// though the ring keeps scrolling.
 // ---------------------------------------------------------------------------
 
 static const int kScreenLogMax = 24;      // ring depth, also the display limit
 static const int kScreenLogLen = 200;
+static const int kStampLen = 16;          // "[00:00:00.000] " plus slack
 
 static wchar_t   g_screenLog[kScreenLogMax][kScreenLogLen];
 static int       g_screenLogCount = 0;
@@ -374,15 +378,41 @@ static float g_logSize = 12.0f;
 // Pinned line above the log mirror. Set by script_engine.inc.
 static wchar_t g_statusLine[kScreenLogLen] = {};
 
+// Same "[HH:MM:SS.mmm] " prefix as the log file, so the panel visibly advances.
+static void StampPrefix(wchar_t* dst, size_t dstCount, const wchar_t* body) {
+    SYSTEMTIME st = {};
+    GetLocalTime(&st);
+    if (swprintf_s(dst, dstCount, L"[%02u:%02u:%02u.%03u] %s",
+                   static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute),
+                   static_cast<unsigned>(st.wSecond), static_cast<unsigned>(st.wMilliseconds),
+                   body) > 0) {
+        return;
+    }
+    wcscpy_s(dst, dstCount, body);   // no stamp is better than no line
+}
+
 // Called from LogFromOverlay, which runs on every thread that logs.
 static void PushScreenLog(const char* text) {
     if (!g_logOnScreen || !text || !text[0]) return;
 
+    // A line longer than the room left after the stamp is cut, never dropped.
+    // Manual cap: strncpy_s/_TRUNCATE would run the CRT invalid-parameter handler
+    // on overflow, and that would take the host process down with us.
+    char narrow[kScreenLogLen - kStampLen] = {};
+    size_t len = strlen(text);
+    if (len >= sizeof(narrow)) len = sizeof(narrow) - 1;
+    memcpy(narrow, text, len);
+    narrow[len] = 0;
+
+    wchar_t body[kScreenLogLen - kStampLen] = {};
+    if (MultiByteToWideChar(CP_UTF8, 0, narrow, -1, body, kScreenLogLen - kStampLen) <= 0) {
+        if (MultiByteToWideChar(CP_ACP, 0, narrow, -1, body, kScreenLogLen - kStampLen) <= 0) return;
+    }
+    body[kScreenLogLen - kStampLen - 1] = 0;
+    if (!body[0]) return;
+
     wchar_t wide[kScreenLogLen] = {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, kScreenLogLen);
-    if (n <= 0) (void)MultiByteToWideChar(CP_ACP, 0, text, -1, wide, kScreenLogLen);
-    wide[kScreenLogLen - 1] = 0;
-    if (!wide[0]) return;
+    StampPrefix(wide, kScreenLogLen, body);
 
     AcquireSRWLockExclusive(&g_screenLogLock);
     if (g_screenLogCount >= kScreenLogMax) {
@@ -425,7 +455,9 @@ static void SetScriptStatus(int code, const char* reason) {
 
     AcquireSRWLockExclusive(&g_screenLogLock);
     g_statusLine[0] = 0;
-    if (line[0]) wcscpy_s(g_statusLine, line);
+    // The pinned line is a state, not an event, so it does not scroll - the
+    // stamp on it therefore means "when this state last changed".
+    if (line[0]) StampPrefix(g_statusLine, kScreenLogLen, line);
     ReleaseSRWLockExclusive(&g_screenLogLock);
     InterlockedExchange(&g_noScriptFile, (code == 1) ? 1 : 0);
 }
@@ -1397,7 +1429,8 @@ static void LoadConfig() {
                 ";              0 = no mirrored lines, the pinned status line still shows\r\n"
                 "; log_size     logical px\r\n"
                 "; The panel never fades: a new line scrolls the oldest visible\r\n"
-                "; one out of the window, like tail -f.\r\n"
+                "; one out of the window, like tail -f. Each line is stamped\r\n"
+                "; with [HH:MM:SS.mmm] so repeated messages still move.\r\n"
                 "log_on_screen=1\r\n"
                 "log_lines=6\r\n"
                 "log_size=12\r\n";
@@ -1411,6 +1444,13 @@ static void LoadConfig() {
     const size_t got = fread(buf, 1, sizeof(buf) - 1, fp);
     fclose(fp);
     buf[got] = 0;
+
+    // Probe the raw text BEFORE parsing: the loop below overwrites every '='
+    // with a NUL, so a later strstr for "log_on_screen=" always failed and the
+    // block was appended again on every single start (the ini filled up with
+    // duplicate sections).
+    const bool hasLogKeys = (strstr(buf, "log_on_screen=") != nullptr);
+    const bool hasFadeKey = (strstr(buf, "log_seconds") != nullptr);
 
     char* next = nullptr;
     for (char* line = strtok_s(buf, "\r\n", &next); line != nullptr;
@@ -1475,13 +1515,13 @@ static void LoadConfig() {
     // log_seconds used to fade the panel out after a while. The panel is a
     // permanent tail -f view now, so the key is gone and an old ini that still
     // has it just ignores the line - say so once so nobody hunts for it.
-    if (strstr(buf, "log_seconds") != nullptr) {
+    if (hasFadeKey) {
         LogFromOverlay("config: log_seconds is gone, the log panel stays on screen");
     }
 
     // Ini files written by older builds have no log keys; append them (with the
     // same values as the defaults) so the knobs are discoverable in the file.
-    if (strstr(buf, "log_on_screen=") == nullptr) {
+    if (!hasLogKeys) {
         FILE* ap = nullptr;
         if (_wfopen_s(&ap, path, L"ab") == 0 && ap != nullptr) {
             const char* extra =
@@ -1489,6 +1529,7 @@ static void LoadConfig() {
                 "; --- on-screen log (tail -f panel, mirror of the log file) ---\r\n"
                 "; log_on_screen 0 = file only; log_lines 0 = no mirrored lines\r\n"
                 "; the panel never fades; log_size = logical px\r\n"
+                "; each line is prefixed with [HH:MM:SS.mmm] like the log file\r\n"
                 "log_on_screen=1\r\n"
                 "log_lines=6\r\n"
                 "log_size=12\r\n";

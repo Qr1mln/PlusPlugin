@@ -21,14 +21,14 @@
 | 文件 | 行数 | 职责 |
 |---|---|---|
 | [`dllmain.cpp`](file:///D:/AIProjects/TTVoice/native/version_proxy/dllmain.cpp) | 196 | 代理本体：解析真身导出、`Log()`、找主窗口、起线程 |
-| [`overlay.inc`](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc) | 1526 | Present hook、绘制、输入子类化、视觉门控抓帧/判色、ini 配置、D3D11 BGRA hook |
+| [`overlay.inc`](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc) | 1567 | Present hook、绘制、输入子类化、视觉门控抓帧/判色、ini 配置、D3D11 BGRA hook |
 | [`script_engine.inc`](file:///D:/AIProjects/TTVoice/native/version_proxy/script_engine.inc) | 833 | JSON 精简解析、脚本选择/热重载、逐行执行、全局热键 |
 | [`stubs.asm`](file:///D:/AIProjects/TTVoice/native/version_proxy/stubs.asm) | 93 | 17 个 `jmp qword ptr [g_pfn_X]`（**auto-generated**） |
 | [`exports.def`](file:///D:/AIProjects/TTVoice/native/version_proxy/exports.def) | 21 | `LIBRARY version` + 17 个导出名（**auto-generated**） |
 | [`proxy_exports.h`](file:///D:/AIProjects/TTVoice/native/version_proxy/proxy_exports.h) | 23 | X-macro 导出列表，驱动「定义指针」和「解析指针」两处（**auto-generated**） |
 | [`build.bat`](file:///D:/AIProjects/TTVoice/native/version_proxy/build.bat) | 47 | `vswhere` → `vcvars64` → `ml64` → `cl /LD /MT /O2 /EHsc /W4 /utf-8` |
 
-`.inc` 是被 `#include` 进 `dllmain.cpp` 的（`overlay.inc` 在 `namespace ov` 内，`overlay.inc` 自己又在 [L880](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L880) include `script_engine.inc`），所以整个 DLL 只有**一个编译单元**，所有符号都是 `static`。三个源文件必须**纯 ASCII**（中文一律 `\xXXXX` 转义），这是踩坑 1 的硬约束。
+`.inc` 是被 `#include` 进 `dllmain.cpp` 的（`overlay.inc` 在 `namespace ov` 内，`overlay.inc` 自己又在 [L912](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L912) include `script_engine.inc`），所以整个 DLL 只有**一个编译单元**，所有符号都是 `static`。三个源文件必须**纯 ASCII**（中文一律 `\xXXXX` 转义），这是踩坑 1 的硬约束。
 
 `native/dwmapi_proxy/` 是早期同类代理，载荷只到「找到窗口 + 打印 `payload ready (hook placeholder)`」就结束了（[dllmain.cpp L167-L170](file:///D:/AIProjects/TTVoice/native/dwmapi_proxy/dllmain.cpp#L167-L170)），**没有任何叠加绘制或点击逻辑，也不参与部署**——它留着只作为「为什么最后选了 version.dll」的历史证据（踩坑 12：dwmapi 代理会在 DllMain 里提前拉起 dcomp/图形栈，导致「序数 137 于 d3d9.dll」弹窗）。
 
@@ -56,12 +56,12 @@ TTVoice.exe 启动
             └─ ov::Init(hwnd)
 ```
 
-`ov::Init`（[overlay.inc L1502](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1502)）五步，顺序有意义：
+`ov::Init`（[overlay.inc L1543](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1543)）五步，顺序有意义：
 
 | 步骤 | 做什么 | 失败后果 |
 |---|---|---|
 | `g_scale = dpi/96` | 用 `GetDpiForWindow(g_hwnd)`，取不到则按 96 | scale 错 → 所有坐标/字号整体偏 |
-| `LoadConfig()` | 读 `%APPDATA%\TTVoice\overlay.ini`；**不存在就写模板**；老 ini 缺 `log_*` 键会在文件尾追加 | 全部用编译期默认值 |
+| `LoadConfig()` | 读 `%APPDATA%\TTVoice\overlay.ini`；**不存在就写模板**；老 ini 缺 `log_*` 键会在文件尾追加（追加/残留键的 `strstr` 探测必须在解析循环**之前**做完 —— 循环会把每个 `=` 原地改成 NUL，事后再查 `"log_on_screen="` 永远失败，曾经每次启动都追加一段） | 全部用编译期默认值 |
 | `ResolveFontPath()` | `%ENV%` 展开 + 相对路径按 exe 目录拼绝对 | 后面字体回退到系统集合 |
 | `InstallHooks()` | 造一次性 swapchain 拿 vtable 并打补丁 | **返回 false → `g_ready` 保持 false，叠加层和脚本引擎全都不启动** |
 | `ScriptStartHotkey()` | 起脚本轮询/热键线程 | — |
@@ -77,7 +77,7 @@ TTVoice.exe 启动
 ANGLE 建 device 时不带 `D3D11_CREATE_DEVICE_BGRA_SUPPORT`，导致 `ID2D1Factory1::CreateDevice` 报 `E_INVALIDARG`。修法是给 `D3D11CreateDevice` / `D3D11CreateDeviceAndSwapChain` 的 `flags` 按位或上这个标志，两条拦截路径并用：
 
 - **IAT 补丁**：`PatchIatForModule` 遍历模块导入表，只认**按名字**的导入；把 `d3d11.dll!D3D11CreateDevice(AndSwapChain)` 和任意模块的 `GetProcAddress` 换成我们的包装。触发点有两处：启动时 `PatchAllD3D11Iat()` 扫一遍已加载模块 + `LdrRegisterDllNotification` 在新模块加载瞬间补（回调在 loader lock 下，刻意不分配内存不打日志）。另外还有一个 100 × 100ms 的兜底重扫，覆盖延迟解析导入的模块。
-- **`GetProcAddress` 拦截**：`libGLESv2` 是动态加载 `d3d11.dll` 的，IAT 里没有那些符号，所以必须钩 `GetProcAddress`，当 `mod == g_d3d11Module` 且是名字导入时返回包装函数（拦截处 `HookGetProcAddress` [L1172](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1172)，替换 IAT 槽在 [L1240](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1240)）。
+- **`GetProcAddress` 拦截**：`libGLESv2` 是动态加载 `d3d11.dll` 的，IAT 里没有那些符号，所以必须钩 `GetProcAddress`，当 `mod == g_d3d11Module` 且是名字导入时返回包装函数（拦截处 `HookGetProcAddress` [L1204](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1204)，替换 IAT 槽在 [L1272](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1272)）。
 
 首次命中打一行 `d3d11: CreateDevice flags=0x%X -> add BGRA` 或 `gpa: D3D11CreateDevice intercepted`，都只打一次。
 
@@ -94,11 +94,11 @@ ANGLE 建 device 时不带 `D3D11_CREATE_DEVICE_BGRA_SUPPORT`，导致 `ID2D1Fac
 因为是**按 vtable 改**，进程内所有 swapchain 都会进来，所以每帧都要认人：
 
 ```
-HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1003]
+HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1035]
   ├─ !g_ready → 返回
-  ├─ IsTargetSwapChain(sc, &view)                  [L965]
+  ├─ IsTargetSwapChain(sc, &view)                  [L997]
   │    GetDesc() 拿 OutputWindow
-  │    ├─ IsRelatedWindow(OutputWindow)？          [L736]
+  │    ├─ IsRelatedWindow(OutputWindow)？          [L768]
   │    │     == g_hwnd | GetAncestor(GA_ROOT)==g_hwnd | GetWindow(GW_OWNER)==g_hwnd
   │    │     命中 → g_hwndMatched = true，输出该 hwnd
   │    ├─ 否则首次打一行 "first swapchain: out=... cls=... w= h= fmt=..."
@@ -114,11 +114,11 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1003]
 
 ## 5. 绘制
 
-`Draw`（[L727](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L727)）：`EnsureDevice` → 首次 `InitD2D` → `DrawD2D`，返回 false 才 `DrawFallback`。
+`Draw`（[L759](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L759)）：`EnsureDevice` → 首次 `InitD2D` → `DrawD2D`，返回 false 才 `DrawFallback`。
 
 **flip-model 缓存**：ANGLE 是多缓冲轮转，`GetBuffer(0)` 每次可能给不同纹理，所以 `ObtainBuffer` 按「纹理指针 + 宽高」缓存最多 4 个 `BufEntry{tex, rtv, bmp, w, h}`；超了就复用第 0 项重建。`ResizeBuffers` 时整表清空。
 
-### 5.1 D2D 主路径（`DrawD2D`，[L632](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L632)）
+### 5.1 D2D 主路径（`DrawD2D`，[L664](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L664)）
 
 变换矩阵强制 Identity（自己乘 `g_scale`），画两坨东西：
 
@@ -134,7 +134,7 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1003]
 
 `EndDraw` 失败 → `ResetTargets()` 并返回 false，下一帧自动走兜底路径。
 
-### 5.2 D3D11 兜底（`DrawFallback`，[L695](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L695)）
+### 5.2 D3D11 兜底（`DrawFallback`，[L727](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L727)）
 
 只用 `ClearView` 往 RTV 刷两块纯色矩形：按钮主体（press 时亮 0.08）+ 顶部 6 物理 px 的强调条。**没有任何文字，也没有界面日志**。第一次进入打一行 `overlay: using d3d11 fallback (no text)`，看到它就意味着「界面上看不到状态提示」是正常的。
 
@@ -153,9 +153,9 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1003]
 
 ## 6. 输入接管
 
-`EnsureViewSubclass`（[L947](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L947)）在 Present 回调里对 `FLUTTERVIEW` 做一次 `SetWindowLongPtrW(GWLP_WNDPROC)`，原过程存 `g_origViewProc`；`SetWindowLongPtr` 失败只打一次 `overlay: SetWindowLongPtr failed, no click handling`。之后 `ViewProc` 在 UI 线程被调用（P2-1 已实测点击可用）。
+`EnsureViewSubclass`（[L979](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L979)）在 Present 回调里对 `FLUTTERVIEW` 做一次 `SetWindowLongPtrW(GWLP_WNDPROC)`，原过程存 `g_origViewProc`；`SetWindowLongPtr` 失败只打一次 `overlay: SetWindowLongPtr failed, no click handling`。之后 `ViewProc` 在 UI 线程被调用（P2-1 已实测点击可用）。
 
-`ViewProc`（[L896](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L896)）的分流原则是**只吃按钮矩形内的事件**，其余一律转发：
+`ViewProc`（[L928](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L928)）的分流原则是**只吃按钮矩形内的事件**，其余一律转发：
 
 | 消息 | 矩形内 | 矩形外 |
 |---|---|---|
@@ -170,7 +170,7 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1003]
 
 ## 7. 点击之后跑什么（核心分流）
 
-`OnButtonClick()`（[L890](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L890)）就是全部逻辑：
+`OnButtonClick()`（[L922](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L922)）就是全部逻辑：
 
 ```cpp
 (void)ScriptTryRun(true);   // verbose：抢不到东西时也要把原因说出来
@@ -266,7 +266,7 @@ for round in 1..loop:
      本轮最后一行之外   → Sleep(delay_ms)      # 整份脚本的最后一行不 delay
 ```
 
-同时 `ScriptReload` 的三个出口会写「脚本状态」，由 `SetScriptStatus`（[overlay.inc L404](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L404)）落到界面上：
+同时 `ScriptReload` 的三个出口会写「脚本状态」，由 `SetScriptStatus`（[overlay.inc L434](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L434)）落到界面上：
 
 | code | 触发条件 | 常驻状态行 | 胶囊文字 |
 |---|---|---|---|
@@ -300,18 +300,28 @@ for round in 1..loop:
 
 ```
 LogFromOverlay(text) → Log()        写 %TEMP%\tt_version_proxy.log，前缀 [HH:MM:SS.mmm][pid][tid]
-                   → PushScreenLog() 进界面环形缓冲
+                   → PushScreenLog() 进界面环形缓冲（自己拼 [HH:MM:SS.mmm] 前缀，见 §9）
 ```
 
-**界面日志**（`log_on_screen=1`，[overlay.inc L346-L519](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L346-L519)）：本质是左下角的一个 **tail -f 面板**。
+**界面日志**（`log_on_screen=1`，[overlay.inc L346-L551](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L346-L551)）：本质是左下角的一个 **tail -f 面板**。
 
-- 环形缓冲 `24 × 200` 个宽字符，满了 `memmove` 丢最旧的一条；跨线程读写全程 `SRWLOCK`；
+- 环形缓冲 `24 × 200` 个宽字符，满了 `memmove` 丢最旧的一条（**下标 0 永远是最旧、末尾永远是最新**，所以绘制时取尾部 `log_lines` 行就是天然的时间序）；跨线程写入全程 `SRWLOCK`；
+- **每一行都带 `[HH:MM:SS.mmm]` 前缀**（`StampPrefix` [L382](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L382)，与日志文件同一个时钟）：这不是装饰 —— 同一个错误反复出现时（连点「活动」每次都是 `overlay: button clicked` + `script: no json found ...`），正文逐字符相同，没有时间戳的话 6 行窗口里的内容永远一模一样，**环形缓冲在滚但眼睛看不出来**，会被当成「面板卡住了」；
+- 长行只截不断：`kStampLen = 16` 是给前缀留的位，剩下的 `184` 字容不下的部分就地截断（不用 `strncpy_s(_TRUNCATE)`，它溢出时会走 CRT invalid-parameter 处理器 → 直接带死宿主进程）；
 - 每帧在共享锁里取**快照**（常驻状态行 + 最近 `log_lines` 行），绘制时只碰本地数组；
 - 位置：左下角，边距 12 逻辑 px，半透明黑底 `#0A0D12 α0.78` 圆角 5 逻辑 px，宽度 `min(画面 55%, 980 逻辑 px)`，小于 120 逻辑 px 直接不画；
 - **不淡出（本次改动）**：旧的 `log_seconds` 计时隐藏已整体删除（`g_logSeconds` / `g_screenLogStamp` 都没了）；面板一旦有内容就常驻，新行永远画在底部、把最旧的一条推出窗口 —— 就是 tail -f。旧 ini 里残留的 `log_seconds=` 会被忽略，但 DLL 会打一行 `config: log_seconds is gone, the log panel stays on screen`；
 - 面板高度 = 当前行数（状态行 + `min(log_lines, 已有行数)`）：底边钉在左下角，行数变多时往上长，所以不会抖位置；
-- 琥珀色：`g_statusLine`（第一行强制）或 `IsWarnLine` 命中 `fail / timeout / busy / ignored / skipped / WARN / not seen / no json` 任一片段；其余浅灰白。
-- 一次点击至少两行：`overlay: button clicked` + （跑不起来时）`script: no json found ...` / `script: parse failed ...`（§7 的 verbose）；成功时则是 `script: run ...` 系列。
+- 琥珀色：`g_statusLine`（第一行强制）或 `IsWarnLine` 命中 `fail / timeout / busy / ignored / skipped / WARN / not seen / no json` 任一片段（时戳前缀不影响 `wcsstr` 判定）；其余浅灰白。
+- 常驻状态行也带时戳，含义是「这个状态最后一次变化的时刻」（`SetScriptStatus` 只在三个出口调用，mtime 未变时不重写，所以它一般不动）。
+- 一次点击至少两行（均带时戳，以 150% 屏为例）：
+
+```
+[23:41:17.485] overlay: button clicked
+[23:41:17.486] script: no json found, the button does nothing     ← 琥珀
+```
+
+  跑不起来时是 `no json found` / `parse failed`（§7 的 verbose），成功时是 `script: run ...` 系列。
 - 取不到 `g_logFmt`/`g_logBrush` 时自动把 `g_logOnScreen` 关掉并打 `log: no text format for the on-screen log`，按钮不受影响。
 
 `log_lines` 默认 **6**、解析时 clamp 到 `0..24`（缓冲就 24 行，画出来最多 1+24=25 行）；`log_lines=0` **只停掉镜像行**，常驻状态行仍会画（整块关掉是 `log_on_screen=0`）；`log_size` 只有在 `6 < v < 40` 时才采纳；`no_script_text=` 留空 = 保留默认「无脚本」。
@@ -362,6 +372,7 @@ LogFromOverlay(text) → Log()        写 %TEMP%\tt_version_proxy.log，前缀 [
 - **没脚本时按钮真的什么都不做**：两段点击链删除后没有任何兜底；旧 ini 里残留的 `click_x` / `click_y` / `click2_*` / `click_delay_ms` 会被当未知键**静默忽略**（不报错，也不生效）。
 - **点击失败的原因行会刷屏**：`verbose` 下每次点击都重打一行原因（这是为了「点了没反应也能看到为什么」而做的取舍）；一直看就是一直刷， 2s 轮询那边仍然只打一次。
 - **日志面板现在常驻**：不再淡出，会一直占着左下角（默认 6 行）；想收小调 `log_lines`，想完全关掉调 `log_on_screen=0`（重启生效）。缓冲 24 行，超出显示窗口的旧行只能去文件里看（没有人工翻页）。
+- **重复日志靠时戳区分，不靠文本**：面板不做去重/计数合并，相同的行就是占多行；前缀时戳精确到毫秒，连点时看到的就是时戳在跳。想要「一屏看懂发生了多少次」就去翻文件（那里还有 pid/tid）。
 - **DPI / 尺寸变化不重算**：`g_scale` 在 `Init` 时定一次，跨屏移动或改缩放后叠加层与脚本坐标都会偏（待办 §7-5）。`HookResize` 只清 RTV/Bitmap 缓存。
 - **最小化时仍会进 Present**，没有暂停绘制的逻辑。
 - **兜底路径没有文字**：`overlay: using d3d11 fallback (no text)` 出现时，胶囊只剩色块，界面日志和状态行都不画。
@@ -395,7 +406,7 @@ type "%TEMP%\tt_version_proxy.log"
 | 路径 | 来源 |
 |---|---|
 | `%APPDATA%\TTVoice\version.dll` | 部署产物 |
-| `%APPDATA%\TTVoice\overlay.ini` | 首次运行由 `LoadConfig` 生成的模板 |
+| `%APPDATA%\TTVoice\overlay.ini` | 首次运行由 `LoadConfig` 生成的模板；老 ini 缺 `log_*` 键时追加一次（修好 `=` 被改 NUL 的探测 bug 后不再每次启动都追加） |
 | `%APPDATA%\TTVoice\scripts\<名称>.json` | `tools/script_editor.py` 保存 |
 | `%APPDATA%\TTVoice\scripts\active.txt` | 编辑器保存时写，DLL 按它选脚本 |
 | `%TEMP%\tt_version_proxy.log` | DLL 日志 |

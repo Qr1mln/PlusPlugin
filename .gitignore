@@ -9,6 +9,14 @@ venv/
 *.bak
 *.new
 
+# Native build outputs (version_proxy)
+*.obj
+*.lib
+*.exp
+*.dll
+*.exe
+stubs.obj
+
 # Secrets (if any)
 .env
 
