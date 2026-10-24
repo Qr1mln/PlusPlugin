@@ -1,10 +1,10 @@
 // ============================================================================
-// plugin_loader.inc - plugin lifecycle for the TTVoice framework.
+// plugin_loader.inc - plugin lifecycle for the pplugin framework.
 //
 // Duties, in order of execution:
 //   1. Scan      %APPDATA%\TTVoice\plugins\<NNN-name>\ for plugin.json
 //   2. Validate  relative dll name, x64 PE, abi, struct size, mandatory export
-//   3. Load      LoadLibraryExW by absolute path, then TTPluginDesc::init
+//   3. Load      LoadLibraryExW by absolute path, then Desc::init
 //   4. Dispatch  queued tasks (draw / region / hotkey dispatch lands in M1)
 //   5. Unload    mark draining, revoke registrations, wait inflight, shutdown,
 //                FreeLibrary
@@ -13,13 +13,13 @@
 // Everything here runs on one loader thread, so the slot table needs no lock.
 // Only PluginSlot::inflight is shared with other threads.
 //
-// Package: framework. Pulls plugin_api.inc (and through it sdk/ttplugin.h),
+// Package: framework. Pulls plugin_api.inc (and through it sdk/pplugin.h),
 // so including this single file is enough for the payload.
 // Keep this file pure ASCII.
 // ============================================================================
 
-#ifndef TTVOICE_PLUGIN_LOADER_INC
-#define TTVOICE_PLUGIN_LOADER_INC
+#ifndef PPLUGIN_PLUGIN_LOADER_INC
+#define PPLUGIN_PLUGIN_LOADER_INC
 
 #include "plugin_api.inc"
 
@@ -44,7 +44,7 @@ static const int kReloadSettleMs  = 400;
 static const int kReloadRetryMs   = 2000;
 static const int kReloadMaxRetries = 3;
 
-using TTPluginGetDescFn = const TTPluginDesc* (__cdecl *)(void);
+using GetDescFn = const Desc* (__cdecl *)(void);
 
 // Manifest text reuse. Loader thread only, so a single buffer is enough.
 static char s_manifestBuf[kManifestMaxBytes];
@@ -344,21 +344,21 @@ static void LoadPlugin(int index) {
         return;
     }
 
-    auto getDesc = reinterpret_cast<TTPluginGetDescFn>(
-        GetProcAddress(module, TTPLUGIN_ENTRY_NAME));
+    auto getDesc = reinterpret_cast<GetDescFn>(
+        GetProcAddress(module, ENTRY_NAME));
     if (getDesc == nullptr) {
-        Log("plugin: %s has no %s", slot.dllName, TTPLUGIN_ENTRY_NAME);
+        Log("plugin: %s has no %s", slot.dllName, ENTRY_NAME);
         RejectPlugin(index, "missing entry export");
         return;
     }
 
-    const TTPluginDesc* desc = getDesc();
+    const Desc* desc = getDesc();
     if (desc == nullptr || desc->name == nullptr || desc->abi == 0 ||
-        desc->abi > TTPLUGIN_ABI) {
+        desc->abi > P_ABI) {
         RejectPlugin(index, "bad desc or abi");
         return;
     }
-    if (desc->structSize < static_cast<uint32_t>(sizeof(TTPluginDesc))) {
+    if (desc->structSize < static_cast<uint32_t>(sizeof(Desc))) {
         RejectPlugin(index, "desc too small");
         return;
     }
@@ -372,10 +372,10 @@ static void LoadPlugin(int index) {
     slot.state = PluginState::kLoading;
 
     g_activeSlot = index;
-    const int rc = (desc->init != nullptr) ? desc->init(&g_host) : TTPLUGIN_OK;
+    const int rc = (desc->init != nullptr) ? desc->init(&g_host) : P_OK;
     g_activeSlot = -1;
 
-    if (rc != TTPLUGIN_OK) {
+    if (rc != P_OK) {
         ClearRegistrations(&slot);
         Log("plugin: %s init returned %d", slot.name, rc);
         RejectPlugin(index, "init refused");
@@ -383,9 +383,8 @@ static void LoadPlugin(int index) {
     }
 
     slot.state = PluginState::kActive;
-    Log("plugin: loaded %s v%s from %s draws=%d regions=%d hotkeys=%d",
-        slot.name, slot.version, slot.dirUtf8, slot.drawCount, slot.regionCount,
-        slot.hotkeyCount);
+    Log("plugin: loaded %s v%s from %s hotkeys=%d",
+        slot.name, slot.version, slot.dirUtf8, slot.hotkeyCount);
 }
 
 static void UnloadPlugin(int index) {
@@ -424,7 +423,7 @@ static void UnloadPlugin(int index) {
         g_activeSlot = index;
         const int rc = slot.desc->shutdown();
         g_activeSlot = -1;
-        if (rc != TTPLUGIN_OK) {
+        if (rc != P_OK) {
             slot.state = PluginState::kQuarantined;
             Log("plugin: %s shutdown refused (%d), quarantined", slot.name, rc);
             return;
@@ -457,7 +456,10 @@ static void RunPendingTicks() {
         }
         InterlockedIncrement(&slot.inflight);
         if (slot.state == PluginState::kActive) {
+            const int prev = g_activeSlot;
+            g_activeSlot = i;
             slot.desc->tick();
+            g_activeSlot = prev;
         }
         InterlockedDecrement(&slot.inflight);
     }
@@ -473,7 +475,10 @@ static void RunPendingTasks() {
             const TaskEntry entry = slot.tasks[slot.taskHead % kMaxTasksPerPlugin];
             ++slot.taskHead;
             InterlockedIncrement(&slot.inflight);
+            const int prev = g_activeSlot;
+            g_activeSlot = i;
             entry.fn(entry.user);
+            g_activeSlot = prev;
             InterlockedDecrement(&slot.inflight);
         }
         if (slot.taskHead >= slot.taskTail) {
@@ -883,6 +888,9 @@ static void Start() {
         return;
     }
     g_started = true;
+    // The hotkey dispatcher must be live before ScanPlugins(): a plugin books
+    // its hotkeys inside init(), which runs during the scan.
+    StartHotkeyThread();
     ScanPlugins();
 
     // From here on every Log() line is mirrored to plugin log sinks. Set after
@@ -899,4 +907,4 @@ static void Start() {
 
 }  // namespace plugins
 
-#endif  // TTVOICE_PLUGIN_LOADER_INC
+#endif  // PPLUGIN_PLUGIN_LOADER_INC

@@ -632,7 +632,7 @@ static void SimulateWheelAt(float lx, float ly, int notches) {
 }
 
 // Puts the text on the clipboard and sends Ctrl+V to the app. Only lands when
-// TTVoice owns the foreground window, so it is brought up first.
+// pplugin owns the foreground window, so it is brought up first.
 static void PasteTextToApp(const wchar_t* text) {
     if (!text || !text[0]) return;
 
@@ -784,40 +784,15 @@ static bool ScriptTryRun(bool verbose) {
 }
 
 static DWORD WINAPI ScriptHotkeyThread(LPVOID) {
-    int registered = 0;
-    int lastTried = 0;
-
     for (;;) {
         ScriptReload(false);            // background poll: stay quiet on repeat
-        const int vk = g_script.hotkeyVk;
-
-        if (vk != registered && vk != lastTried) {
-            lastTried = vk;
-            if (registered) {
-                UnregisterHotKey(nullptr, kScriptHotkeyId);
-                registered = 0;
-            }
-            if (vk && RegisterHotKey(nullptr, kScriptHotkeyId, 0, static_cast<UINT>(vk))) {
-                registered = vk;
-                char buf[96] = {};
-                sprintf_s(buf, "script: hotkey vk=0x%02X registered", static_cast<unsigned>(vk));
-                LogFromOverlay(buf);
-            } else if (vk) {
-                char buf[128] = {};
-                sprintf_s(buf, "script: hotkey vk=0x%02X busy, not registered", static_cast<unsigned>(vk));
-                LogFromOverlay(buf);
-            }
-        }
-
+        // Hotkey ownership moved to the framework dispatcher (Host::addHotkey),
+        // so this thread only keeps the pill / status line fresh. Drain any
+        // stray messages so MsgWaitForMultipleObjects does not spin on them.
         MsgWaitForMultipleObjects(0, nullptr, FALSE, 2000, QS_ALLINPUT);
-
         MSG msg = {};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_HOTKEY && msg.wParam == kScriptHotkeyId) {
-                LogFromOverlay("script: hotkey pressed");
-                ScriptReload(true);     // deliberate action: repeat the reason
-                ScriptRun();
-            }
+            // nothing to do
         }
     }
 }

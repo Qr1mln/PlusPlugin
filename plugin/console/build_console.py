@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 r"""
-TTVoice console 插件 编译 + 回填项目脚本（在虚拟机上编译，产物拉回项目）
+PlusPlugin console 插件 编译 + 回填项目脚本（在虚拟机上编译，产物拉回项目）
 流程：
   1) 清空并重建虚拟机 C:\native
   2) 上传 console 插件源码（plugin/console/）+ 其头文件依赖 sdk/，保持同级
-     （build_plugin.bat 用 /I %~dp0.. 让 "../sdk/ttplugin.h" 解析到仓库根 sdk/）
+     （build_plugin.bat 用 /I %~dp0.. 让 "../sdk/pplugin.h" 解析到仓库根 sdk/）
   3) 远程编译 plugin/console/build_plugin.bat 生成 console.dll
-  4) 把 console.dll 回填到项目 d:\AIProjects\TTVoice\plugin\console\
+  4) 把 console.dll 回填到项目 d:\PyProjects\PlusPlugin\plugin\console\
   5) 安装到宿主运行时 %APPDATA%\TTVoice\plugins\console
-     TTVoice 正在运行时走「热重载」：先把 plugin.json 的 enabled 改成 false
+     pplugin 正在运行时走「热重载」：先把 plugin.json 的 enabled 改成 false
      让框架卸载旧 dll（释放文件锁），覆盖 dll 后再改回 true，框架会自动加载
      新版本，不需要重启应用。
 说明：只负责「编译 + 回填 + 装插件」；version.dll 框架本身由 deploy.py 负责。
@@ -28,7 +28,7 @@ VM_USER = "111"
 VM_PASSWORD = os.getenv("VM_PASSWORD", "111")  # 优先读环境变量 VM_PASSWORD；未设置时默认 111
 
 # 宿主仓库根
-REPO_ROOT = r"D:\AIProjects\TTVoice"
+REPO_ROOT = r"D:\PyProjects\PlusPlugin"
 # 上传到 VM_ROOT 下、保持同级的子目录：插件源码 + 头文件依赖 sdk/
 SYNC_SUBDIRS = ("plugin/console", "sdk")
 
@@ -180,7 +180,7 @@ def install_to_runtime():
 
     hot = app_running()
     if hot:
-        log("TTVoice 正在运行：先写 enabled=false 让框架卸载旧版本")
+        log("pplugin 正在运行：先写 enabled=false 让框架卸载旧版本")
         if not os.path.exists(dst_json):
             shutil.copy2(os.path.join(PROJECT_DIR, "plugin.json"), dst_json)
         set_enabled(dst_json, False)
@@ -188,7 +188,7 @@ def install_to_runtime():
         for stale in STALE_NAMES:
             wait_unlocked(os.path.join(INSTALL_DIR, stale), timeout=3.0)
         if not wait_unlocked(dst_dll, timeout=6.0) and os.path.exists(dst_dll):
-            log(f"[WARN] {dst_dll} 仍被占用，请关闭 TTVoice 后重跑本脚本")
+            log(f"[WARN] {dst_dll} 仍被占用，请关闭 pplugin 后重跑本脚本")
             raise SystemExit(1)
         log("旧 dll 已释放，开始覆盖")
 
@@ -203,7 +203,7 @@ def install_to_runtime():
                 os.remove(p)
                 log(f"删除旧产物 {p}")
             except OSError:
-                log(f"[WARN] 旧产物 {p} 仍被占用，重启 TTVoice 后可手动删除")
+                log(f"[WARN] 旧产物 {p} 仍被占用，重启 pplugin 后可手动删除")
     except PermissionError:
         log(f"[WARN] {dst_dll} 被占用，请先关闭 TTVoice.exe 再重跑本脚本")
         raise SystemExit(1)
@@ -212,7 +212,7 @@ def install_to_runtime():
     if hot:
         log("已覆盖，框架会在约 1 秒内自动加载新版本（日志里看 plugin: ... hot reloading）")
     else:
-        log("TTVoice 未运行，下次启动时加载")
+        log("pplugin 未运行，下次启动时加载")
 
 
 def main():

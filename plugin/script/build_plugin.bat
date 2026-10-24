@@ -27,7 +27,7 @@ if errorlevel 1 (
 
 if exist script.dll del /q script.dll
 
-rem /I"%~dp0.."  -> plugin/ so "../sdk/ttplugin.h" resolves to the repo sdk/
+rem /I"%~dp0.."  -> plugin/ so "../sdk/pplugin.h" resolves to the repo sdk/
 rem /I"%~dp0..\.." -> repo root, keeps room for other shared includes
 rem The engine include itself is relative to the source file.
 cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 /I"%~dp0.." /I"%~dp0..\.." script_plugin.cpp ^

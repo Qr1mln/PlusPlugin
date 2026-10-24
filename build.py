@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 r"""
-TTVoice 编译 + 回填项目脚本（在虚拟机上编译，产物拉回项目 version_proxy/）
+PlusPlugin 编译 + 回填项目脚本（在虚拟机上编译，产物拉回项目 proxy/）
 流程：
   1) 清空并重建虚拟机 C:\native
-  2) 上传源码子目录（version_proxy/ framework/ sdk/）到虚拟机，保持同级
+  2) 上传源码子目录（proxy/ framework/ sdk/）到虚拟机，保持同级
      （build.bat 用 /I %~dp0.. 找 framework/ 与 sdk/，故三者必须同级）
   3) 远程编译 build.bat 生成 version.dll
-  4) 把 version.dll 回填到项目 D:\AIProjects\TTVoice\version_proxy\
+  4) 把 version.dll 回填到项目 D:\PyProjects\PlusPlugin\proxy\
 说明：只负责「编译 + 回填项目」；要把 dll 装到运行时请另跑 deploy.py。
 依赖：pip install paramiko
 """
@@ -15,21 +15,21 @@ import sys
 import paramiko
 
 # ===================== 配置区（按需修改） =====================
-VM_HOST = "172.28.11.230"
+VM_HOST = "172.20.106.42"
 VM_USER = "111"
 VM_PASSWORD = os.getenv("VM_PASSWORD", "111")  # 优先读环境变量 VM_PASSWORD；未设置时默认 111
 
-# 宿主仓库根：源码平铺在仓库根下（version_proxy/ framework/ sdk/）
-REPO_ROOT = r"D:\AIProjects\TTVoice"
+# 宿主仓库根：源码平铺在仓库根下（proxy/ framework/ sdk/）
+REPO_ROOT = r"D:\PyProjects\PlusPlugin"
 # 编译 version.dll 需要的子目录，按原名上传到 VM_ROOT 下保持同级
-SYNC_SUBDIRS = ("version_proxy", "framework", "sdk")
+SYNC_SUBDIRS = ("proxy", "framework", "sdk")
 
 VM_ROOT = "C:/native"                           # 虚拟机目标根（sftp 用正斜杠）
-VM_BUILD_CMD = r"cmd /c C:\native\version_proxy\build.bat"
-VM_DLL = "C:/native/version_proxy/version.dll"  # 编译产物
+VM_BUILD_CMD = r"cmd /c C:\native\proxy\build.bat"
+VM_DLL = "C:/native/proxy/version.dll"  # 编译产物
 
-# 回填目标：项目内 version_proxy 目录
-PROJECT_DIR = os.path.join(REPO_ROOT, "version_proxy")
+# 回填目标：项目内 proxy 目录
+PROJECT_DIR = os.path.join(REPO_ROOT, "proxy")
 PROJECT_DLL = os.path.join(PROJECT_DIR, "version.dll")
 # =============================================================
 
@@ -111,7 +111,7 @@ def sftp_upload(sftp, local_dir, remote_dir):
 
 
 def pull_to_project(sftp):
-    """把 VM 上的 version.dll 下载回填到项目 version_proxy/ 目录。"""
+    """把 VM 上的 version.dll 下载回填到项目 proxy/ 目录。"""
     os.makedirs(PROJECT_DIR, exist_ok=True)
     tmp = PROJECT_DLL + ".new"
     log(f"下载 version.dll 到项目 {PROJECT_DLL} ...")
@@ -127,7 +127,7 @@ def main():
     run_remote(client, r"cmd /c rmdir /s /q C:\native")
     run_remote(client, r"cmd /c mkdir C:\native")
 
-    # 2) 上传源码子目录，保持 version_proxy/framework/sdk 同级
+    # 2) 上传源码子目录，保持 proxy/framework/sdk 同级
     log("上传源码到虚拟机 ...")
     sftp = client.open_sftp()
     for sub in SYNC_SUBDIRS:
@@ -155,7 +155,7 @@ def main():
         client.close()
         sys.exit(1)
 
-    # 5) 回填到项目 version_proxy/ 目录
+    # 5) 回填到项目 proxy/ 目录
     pull_to_project(sftp)
 
     sftp.close()

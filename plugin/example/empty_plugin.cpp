@@ -6,20 +6,20 @@
 // Keep this file pure ASCII.
 // ============================================================================
 
-#include "../sdk/ttplugin.h"
+#include "../sdk/pplugin.h"
 
-static const TTPluginHost* g_host = nullptr;
+static const Host* g_host = nullptr;
 
 // @brief Records the capability table and reports itself ready.
 // @param host Framework table, valid until shutdown().
-// @return TTPLUGIN_OK to accept the load.
-static int __cdecl OnPluginInit(const TTPluginHost* host) {
+// @return P_OK to accept the load.
+static int __cdecl OnPluginInit(const Host* host) {
     g_host = host;
-    if (host == nullptr || host->abi != TTPLUGIN_ABI) {
-        return TTPLUGIN_ERR_PARAM;
+    if (host == nullptr || host->abi != P_ABI) {
+        return ERR_PARAM;
     }
     host->log("empty: init");
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
 // @brief Periodic callback. M0 does nothing here on purpose.
@@ -29,18 +29,18 @@ static int __cdecl OnPluginTick(void) {
 }
 
 // @brief Single cleanup point. DllMain must stay empty.
-// @return TTPLUGIN_OK so the framework may FreeLibrary us.
+// @return P_OK so the framework may FreeLibrary us.
 static int __cdecl OnPluginShutdown(void) {
     if (g_host != nullptr && g_host->log != nullptr) {
         g_host->log("empty: shutdown");
     }
     g_host = nullptr;
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
-static const TTPluginDesc kDesc = {
-    TTPLUGIN_ABI,
-    static_cast<uint32_t>(sizeof(TTPluginDesc)),
+static const Desc kDesc = {
+    P_ABI,
+    static_cast<uint32_t>(sizeof(Desc)),
     "empty",
     "0.1.0",
     &OnPluginInit,
@@ -50,7 +50,7 @@ static const TTPluginDesc kDesc = {
 
 // @brief The only export the framework looks up.
 // @return Immutable descriptor owned by this module.
-extern "C" __declspec(dllexport) const TTPluginDesc* __cdecl TTPlugin_GetDesc(void) {
+extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
     return &kDesc;
 }
 

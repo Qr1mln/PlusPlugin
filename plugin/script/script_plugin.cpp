@@ -5,32 +5,32 @@
 //          version.dll discovers it, loads it and owns every thread - no
 //          injection, no host process support, no DllMain work.
 //
-// Engine:  ../../version_proxy/script_engine.inc is included UNCHANGED, so the
+// Engine:  ../../proxy/script_engine.inc is included UNCHANGED, so the
 //          JSON contract, file selection, click/wheel/paste helpers and the gate
 //          math are literally the same code the proxy runs. Only the two things
 //          a plugin must not own are replaced:
 //            - its run thread          -> stepped through submitTask, one step
 //                                         per call, so no tick ever blocks;
-//            - its RegisterHotKey loop -> the JSON hotkey is polled in tick()
-//                                         (the framework's addHotkey only
-//                                         books entries today, nothing
-//                                         dispatches them yet).
+//            - its RegisterHotKey loop -> removed; the JSON hotkey is booked
+//                                         through Host::addHotkey and dispatched
+//                                         by the framework (Phase 1).
 //
-// Trigger: 1) the script's own "hotkey" field (polled; the key still reaches
-//             the app because we cannot register it);
-//          2) %APPDATA%\TTVoice\scripts\run.txt appears -> run, file deleted.
+// Trigger: 1) the script's "hotkey" field, booked via Host::addHotkey and
+//             dispatched by the framework (the key still reaches the app);
+//          2) the panel's Run button / list-box double-click (serviced from
+//             tick) or an optional panel toggle hotkey (<pluginDir>\config.ini panel_hotkey);
+//          3) %APPDATA%\TTVoice\scripts\run.txt appears -> run, file deleted.
 //
 // Files:   %APPDATA%\TTVoice\scripts\<name>.json  editor output
 //          %APPDATA%\TTVoice\scripts\active.txt   name saved last
-//          %APPDATA%\TTVoice\overlay.ini          script= / gate_poll_ms only
+//          <pluginDir>\config.ini                  panel_hotkey (gate_poll_ms fixed at 120ms)
 //
-// Note: with the proxy's built-in engine still compiled in, both engines see the
-// same JSON. A JSON hotkey fires both (RegisterHotKey there, poll here), so
-// leave "hotkey" empty while both are installed, or use run.txt.
+// Note: the proxy's built-in engine no longer registers its own hotkey, so the
+// framework dispatcher is the single owner of registration and dispatch.
 // Keep this file pure ASCII.
 // ============================================================================
 
-#include "../sdk/ttplugin.h"
+#include "../sdk/pplugin.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -40,16 +40,17 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 
-static const TTPluginHost* g_host = nullptr;
+static const Host* g_host = nullptr;
 
 // ============================================================================
 // Shims: what overlay.inc normally provides to script_engine.inc.
 // ============================================================================
 
-static HWND  g_hwnd = nullptr;       // TTVoice top level window
+static HWND  g_hwnd = nullptr;       // pplugin top level window
 static HWND  g_viewHwnd = nullptr;   // FLUTTERVIEW child (input + capture)
 static float g_scale = 1.0f;         // view dpi / 96
-static int   g_gatePollMs = 120;     // overlay.ini gate_poll_ms
+static const int g_gatePollMs = 120; // fixed visual-gate capture interval (ms)
+static int   g_panelVk = 0;         // config.ini panel_hotkey (toggle panel)
 static volatile LONG g_scriptStatus = 1;   // 0 ok, 1 no file, 2 rejected
 
 static void LogFromOverlay(const char* text) {
@@ -210,7 +211,7 @@ static int CountCreamBand(float lx, float ly, LONG* outX, LONG* outY) {
 
 #pragma warning(push)
 #pragma warning(disable: 4505)   // unreferenced local function
-#include "../../version_proxy/script_engine.inc"
+#include "script_engine.inc"   // engine now lives in this plugin, not the framework
 #pragma warning(pop)
 
 // ============================================================================
@@ -279,24 +280,40 @@ static bool RefreshView() {
     return true;
 }
 
-// Reads only the two keys a plugin without an overlay needs.
+// Reads the plugin's own config from <pluginDir>\config.ini (not the framework's
+// overlay.ini). panel_hotkey is the only key today; gate_poll_ms is a fixed
+// constant. A template is written on first run so the key is discoverable.
 static void LoadConfig() {
-    wchar_t appdata[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) == 0) {
-        LogFromOverlay("script: APPDATA missing, defaults kept");
+    const char* dir = (g_host != nullptr && g_host->pluginDir != nullptr)
+                          ? g_host->pluginDir()
+                          : nullptr;
+    if (dir == nullptr || dir[0] == 0) {
+        LogFromOverlay("script: pluginDir unavailable, defaults kept");
         return;
     }
 
+    wchar_t wdir[MAX_PATH] = {};
+    Utf8ToWideN(dir, wdir, MAX_PATH);
+
     wchar_t path[MAX_PATH] = {};
-    swprintf_s(path, L"%s\\TTVoice\\overlay.ini", appdata);
+    swprintf_s(path, L"%s\\config.ini", wdir);
 
     FILE* fp = nullptr;
     if (_wfopen_s(&fp, path, L"rb") != 0 || fp == nullptr) {
-        LogFromOverlay("script: no overlay.ini, selection = active.txt / newest json");
+        if (_wfopen_s(&fp, path, L"wb") == 0 && fp != nullptr) {
+            const char* tmpl =
+                "; script plugin config\r\n"
+                "; panel_hotkey = VK code that toggles the panel (0 = disabled).\r\n"
+                "; Examples: F1=0x70, F9=0x78, F10=0x79, F12=0x7B\r\n"
+                "panel_hotkey=0\r\n";
+            fwrite(tmpl, 1, strlen(tmpl), fp);
+            fclose(fp);
+            LogFromOverlay("script: wrote plugin config template");
+        }
         return;
     }
 
-    char buf[8192] = {};
+    char buf[4096] = {};
     const size_t got = fread(buf, 1, sizeof(buf) - 1, fp);
     fclose(fp);
     buf[got] = 0;
@@ -314,19 +331,13 @@ static void LoadConfig() {
         const char* val = eq + 1;
         while (*val == ' ' || *val == '\t') ++val;
 
-        if (_stricmp(key, "gate_poll_ms") == 0) {
-            const int n = atoi(val);
-            g_gatePollMs = (n < 30) ? 30 : n;
-        } else if (_stricmp(key, "script") == 0 && val[0] != 0) {
-            Utf8ToWideN(val, g_scriptName, 64);   // forced name wins over active.txt
-            char narrow[128] = {};
-            sprintf_s(narrow, "script: forced script=%s", val);
-            LogFromOverlay(narrow);
+        if (_stricmp(key, "panel_hotkey") == 0) {
+            g_panelVk = atoi(val);
         }
     }
 
     char line[96] = {};
-    sprintf_s(line, "script: gate_poll_ms=%d", g_gatePollMs);
+    sprintf_s(line, "script: config panel_hotkey=%d", g_panelVk);
     LogFromOverlay(line);
 }
 
@@ -362,8 +373,6 @@ struct RunState {
 static RunState g_run;
 static ULONGLONG g_lastReload = 0;
 static ULONGLONG g_lastTrigger = 0;
-static int g_hotkeyDown = 0;
-static int g_hotkeyLogged = 0;
 
 static void __cdecl RunStep(void* user);
 
@@ -371,7 +380,7 @@ static void ScheduleStep() {
     if (g_host == nullptr || g_host->submitTask == nullptr) {
         return;
     }
-    if (g_host->submitTask(&RunStep, nullptr) != TTPLUGIN_OK) {
+    if (g_host->submitTask(&RunStep, nullptr) != P_OK) {
         // Cannot happen with a single outstanding step, but never spin and
         // never leave g_scriptActive latched on a run that will not continue.
         LogFromOverlay("script: task queue full, run aborted");
@@ -547,35 +556,18 @@ static void RunNow(bool verbose) {
 }
 
 // ============================================================================
-// Triggers polled from tick()
+// Triggers
 //
-// The framework owns RegisterHotKey, but addHotkey only books an entry today
-// (dispatch lands with M1), so a key is observed instead: GetAsyncKeyState is a
-// read, no registration and no hook. run.txt is the trigger that needs no key at
-// all and is what a script/test harness should use.
+// Hotkeys are booked through Host::addHotkey in init and dispatched by the
+// framework (WM_HOTKEY on its own message window), so the plugin no longer reads
+// the keyboard itself. run.txt stays as the keyless trigger a script/test
+// harness can use.
 // ============================================================================
 
-static void PollHotkey() {
-    const int vk = g_script.hotkeyVk;
-    if (vk <= 0) {
-        g_hotkeyDown = 0;
-        g_hotkeyLogged = 0;
-        return;
-    }
-    if (vk != g_hotkeyLogged) {
-        g_hotkeyLogged = vk;
-        char line[128] = {};
-        sprintf_s(line, "script: hotkey vk=0x%02X polled (addHotkey not dispatched yet)",
-                  static_cast<unsigned>(vk));
-        LogFromOverlay(line);
-    }
-
-    const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
-    if (down && !g_hotkeyDown) {
-        LogFromOverlay("script: hotkey pressed");
-        RunNow(true);
-    }
-    g_hotkeyDown = down ? 1 : 0;
+static void __cdecl OnHotkey(int vk, void*) {
+    (void)vk;
+    LogFromOverlay("script: hotkey pressed (framework dispatch)");
+    RunNow(true);
 }
 
 static void PollTriggerFile() {
@@ -599,27 +591,213 @@ static void PollTriggerFile() {
 }
 
 // ============================================================================
+// Self-owned Win32 panel (Phase 2): script list + Run / Reload / Hide.
+//
+// Runs on its own thread so message pumping never blocks the framework loader
+// thread. The panel does not call Host::submitTask directly: that needs the
+// framework's slot context, which is only set during framework callbacks. A Run
+// request is flagged here and serviced from OnPluginTick, which runs with the
+// context set. Host::log works from any thread (logs as "[plugin:?] ...").
+// ============================================================================
+
+static HWND   g_panel = nullptr;
+static HWND   g_list = nullptr;
+static HANDLE g_panelThread = nullptr;
+static DWORD  g_panelTid = 0;
+static volatile LONG g_panelStop = 0;
+static volatile LONG g_runRequested = 0;
+static wchar_t g_requestedName[64] = {};   // selected script base name
+
+static const int IDC_LIST = 100;
+static const int IDC_RUN = 101;
+static const int IDC_RELOAD = 102;
+static const int IDC_HIDE = 103;
+
+static void EnumerateScripts(HWND list) {
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    wchar_t appdata[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) == 0) return;
+    wchar_t pattern[MAX_PATH] = {};
+    swprintf_s(pattern, L"%s\\TTVoice\\scripts\\*.json", appdata);
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        wchar_t base[260] = {};
+        wcscpy_s(base, fd.cFileName);
+        wchar_t* dot = wcsrchr(base, L'.');
+        if (dot != nullptr) *dot = 0;
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(base));
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+// Flags a run of the current list selection; serviced from OnPluginTick.
+static void RequestRunBySelection() {
+    wchar_t buf[260] = {};
+    int sel = static_cast<int>(SendMessageW(g_list, LB_GETCURSEL, 0, 0));
+    if (sel >= 0) {
+        SendMessageW(g_list, LB_GETTEXT, static_cast<WPARAM>(sel),
+                     reinterpret_cast<LPARAM>(buf));
+    }
+    wcscpy_s(g_requestedName, buf);   // empty when nothing selected -> default run
+    InterlockedExchange(&g_runRequested, 1);
+}
+
+static LRESULT CALLBACK ScriptPanelProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE:
+        g_list = CreateWindowExW(0, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL,
+            8, 8, 264, 200, w, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)),
+            GetModuleHandleW(nullptr), nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Run", WS_CHILD | WS_VISIBLE,
+            8, 216, 84, 26, w, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RUN)),
+            GetModuleHandleW(nullptr), nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Reload", WS_CHILD | WS_VISIBLE,
+            100, 216, 84, 26, w, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RELOAD)),
+            GetModuleHandleW(nullptr), nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Hide", WS_CHILD | WS_VISIBLE,
+            192, 216, 84, 26, w, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_HIDE)),
+            GetModuleHandleW(nullptr), nullptr);
+        EnumerateScripts(g_list);
+        return 0;
+    case WM_COMMAND: {
+        const int id = LOWORD(wp);
+        if (id == IDC_LIST && HIWORD(wp) == LBN_DBLCLK) {
+            RequestRunBySelection();
+        } else if (id == IDC_RUN) {
+            RequestRunBySelection();
+        } else if (id == IDC_RELOAD) {
+            EnumerateScripts(g_list);
+            ScriptReload(false);
+        } else if (id == IDC_HIDE) {
+            ShowWindow(w, SW_HIDE);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        ShowWindow(w, SW_HIDE);   // keep the thread alive; re-show via hotkey
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(w, msg, wp, lp);
+}
+
+static DWORD WINAPI ScriptPanelThread(LPVOID) {
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &ScriptPanelProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"ppluginScriptPanel";
+    RegisterClassExW(&wc);
+
+    if (g_panelStop) {
+        UnregisterClassW(L"ppluginScriptPanel", wc.hInstance);
+        return 0;
+    }
+
+    g_panel = CreateWindowExW(0, L"ppluginScriptPanel", L"pplugin Script Manager",
+                              WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                              300, 280, nullptr, nullptr, wc.hInstance, nullptr);
+    if (g_panel == nullptr) {
+        UnregisterClassW(L"ppluginScriptPanel", wc.hInstance);
+        return 0;
+    }
+    ShowWindow(g_panel, SW_SHOW);
+    LogFromOverlay("script: panel started");
+
+    MSG msg = {};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    g_panel = nullptr;
+    UnregisterClassW(L"ppluginScriptPanel", wc.hInstance);
+    return 0;
+}
+
+static void StartPanel() {
+    if (g_panelThread != nullptr) return;
+    InterlockedExchange(&g_panelStop, 0);
+    g_panelThread = CreateThread(nullptr, 0, &ScriptPanelThread, nullptr, 0, &g_panelTid);
+    if (g_panelThread == nullptr) {
+        LogFromOverlay("script: panel thread create failed");
+    }
+}
+
+static void StopPanel() {
+    if (g_panelThread == nullptr) return;
+    InterlockedExchange(&g_panelStop, 1);
+    if (g_panel != nullptr) {
+        PostMessageW(g_panel, WM_DESTROY, 0, 0);
+    }
+    PostThreadMessageW(g_panelTid, WM_QUIT, 0, 0);
+    WaitForSingleObject(g_panelThread, 2000);
+    CloseHandle(g_panelThread);
+    g_panelThread = nullptr;
+    g_panel = nullptr;
+}
+
+// Toggle panel visibility from the optional panel hotkey.
+static void __cdecl OnPanelKey(int vk, void*) {
+    (void)vk;
+    if (g_panel == nullptr) return;
+    if (IsWindowVisible(g_panel)) {
+        ShowWindow(g_panel, SW_HIDE);
+    } else {
+        ShowWindow(g_panel, SW_SHOW);
+        SetForegroundWindow(g_panel);
+    }
+}
+
+// ============================================================================
 // Plugin entry points
 // ============================================================================
 
-static int __cdecl OnPluginInit(const TTPluginHost* host) {
-    if (host == nullptr || host->abi != TTPLUGIN_ABI ||
-        host->structSize < static_cast<uint32_t>(sizeof(TTPluginHost)) ||
+static int __cdecl OnPluginInit(const Host* host) {
+    if (host == nullptr || host->abi != P_ABI ||
+        host->structSize < static_cast<uint32_t>(sizeof(Host)) ||
         host->log == nullptr || host->submitTask == nullptr) {
-        return TTPLUGIN_ERR_PARAM;
+        return ERR_PARAM;
     }
     g_host = host;
 
     LoadConfig();
     const bool viewOk = RefreshView();
     ScriptReload(true);
+    StartPanel();
+
+    if (g_script.hotkeyVk > 0) {
+        if (host->addHotkey(g_script.hotkeyVk, &OnHotkey, nullptr) == P_OK) {
+            char hk[96] = {};
+            sprintf_s(hk, "script: hotkey vk=0x%02X registered",
+                      static_cast<unsigned>(g_script.hotkeyVk));
+            LogFromOverlay(hk);
+        } else {
+            LogFromOverlay("script: addHotkey rejected, hotkey disabled");
+        }
+    }
+    if (g_panelVk > 0) {
+        if (host->addHotkey(g_panelVk, &OnPanelKey, nullptr) == P_OK) {
+            char hk[96] = {};
+            sprintf_s(hk, "script: panel hotkey vk=0x%02X registered",
+                      static_cast<unsigned>(g_panelVk));
+            LogFromOverlay(hk);
+        } else {
+            LogFromOverlay("script: panel hotkey rejected");
+        }
+    }
 
     char line[256] = {};
     sprintf_s(line, "script: init abi=%u scale=%.2f view=%s events=%d loop=%d",
               host->abi, g_scale, viewOk ? "found" : "missing", g_script.count,
               g_script.loop);
     LogFromOverlay(line);
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
 static int __cdecl OnPluginTick(void) {
@@ -628,13 +806,24 @@ static int __cdecl OnPluginTick(void) {
     }
     const ULONGLONG now = GetTickCount64();
 
+    // A Run request from the panel (which runs on its own thread without the
+    // framework's slot context) is serviced here, where g_activeSlot is set.
+    if (InterlockedExchange(&g_runRequested, 0) != 0) {
+        if (g_requestedName[0] != 0) {
+            wcscpy_s(g_scriptName, g_requestedName);   // force a specific script
+            RunNow(true);
+            g_scriptName[0] = 0;                       // transient, restore default
+        } else {
+            RunNow(true);
+        }
+    }
+
     // Cheap: one stat per second, same cadence as the proxy's 2s poll a bit
     // faster because a save in the editor should show up quickly.
     if (now - g_lastReload >= 1000) {
         g_lastReload = now;
         ScriptReload(false);
     }
-    PollHotkey();
 
     if (now - g_lastTrigger >= 300) {
         g_lastTrigger = now;
@@ -648,6 +837,7 @@ static int __cdecl OnPluginShutdown(void) {
     // cancel; queued steps were already revoked by the loader.
     g_run.stage = kStageIdle;
     InterlockedExchange(&g_scriptActive, 0);
+    StopPanel();
     ShotFree();
 
     if (g_host != nullptr && g_host->log != nullptr) {
@@ -656,12 +846,12 @@ static int __cdecl OnPluginShutdown(void) {
     g_host = nullptr;
     g_hwnd = nullptr;
     g_viewHwnd = nullptr;
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
-static const TTPluginDesc kDesc = {
-    TTPLUGIN_ABI,
-    static_cast<uint32_t>(sizeof(TTPluginDesc)),
+static const Desc kDesc = {
+    P_ABI,
+    static_cast<uint32_t>(sizeof(Desc)),
     "script",
     "0.1.0",
     &OnPluginInit,
@@ -669,7 +859,7 @@ static const TTPluginDesc kDesc = {
     &OnPluginShutdown
 };
 
-extern "C" __declspec(dllexport) const TTPluginDesc* __cdecl TTPlugin_GetDesc(void) {
+extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
     return &kDesc;
 }
 

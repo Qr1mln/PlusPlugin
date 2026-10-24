@@ -1,6 +1,6 @@
-# TTVoice 插件框架设计文档
+# PlusPlugin 插件框架设计文档
 
-> 本文件描述 `../version_proxy` 下的插件框架架构，是被 `sdk/ttplugin.h` 引用的权威说明。
+> 本文件描述 `../proxy` 下的插件框架架构，是被 `sdk/pplugin.h` 引用的权威说明。
 > 设计目标：在**无源码**条件下，把原来写死在 `dllmain.cpp` 里的"叠加层 + 点击脚本 + 界面日志"
 > 改造成**可热加载/热卸载的插件**，让 `version.dll` 代理本身只做"转发 + 引导 + 持有 hook"。
 
@@ -29,7 +29,7 @@
                             ▼
    ┌─────────────────────────────────────────────┐
    │  framework（同一翻译单元内，.inc 拼进 dllmain）│
-   │   · plugin_api.inc    —— TTPluginHost 能力表  │
+   │   · plugin_api.inc    —— Host 能力表  │
    │   · plugin_loader.inc —— 生命周期 / 控制       │
    │   · render.inc [M1]   —— Present hook + 派发  │  ← 目前 hook 仍暂留在 overlay.inc
    └───────────────────────┬─────────────────────┘
@@ -44,7 +44,7 @@
 ```
 
 **核心原则（贯穿整个框架）**：framework 拥有每一条 hook、每一个系统注册点、每一个线程。
-插件只通过 `TTPluginHost` 这张表**预订回调**，因此一次卸载可以把整组预订从一处吊销，再 `FreeLibrary`。
+插件只通过 `Host` 这张表**预订回调**，因此一次卸载可以把整组预订从一处吊销，再 `FreeLibrary`。
 插件自己绝不允许安装 hook、创建线程或触碰系统级注册点。
 
 ---
@@ -56,8 +56,8 @@
 | `dllmain.cpp` | 代理载荷：转发 17 个导出 → 起 PayloadThread；`DllMain` 内解析真身 + 起早期 D3D11 hook 线程。M1 完成后只保留"代理 + 引导 + 启动框架"。 |
 | `stubs.asm` | 17 个 stub：`jmp qword ptr [g_pfn_X]`（AheadLib 风格，因 MSVC `.def` 转发不可用）。 |
 | `exports.def` / `proxy_exports.h` | 导出 17 个 stub 名（`LIBRARY version`）/ X-macro 列表（定义与解析指针共用）。 |
-| `sdk/ttplugin.h` | **ABI 契约**：插件与框架的共同语言，纯 ASCII、POD、`extern "C"`。 |
-| `framework/plugin_api.inc` | host 侧实现 `TTPluginHost` 能力表、日志扇出、吊销、生命周期状态。 |
+| `sdk/pplugin.h` | **ABI 契约**：插件与框架的共同语言，纯 ASCII、POD、`extern "C"`。 |
+| `framework/plugin_api.inc` | host 侧实现 `Host` 能力表、日志扇出、吊销、生命周期状态。 |
 | `framework/plugin_loader.inc` | 扫描 / 校验 / 加载 / 卸载 / 任务派发 / `control.txt` 控制；单一 loader 线程。 |
 | `framework/render.inc` **[M1]** | 派发层接缝：`RenderFrame` 每帧按 priority 调 `addDraw`、`DispatchClick` 按 `regions[]` 命中派发点击（沿用 inflight 守卫）。**已编写**，由 `overlay.inc` 的 `DrawD2D`/`ViewProc` 双轨调用；Present/vtable/BGRA hook 尚未搬入（仍在 `overlay.inc`）。 |
 | `../plugin/example/empty_plugin.cpp` | 最小插件，验证 M0 加载/卸载。 |
@@ -66,33 +66,33 @@
 
 ---
 
-## 3. ABI 契约（`sdk/ttplugin.h`）
+## 3. ABI 契约（`sdk/pplugin.h`）
 
-`TTPLUGIN_ABI = 1`。契约约束（审查强制）：
+`ABI = 1`。契约约束（审查强制）：
 
 1. **POD only，C 兼容**：不能用 C++ 类型、STL、异常。
 2. **字段只增不改**：永远不重排、不改语义；删除的字段保留为 reserved 指针，只有破坏性变更才 bump abi。
-3. **插件不持有系统资源**：不得自己装 hook / 建线程 / 碰系统级注册点，一切走 `TTPluginHost`，便于卸载时吊销。
+3. **插件不持有系统资源**：不得自己装 hook / 建线程 / 碰系统级注册点，一切走 `Host`，便于卸载时吊销。
 4. **移除字段保留为 reserved 指针**；abi 只在破坏性变更时 +1。
 5. **文件保持纯 ASCII**。
 
-### 3.1 `TTPluginDesc`（插件清单，从 `TTPlugin_GetDesc()` 返回）
+### 3.1 `Desc`（插件清单，从 `GetDesc()` 返回）
 
 | 字段 | 含义 |
 |---|---|
-| `abi` | 插件要求的最低框架 abi（通常 `TTPLUGIN_ABI`） |
-| `structSize` | 插件侧 `sizeof(TTPluginDesc)`；框架要求 `>=` 自身大小才接受 |
+| `abi` | 插件要求的最低框架 abi（通常 `ABI`） |
+| `structSize` | 插件侧 `sizeof(Desc)`；框架要求 `>=` 自身大小才接受 |
 | `name` | ASCII 稳定 id，≤63 字符 |
 | `version` | ASCII 自由文本，≤31 字符 |
-| `init(host)` | 加载时调用一次；返回 `TTPLUGIN_OK` 接受，其他值框架卸载 DLL |
+| `init(host)` | 加载时调用一次；返回 `OK` 接受，其他值框架卸载 DLL |
 | `tick()` | 可选；框架线程周期调用，必须快返回（阻塞会拖慢所有插件） |
 | `shutdown()` | 卸载前调用一次；在此释放图形/COM 资源、join 线程（**不要**在 `DllMain` 做） |
 
-### 3.2 `TTPluginHost`（能力表，框架实现，init 时交给插件）
+### 3.2 `Host`（能力表，框架实现，init 时交给插件）
 
 | 字段 | 作用 |
 |---|---|
-| `abi` / `structSize` | 校验用：插件比对 `abi == TTPLUGIN_ABI` 且 `structSize >= sizeof(TTPluginHost)` |
+| `abi` / `structSize` | 校验用：插件比对 `abi == ABI` 且 `structSize >= sizeof(Host)` |
 | `log(text)` | 中心日志，UTF-8 单行；非空 |
 | `pluginDir()` | 插件目录绝对 UTF-8 路径（定位自身数据文件） |
 | `mainWindow()` / `viewWindow()` | 主窗口 / 接收输入的子窗口句柄（UI 就绪前可能为空） |
@@ -100,7 +100,7 @@
 | `addDraw(fn, priority, user)` | 注册绘制回调（逻辑像素坐标，框架套用 scale）；priority 小者先画 |
 | `addRegion(rect, priority, fn, user)` | 注册可点击矩形（逻辑像素）；priority 高者赢得命中测试 |
 | `addHotkey(vk, fn, user)` | 注册全局热键（框架拥有 `RegisterHotKey`） |
-| `submitTask(fn, user)` | 向框架线程投送任务（队列满返回 `TTPLUGIN_ERR_FULL`） |
+| `submitTask(fn, user)` | 向框架线程投送任务（队列满返回 `ERR_FULL`） |
 | `query(capability)` | 能力协商，目前 reserved，统一返回 null |
 | `addLogSink(fn, user)` | 订阅框架日志流（每写一行都投递；每插件一个 sink） |
 | `addPointerSink(fn, user)` | 订阅指针事件（hover / 拖拽）；每插件一个。命中测试与鼠标捕获都由框架负责 |
@@ -108,13 +108,13 @@
 ### 3.3 回调与结果码
 
 ```c
-typedef void (__cdecl *TTPluginDrawFn)(void* d2dCtx, float width, float height, void* user);
-typedef void (__cdecl *TTPluginClickFn)(int kind, float x, float y, void* user); // kind: 0 左 / 1 双击 / 2 右
-typedef void (__cdecl *TTPluginHotkeyFn)(int vk, void* user);
-typedef void (__cdecl *TTPluginTaskFn)(void* user);
-typedef void (__cdecl *TTPluginLogFn)(const char* line, void* user);
-typedef int  (__cdecl *TTPluginPointerFn)(int kind, float x, float y, void* user);
-// kind: TTPLUGIN_POINTER_MOVE=0 / DOWN=1 / UP=2；返回非 0 表示消费该事件
+typedef void (__cdecl *DrawFn)(void* d2dCtx, float width, float height, void* user);
+typedef void (__cdecl *ClickFn)(int kind, float x, float y, void* user); // kind: 0 左 / 1 双击 / 2 右
+typedef void (__cdecl *HotkeyFn)(int vk, void* user);
+typedef void (__cdecl *TaskFn)(void* user);
+typedef void (__cdecl *LogFn)(const char* line, void* user);
+typedef int  (__cdecl *PointerFn)(int kind, float x, float y, void* user);
+// kind: POINTER_MOVE=0 / DOWN=1 / UP=2；返回非 0 表示消费该事件
 ```
 
 **指针 / 拖拽语义**（`addPointerSink`，MOVE 派发给所有活跃 sink，返回非 0 即消费）：
@@ -128,9 +128,9 @@ typedef int  (__cdecl *TTPluginPointerFn)(int kind, float x, float y, void* user
 出帧，同一次拖拽从 0 帧变成 45~75fps。`DOWN`/`UP` 仍然吞掉，所以应用不会启动自己的手势。
 日志里每次拖拽都会留一行 `overlay: drag <ms> ms, <n> overlay frame(s)`，n 接近 0 就是绘制饥饿而不是输入延迟。
 
-结果码：`TTPLUGIN_OK=0` / `TTPLUGIN_ERR_FULL=-1` / `TTPLUGIN_ERR_STATE=-2` / `TTPLUGIN_ERR_PARAM=-3`。
-容量：`TTPLUGIN_MAX_DRAWS=8` / `TTPLUGIN_MAX_REGIONS=16` / `TTPLUGIN_MAX_HOTKEYS=8`。
-插件唯一导出：`TTPlugin_GetDesc`（宏 `TTPLUGIN_ENTRY_NAME`）。
+结果码：`OK=0` / `ERR_FULL=-1` / `ERR_STATE=-2` / `ERR_PARAM=-3`。
+容量：`MAX_DRAWS=8` / `MAX_REGIONS=16` / `MAX_HOTKEYS=8`。
+插件唯一导出：`GetDesc`（宏 `ENTRY_NAME`）。
 
 ---
 
@@ -150,7 +150,7 @@ kEmpty ──scan──▶ kDiscovered ──(enabled=false)──▶ kDisabled
 ```
 
 - **加载协议**：`LoadLibraryExW(path, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | DEFAULT_DIRS)` →
-  取 `TTPlugin_GetDesc` → 校验 abi/structSize → 置 `g_activeSlot` 调 `init()` → `kActive`。
+  取 `GetDesc` → 校验 abi/structSize → 置 `g_activeSlot` 调 `init()` → `kActive`。
 - **卸载协议**：置 `kDraining` → `ClearRegistrations` 吊销全部预订 →
   自旋等 `inflight` 归零（超时 `kDrainTimeoutMs=2000ms` → 转 `kQuarantined`，绝不卸载仍在栈上的代码）→
   调 `shutdown()` → `FreeLibrary` → `kUnloaded`。
@@ -228,24 +228,24 @@ loader 线程每 `kWatchPollMs=500ms` 检查每个插件的 `plugin.json` 与清
 最小骨架（`../plugin/example/empty_plugin.cpp`）：
 
 ```cpp
-#include "../sdk/ttplugin.h"
-static const TTPluginHost* g_host = nullptr;
-static int __cdecl OnPluginInit(const TTPluginHost* host) {
+#include "../sdk/pplugin.h"
+static const Host* g_host = nullptr;
+static int __cdecl OnPluginInit(const Host* host) {
     g_host = host;
-    if (host == nullptr || host->abi != TTPLUGIN_ABI) return TTPLUGIN_ERR_PARAM;
+    if (host == nullptr || host->abi != ABI) return ERR_PARAM;
     host->log("empty: init");
-    return TTPLUGIN_OK;
+    return OK;
 }
 static int __cdecl OnPluginTick(void) { return 0; }
 static int __cdecl OnPluginShutdown(void) {
     if (g_host && g_host->log) g_host->log("empty: shutdown");
-    return TTPLUGIN_OK;
+    return OK;
 }
-static const TTPluginDesc kDesc = {
-    TTPLUGIN_ABI, sizeof(TTPluginDesc), "empty", "0.1.0",
+static const Desc kDesc = {
+    ABI, sizeof(Desc), "empty", "0.1.0",
     &OnPluginInit, &OnPluginTick, &OnPluginShutdown
 };
-extern "C" __declspec(dllexport) const TTPluginDesc* __cdecl TTPlugin_GetDesc(void) { return &kDesc; }
+extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) { return &kDesc; }
 BOOL APIENTRY DllMain(HMODULE m, DWORD r, LPVOID) { (void)m; (void)r; return TRUE; } // 必须空
 ```
 
@@ -308,7 +308,7 @@ cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 xxx.cpp ^
        └─ [M1] <NNN>-overlay\{plugin.json, overlay.dll}
 ```
 
-- `build.bat`：`ml64` 汇编 `stubs.asm` + `cl /I"%~dp0.."` 链接产出 `version.dll`（`/I..` 把仓库根加入包含路径，让 `dllmain.cpp` 的 `framework/...` 与 `sdk/...` 解析，因为它们不在 `version_proxy/` 下）。
+- `build.bat`：`ml64` 汇编 `stubs.asm` + `cl /I"%~dp0.."` 链接产出 `version.dll`（`/I..` 把仓库根加入包含路径，让 `dllmain.cpp` 的 `framework/...` 与 `sdk/...` 解析，因为它们不在 `proxy/` 下）。
 - 各插件 `build_plugin.bat`：编译并安装到对应 `plugins\<NNN-name>` 目录。
 - 回滚：删除 `%APPDATA%\TTVoice\version.dll` 即可（安装目录原本无此文件）。
 

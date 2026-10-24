@@ -1,22 +1,22 @@
 // ============================================================================
-// plugin_api.inc - host side of the TTPluginHost capability table.
+// plugin_api.inc - host side of the Host capability table.
 //
 // Ownership rule: the framework owns every hook, every system registration
 // point and every thread. A plugin only books callbacks here, so an unload can
 // revoke the whole set from one place. Plugins never call these functions
-// directly; they only see the TTPluginHost table.
+// directly; they only see the Host table.
 //
 // Included by dllmain.cpp after overlay.inc, so it shares the translation unit
 // (and therefore the static Log() helper) with the rest of the payload.
 //
-// Package: framework. Depends on the public contract in ../sdk/ttplugin.h.
+// Package: framework. Depends on the public contract in ../sdk/pplugin.h.
 // Keep this file pure ASCII.
 // ============================================================================
 
-#ifndef TTVOICE_PLUGIN_API_INC
-#define TTVOICE_PLUGIN_API_INC
+#ifndef PPLUGIN_PLUGIN_API_INC
+#define PPLUGIN_PLUGIN_API_INC
 
-#include "../sdk/ttplugin.h"
+#include "../sdk/pplugin.h"
 
 namespace plugins {
 
@@ -43,7 +43,7 @@ enum class PluginState {
     kEmpty = 0,     // slot unused
     kDisabled,      // discovered but enabled=false in plugin.json
     kDiscovered,    // manifest parsed, DLL not mapped yet
-    kLoading,       // inside TTPluginDesc::init
+    kLoading,       // inside Desc::init
     kActive,        // callable
     kDraining,      // no new calls, waiting for inflight to reach zero
     kQuarantined,   // stuck, stays mapped but is never called again
@@ -71,37 +71,20 @@ static const char* StateName(PluginState state) {
 // Bookkeeping records. One array per capability, owned by the framework.
 // M0 stores them and revokes them; dispatch happens in M1.
 // ---------------------------------------------------------------------------
-struct DrawEntry {
-    TTPluginDrawFn fn = nullptr;
-    void* user = nullptr;
-    int priority = 0;
-};
-
-struct RegionEntry {
-    RECT rect = {};
-    TTPluginClickFn fn = nullptr;
-    void* user = nullptr;
-    int priority = 0;
-};
-
 struct HotkeyEntry {
     int vk = 0;
-    TTPluginHotkeyFn fn = nullptr;
+    int id = 0;          // RegisterHotKey id, unique within the dispatcher window
+    HotkeyFn fn = nullptr;
     void* user = nullptr;
 };
 
 struct TaskEntry {
-    TTPluginTaskFn fn = nullptr;
+    TaskFn fn = nullptr;
     void* user = nullptr;
 };
 
 struct LogSinkEntry {
-    TTPluginLogFn fn = nullptr;
-    void* user = nullptr;
-};
-
-struct PointerEntry {
-    TTPluginPointerFn fn = nullptr;
+    LogFn fn = nullptr;
     void* user = nullptr;
 };
 
@@ -111,7 +94,7 @@ struct PointerEntry {
 struct PluginSlot {
     PluginState state = PluginState::kEmpty;
     HMODULE module = nullptr;
-    const TTPluginDesc* desc = nullptr;
+    const Desc* desc = nullptr;
 
     bool autoLoad = true;
     int priority = 0;
@@ -123,11 +106,7 @@ struct PluginSlot {
     char name[kTextShort] = {};
     char version[kTextVersion] = {};
 
-    DrawEntry draws[TTPLUGIN_MAX_DRAWS] = {};
-    int drawCount = 0;
-    RegionEntry regions[TTPLUGIN_MAX_REGIONS] = {};
-    int regionCount = 0;
-    HotkeyEntry hotkeys[TTPLUGIN_MAX_HOTKEYS] = {};
+    HotkeyEntry hotkeys[MAX_HOTKEYS] = {};
     int hotkeyCount = 0;
 
     TaskEntry tasks[kMaxTasksPerPlugin] = {};
@@ -136,9 +115,6 @@ struct PluginSlot {
 
     // One log subscription per plugin; revoked by ClearRegistrations().
     LogSinkEntry logSink;
-
-    // One pointer subscription per plugin (hover / drag); same lifetime rule.
-    PointerEntry pointer;
 
     // Bumped around every callback that may run off the loader thread, so an
     // unload can prove that no plugin code is on a stack any more.
@@ -169,10 +145,119 @@ struct PluginSlot {
 // ---------------------------------------------------------------------------
 static PluginSlot g_slots[kMaxPlugins];
 static int g_slotCount = 0;
-static int g_activeSlot = -1;      // slot whose init() is running
+static thread_local int g_activeSlot = -1;   // slot whose callback runs on this thread
 static HWND g_mainHwnd = nullptr;
 static float g_uiScale = 1.0f;
+
+// Derive the host's DPI scale from its main window. Resolved dynamically so we
+// stay loadable on pre-Win8.1 (GetDpiForWindow is missing there -> fall back to
+// 96 dpi = scale 1.0). This is the data source for Host::scale().
+static float ComputeHostScale(HWND hwnd) {
+    UINT dpi = 96;
+    using PFN = UINT(WINAPI*)(HWND);
+    static PFN getDpi = reinterpret_cast<PFN>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (getDpi && hwnd) {
+        dpi = getDpi(hwnd);
+    }
+    return (dpi > 0) ? (static_cast<float>(dpi) / 96.0f) : 1.0f;
+}
+
 static bool g_started = false;
+
+// ---------------------------------------------------------------------------
+// Hotkey dispatcher.
+//
+// RegisterHotKey(hwnd, ...) posts WM_HOTKEY to the thread that created hwnd, so
+// a message-only window on a dedicated thread owns every registration and pumps
+// the queue. Plugins never see RegisterHotKey: they book via Host::addHotkey and
+// get fn(vk) back here. UnregisterHotKey happens in ClearRegistrations on unload.
+// ---------------------------------------------------------------------------
+static HWND g_hotkeyHwnd = nullptr;
+static HANDLE g_hotkeyReady = nullptr;
+static const int kHotkeyIdBase = 0x2000;   // stays clear of engine ids (0x5454)
+
+static void DispatchHotkey(int id) {
+    for (int s = 0; s < g_slotCount; ++s) {
+        PluginSlot& slot = g_slots[s];
+        if (slot.state != PluginState::kActive) {
+            continue;
+        }
+        for (int h = 0; h < slot.hotkeyCount; ++h) {
+            if (slot.hotkeys[h].id != id) {
+                continue;
+            }
+            const HotkeyEntry entry = slot.hotkeys[h];   // copy before guarding
+            if (entry.fn == nullptr) {
+                return;
+            }
+            InterlockedIncrement(&slot.inflight);
+            if (slot.state == PluginState::kActive) {
+                const int prev = g_activeSlot;
+                g_activeSlot = s;   // Host::log / submitTask see the owner
+                entry.fn(entry.vk, entry.user);
+                g_activeSlot = prev;
+            }
+            InterlockedDecrement(&slot.inflight);
+            return;
+        }
+    }
+}
+
+static LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_HOTKEY) {
+        DispatchHotkey(static_cast<int>(wp));
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static DWORD WINAPI HotkeyThreadProc(LPVOID) {
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &HotkeyWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PPluginHotkeyWnd";
+    RegisterClassExW(&wc);
+    g_hotkeyHwnd = CreateWindowExW(0, L"PPluginHotkeyWnd", L"", 0, 0, 0, 0, 0,
+                                   HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+    if (g_hotkeyReady != nullptr) {
+        SetEvent(g_hotkeyReady);
+    }
+    if (g_hotkeyHwnd == nullptr) {
+        return 0;
+    }
+    MSG msg = {};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+static void StartHotkeyThread() {
+    if (g_hotkeyHwnd != nullptr || g_hotkeyReady != nullptr) {
+        return;
+    }
+    g_hotkeyReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE thread = CreateThread(nullptr, 0, &HotkeyThreadProc, nullptr, 0, nullptr);
+    if (thread == nullptr) {
+        Log("plugin: hotkey CreateThread failed err=%lu", GetLastError());
+        if (g_hotkeyReady != nullptr) {
+            CloseHandle(g_hotkeyReady);
+            g_hotkeyReady = nullptr;
+        }
+        return;
+    }
+    CloseHandle(thread);
+    if (g_hotkeyReady != nullptr) {
+        WaitForSingleObject(g_hotkeyReady, 3000);
+        CloseHandle(g_hotkeyReady);
+        g_hotkeyReady = nullptr;
+    }
+    Log(g_hotkeyHwnd != nullptr ? "plugin: hotkey dispatcher ready"
+                                : "plugin: hotkey dispatcher unavailable");
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers.
@@ -219,7 +304,7 @@ static int FindPluginByName(const char* name) {
 }
 
 // ---------------------------------------------------------------------------
-// The TTPluginHost entry points.
+// The Host entry points.
 // ---------------------------------------------------------------------------
 static void __cdecl HostLog(const char* text) {
     Log("[plugin:%s] %s", ActiveName(), (text != nullptr) ? text : "(null)");
@@ -246,120 +331,76 @@ static float __cdecl HostScale() {
     return g_uiScale;
 }
 
-static int __cdecl HostAddDraw(TTPluginDrawFn fn, int priority, void* user) {
-    if (g_activeSlot < 0 || fn == nullptr) {
-        return TTPLUGIN_ERR_PARAM;
-    }
-    PluginSlot& slot = g_slots[g_activeSlot];
-    if (slot.drawCount >= TTPLUGIN_MAX_DRAWS) {
-        return TTPLUGIN_ERR_FULL;
-    }
-    DrawEntry& entry = slot.draws[slot.drawCount++];
-    entry.fn = fn;
-    entry.priority = priority;
-    entry.user = user;
-    return TTPLUGIN_OK;
-}
-
-static int __cdecl HostAddRegion(const RECT* logicalRect, int priority,
-                                 TTPluginClickFn fn, void* user) {
-    if (g_activeSlot < 0 || fn == nullptr || logicalRect == nullptr) {
-        return TTPLUGIN_ERR_PARAM;
-    }
-    PluginSlot& slot = g_slots[g_activeSlot];
-    if (slot.regionCount >= TTPLUGIN_MAX_REGIONS) {
-        return TTPLUGIN_ERR_FULL;
-    }
-    RegionEntry& entry = slot.regions[slot.regionCount++];
-    entry.rect = *logicalRect;
-    entry.priority = priority;
-    entry.fn = fn;
-    entry.user = user;
-    return TTPLUGIN_OK;
-}
-
-static int __cdecl HostAddHotkey(int vk, TTPluginHotkeyFn fn, void* user) {
+static int __cdecl HostAddHotkey(int vk, HotkeyFn fn, void* user) {
     if (g_activeSlot < 0 || fn == nullptr || vk <= 0) {
-        return TTPLUGIN_ERR_PARAM;
+        return ERR_PARAM;
     }
     PluginSlot& slot = g_slots[g_activeSlot];
-    if (slot.hotkeyCount >= TTPLUGIN_MAX_HOTKEYS) {
-        return TTPLUGIN_ERR_FULL;
+    if (slot.hotkeyCount >= MAX_HOTKEYS) {
+        return ERR_FULL;
+    }
+    if (g_hotkeyHwnd == nullptr) {
+        Log("plugin: %s addHotkey vk=0x%02X dropped (no dispatcher)", slot.name,
+            static_cast<unsigned>(vk));
+        return ERR_STATE;
+    }
+    const int id = kHotkeyIdBase + g_activeSlot * MAX_HOTKEYS + slot.hotkeyCount;
+    if (!RegisterHotKey(g_hotkeyHwnd, id, 0, static_cast<UINT>(vk))) {
+        Log("plugin: %s RegisterHotKey vk=0x%02X failed err=%lu", slot.name,
+            static_cast<unsigned>(vk), GetLastError());
+        return ERR_PARAM;
     }
     HotkeyEntry& entry = slot.hotkeys[slot.hotkeyCount++];
     entry.vk = vk;
+    entry.id = id;
     entry.fn = fn;
     entry.user = user;
-    return TTPLUGIN_OK;
+    Log("plugin: %s hotkey vk=0x%02X -> id=%d", slot.name,
+        static_cast<unsigned>(vk), id);
+    return P_OK;
 }
 
-static int __cdecl HostSubmitTask(TTPluginTaskFn fn, void* user) {
+static int __cdecl HostSubmitTask(TaskFn fn, void* user) {
     if (g_activeSlot < 0 || fn == nullptr) {
-        return TTPLUGIN_ERR_PARAM;
+        return ERR_PARAM;
     }
     PluginSlot& slot = g_slots[g_activeSlot];
     const int used = slot.taskTail - slot.taskHead;
     if (used >= kMaxTasksPerPlugin) {
-        return TTPLUGIN_ERR_FULL;
+        return ERR_FULL;
     }
     TaskEntry& entry = slot.tasks[slot.taskTail % kMaxTasksPerPlugin];
     entry.fn = fn;
     entry.user = user;
     ++slot.taskTail;
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
-static void* __cdecl HostQuery(const char* capability) {
-    // Reserved. Each future capability becomes a new atomic entry in
-    // ttplugin.h, never an opaque hook installer.
-    if (capability != nullptr) {
-        Log("[plugin:%s] query '%s' unsupported", ActiveName(), capability);
-    }
-    return nullptr;
-}
-
-static int __cdecl HostAddLogSink(TTPluginLogFn fn, void* user) {
+static int __cdecl HostAddLogSink(LogFn fn, void* user) {
     if (g_activeSlot < 0 || fn == nullptr) {
-        return TTPLUGIN_ERR_PARAM;
+        return ERR_PARAM;
     }
     PluginSlot& slot = g_slots[g_activeSlot];
     if (slot.logSink.fn != nullptr) {
-        return TTPLUGIN_ERR_FULL;
+        return ERR_FULL;
     }
     slot.logSink.fn = fn;
     slot.logSink.user = user;
-    return TTPLUGIN_OK;
-}
-
-static int __cdecl HostAddPointerSink(TTPluginPointerFn fn, void* user) {
-    if (g_activeSlot < 0 || fn == nullptr) {
-        return TTPLUGIN_ERR_PARAM;
-    }
-    PluginSlot& slot = g_slots[g_activeSlot];
-    if (slot.pointer.fn != nullptr) {
-        return TTPLUGIN_ERR_FULL;
-    }
-    slot.pointer.fn = fn;
-    slot.pointer.user = user;
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
 // The table handed to plugins. Filled once, never mutated afterwards.
-static const TTPluginHost g_host = {
-    TTPLUGIN_ABI,
-    static_cast<uint32_t>(sizeof(TTPluginHost)),
+static const Host g_host = {
+    P_ABI,
+    static_cast<uint32_t>(sizeof(Host)),
     &HostLog,
     &HostPluginDir,
     &HostMainWindow,
     &HostViewWindow,
     &HostScale,
-    &HostAddDraw,
-    &HostAddRegion,
     &HostAddHotkey,
     &HostSubmitTask,
-    &HostQuery,
-    &HostAddLogSink,
-    &HostAddPointerSink
+    &HostAddLogSink
 };
 
 // ---------------------------------------------------------------------------
@@ -367,7 +408,7 @@ static const TTPluginHost g_host = {
 //
 // Mirrors every framework log line to the subscribed plugins. Three rules keep
 // it safe:
-//   - re-entry is blocked per thread, so a sink calling TTPluginHost::log can
+//   - re-entry is blocked per thread, so a sink calling Host::log can
 //     never recurse;
 //   - the slot table is only appended during Start(), before any line can
 //     reach a sink, so the walk needs no lock;
@@ -402,24 +443,29 @@ static void ClearRegistrations(PluginSlot* slot) {
     if (slot == nullptr) {
         return;
     }
-    slot->drawCount = 0;
-    slot->regionCount = 0;
+    // Release OS hotkeys first so a reloaded plugin can register the same vk.
+    for (int h = 0; h < slot->hotkeyCount; ++h) {
+        if (slot->hotkeys[h].id != 0 && g_hotkeyHwnd != nullptr) {
+            UnregisterHotKey(g_hotkeyHwnd, slot->hotkeys[h].id);
+        }
+        slot->hotkeys[h].id = 0;
+        slot->hotkeys[h].vk = 0;
+        slot->hotkeys[h].fn = nullptr;
+        slot->hotkeys[h].user = nullptr;
+    }
     slot->hotkeyCount = 0;
     slot->taskHead = 0;
     slot->taskTail = 0;
     slot->logSink.fn = nullptr;
     slot->logSink.user = nullptr;
-    slot->pointer.fn = nullptr;
-    slot->pointer.user = nullptr;
 }
 
-static void SetHostContext(HWND mainHwnd, float uiScale) {
+static void SetHostContext(HWND mainHwnd) {
     g_mainHwnd = mainHwnd;
-    if (uiScale > 0.0f) {
-        g_uiScale = uiScale;
-    }
+    g_uiScale = ComputeHostScale(mainHwnd);
+    Log("host init=%d scale=%.2f", mainHwnd ? 1 : 0, g_uiScale);
 }
 
 }  // namespace plugins
 
-#endif  // TTVOICE_PLUGIN_API_INC
+#endif  // PPLUGIN_PLUGIN_API_INC

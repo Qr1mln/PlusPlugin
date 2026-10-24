@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-TTVoice 插件：编译 + 回填项目 + 安装到运行时（在虚拟机上编译）
+PlusPlugin 插件：编译 + 回填项目 + 安装到运行时（在虚拟机上编译）
 
 用法：
   python build_plugin.py                 # 默认编 script 插件
@@ -10,12 +10,12 @@ TTVoice 插件：编译 + 回填项目 + 安装到运行时（在虚拟机上编
 
 流程（每个插件）：
   1) 清空并重建虚拟机 C:\native（只做一次，逐个上传并集源码）
-  2) 上传插件源码目录 + 依赖（sdk/，script 另需 version_proxy/ 里的引擎 inc）
+  2) 上传插件源码目录 + 依赖（sdk/；script 的引擎已并入自身目录，不再需要 proxy/）
   3) 远程跑插件目录下的 build_plugin.bat
   4) 把产物回填到项目 plugin\<名称>\
   5) 安装到 %APPDATA%\TTVoice\plugins\<名称>\
      应用在跑时走框架热重载（enabled=false 卸载 → 覆盖 → enabled=true 加载）；
-     全新插件目录不会被运行中的框架发现，装完需重启一次 TTVoice。
+     全新插件目录不会被运行中的框架发现，装完需重启一次 pplugin。
 
 说明：只负责「编译 + 回填 + 装插件」；version.dll 框架本身由 deploy.py 负责。
 依赖：pip install paramiko
@@ -30,11 +30,11 @@ import time
 import paramiko
 
 # ===================== 配置区（按需修改） =====================
-VM_HOST = "172.28.11.230"
+VM_HOST = "172.20.106.42"
 VM_USER = "111"
 VM_PASSWORD = os.getenv("VM_PASSWORD", "111")
 
-REPO_ROOT = r"D:\AIProjects\TTVoice"
+REPO_ROOT = r"D:\PyProjects\PlusPlugin"
 VM_ROOT = "C:/native"
 RUNTIME_PLUGINS = os.path.join(os.environ.get("APPDATA", ""), "TTVoice", "plugins")
 
@@ -44,7 +44,7 @@ PLUGINS = {
         "dir": "plugin/script",
         "dll": "script.dll",
         "install": "script",
-        "deps": ("sdk", "version_proxy"),   # 引擎源码 script_engine.inc 在 version_proxy
+        "deps": ("sdk",),           # 引擎 script_engine.inc 已移入 plugin/script/
         "stale": (),
     },
     "console": {
@@ -140,7 +140,7 @@ def scanned_this_run(name):
     最后一次 "attached exe=" 之后有没有该目录的 "plugin: found ..." 就是答案。
     """
     path = os.path.join(os.environ.get("APPDATA", ""), "TTVoice",
-                        "tt_version_proxy.log")
+                        "proxy.log")
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             text = fh.read()[-400000:]
@@ -193,12 +193,12 @@ def install(spec):
     scanned = hot and scanned_this_run(spec["install"])
 
     if scanned:
-        log("TTVoice 正在运行且已扫描到该插件：先写 enabled=false 让框架卸载旧版本")
+        log("pplugin 正在运行且已扫描到该插件：先写 enabled=false 让框架卸载旧版本")
         set_enabled(dst_json, False)
         for stale in spec["stale"]:
             wait_unlocked(os.path.join(dst_dir, stale), timeout=3.0)
         if not wait_unlocked(dst_dll):
-            log(f"[WARN] {dst_dll} 仍被占用，请关闭 TTVoice 后重跑")
+            log(f"[WARN] {dst_dll} 仍被占用，请关闭 pplugin 后重跑")
             raise SystemExit(1)
 
     try:
@@ -218,11 +218,11 @@ def install(spec):
 
     log(f"安装 {dst_dll}")
     if not hot:
-        log("TTVoice 未运行，下次启动时加载")
+        log("pplugin 未运行，下次启动时加载")
     elif scanned:
         log("已覆盖，框架约 1 秒内自动加载新版本（日志看 plugin: ... hot reloading）")
     else:
-        log("[!] 该插件目录不在当前进程的扫描结果里：重启一次 TTVoice 才会加载")
+        log("[!] 该插件目录不在当前进程的扫描结果里：重启一次 pplugin 才会加载")
 
 
 def build_one(client, sftp, name, spec):

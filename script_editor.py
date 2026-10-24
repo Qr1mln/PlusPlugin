@@ -1,14 +1,14 @@
-"""TTVoice 点击脚本编辑器（极简版）。
+"""pplugin 点击脚本编辑器（极简版）。
 
 独立窗口，做三件事：
-  1. 在 TTVoice 界面上「拾取坐标」——点一下目标位置即记录（这次点击会被吞掉，
+  1. 在 pplugin 界面上「拾取坐标」——点一下目标位置即记录（这次点击会被吞掉，
      不会触发应用），坐标按 FLUTTERVIEW 相对逻辑 px（96 dpi）保存；
   2. 编辑事件表（坐标 / 点击类型 / 间隔 / 滚轮 / 门控 / 粘贴内容）；
   3. 存成 JSON 供 DLL 读取执行；本窗口也能直接「试跑」验证坐标。
 
 脚本目录：%APPDATA%\\TTVoice\\scripts\\<名称>.json
 保存时还会写同目录的 active.txt（记下刚保存的脚本名），DLL 优先跑这一个；
-overlay.ini 里的 script=<名称> 可以强制指定，两者都没有就跑最新的 .json。
+没有就跑最新的 .json。指定/运行某个脚本改由插件自带面板窗口完成。
 运行：python tools/script_editor.py
 
 JSON 格式（DLL 侧读取的就是这一份）：
@@ -33,7 +33,7 @@ JSON 格式（DLL 侧读取的就是这一份）：
   loop          整份脚本重复执行的轮数
   delay_ms      本行执行完之后的等待（下一行开始前）
   wheel         滚轮格数：正=向上，负=向下，0=不滚
-  text          非空时先把文本写进剪贴板，再给 TTVoice 发 Ctrl+V（需 TTVoice 在前台）
+  text          非空时先把文本写进剪贴板，再给 pplugin 发 Ctrl+V（需 pplugin 在前台）
   wait_px       门控：先等到 (x,y) 周围出现至少这么多「奶油色」像素再执行本行；0=不等
   wait_max_ms   门控最长等待，超时后照常执行本行（不中止）
   view_size     编辑器额外写的 [w,h]（保存时的 view 客户区），DLL 不认这个键，只用来提醒坐标基准变了
@@ -105,7 +105,7 @@ LABEL_CLICKS = {v: k for k, v in CLICK_LABELS.items()}
 CLICK_KINDS = {"left": 0, "double": 1, "right": 2}
 
 # --- 与 DLL 对齐的常量/上限（改一边必须改另一边）-------------------------
-GATE_POLL_MS = 120        # = overlay.ini 的 gate_poll_ms（DLL 侧只认这个键）
+GATE_POLL_MS = 120        # = DLL g_gatePollMs 固定值（编辑器模拟轮询，两边必须一致）
 GATE_STABLE = 3           # DLL：连续 3 次命中才放行
 GATE_MAX_MS = 4000        # wait_max_ms <= 0 时 DLL 用的上限
 CREAM_MIN_PX = 40         # 「门控检查（不点）」没填 wait_px 时用的默认阈值
@@ -115,9 +115,8 @@ MAX_EVENTS = 32           # kScriptMaxEvents：DLL 只读前 32 行
 MAX_TEXT = 255            # kScriptText-1：更长的 text 会被 DLL 截断
 MAX_LOOP = 99             # loop 上限
 
-# DLL 的日志文件（LogFromOverlay 写）与 ini（script= 会覆盖 active.txt）
-DLL_LOG = os.path.join(os.environ.get("TEMP", "tools"), "tt_version_proxy.log")
-OVERLAY_INI = os.path.join(os.environ.get("APPDATA", ""), "TTVoice", "overlay.ini")
+# DLL 的日志文件（LogFromOverlay 写）
+DLL_LOG = os.path.join(os.environ.get("TEMP", "tools"), "proxy.log")
 
 # 与 overlay.inc IsWarnLine 同一批关键字：命中的日志行画琥珀色
 WARN_MARKS = ("fail", "timeout", "busy", "ignored", "skipped", "WARN",
@@ -278,7 +277,7 @@ def proc_name(hwnd: int) -> str:
 
 
 class Target:
-    """当前找到的 TTVoice 窗口（主窗口 + FLUTTERVIEW）。"""
+    """当前找到的 pplugin 窗口（主窗口 + FLUTTERVIEW）。"""
 
     def __init__(self):
         self.main = 0
@@ -294,7 +293,7 @@ class Target:
 
     def describe(self) -> str:
         if not self.ok:
-            return "未找到 TTVoice（先启动应用，再点「刷新」）"
+            return "未找到 pplugin（先启动应用，再点「刷新」）"
         return "%s  view %dx%d  DPI %d%%" % (self.exe or "?", self.w, self.h, round(self.scale * 100))
 
 
@@ -694,7 +693,7 @@ class App:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("TTVoice 点击脚本编辑器")
+        self.root.title("pplugin 点击脚本编辑器")
         # Tk 的字体按 DPI 放大（150% 屏 scaling=2.0），几何/列宽也要同步放大，
         # 否则文字放大了而窗口没放大，布局会挤成一团。
         self.scale = self._ui_scale()
@@ -842,7 +841,7 @@ class App:
             return True
         self.refresh_target(quiet=True)
         if not self.target.ok:
-            messagebox.showwarning("找不到 TTVoice",
+            messagebox.showwarning("找不到 pplugin",
                                    "没找到 FLUTTERVIEW 子窗口。先启动 TT语音，再点「刷新目标」。")
             return False
         return True
@@ -1108,7 +1107,7 @@ class App:
         self._log_dll_view()
 
     def _write_active(self, name: str) -> None:
-        """DLL 按这个文件选脚本；overlay.ini 的 script= 优先于它。"""
+        """DLL 按这个文件选脚本（优先级高于最新 .json）。"""
         path = os.path.join(self.scripts_dir, "active.txt")
         try:
             with open(path, "w", encoding="utf-8") as fh:
@@ -1130,21 +1129,7 @@ class App:
                 self._log("parity: 第 %d 行 text %d 字符 > %d，DLL 会截断" % (i, len(text), MAX_TEXT))
 
     def _dll_will_run(self) -> tuple[str, str]:
-        """按 DLL 的优先级算它下一次会加载哪份：ini script= > active.txt > 最新 .json。"""
-        forced = ""
-        try:
-            with open(OVERLAY_INI, "r", encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line.lower().startswith("script="):
-                        forced = line.split("=", 1)[1].strip()
-        except OSError:
-            pass
-        if forced:
-            if forced.lower().endswith(".json"):
-                forced = forced[:-5]
-            return forced, "overlay.ini script="
-
+        """按 DLL 的优先级算它下一次会加载哪份：active.txt > 最新 .json。"""
         name = ""
         try:
             # DLL 只读前 159 字节的第一行，并且会无条件补 ".json"
@@ -1204,7 +1189,7 @@ class App:
             return
         path = self._script_path(name)
         if not os.path.exists(path):
-            # ini script= 指空了就直接当「没脚本」，不再往下看 active.txt / 最新 json
+            # active.txt 指空了就直接当「没脚本」，不再往下看最新 .json
             self._log('dll view: DLL 要找 "%s"（来源 %s）但文件不存在 -> script: no json found, '
                       "the button does nothing" % (name, source))
             self._log('dll view: 叠加层按钮会显示「无脚本」，点下去没有任何动作（两段点击链已移除）；'
@@ -1224,7 +1209,7 @@ class App:
                       % (path, detail, detail))
         if self.current_name and name != self.current_name:
             # 还没载入过任何脚本（current_name 为空）时不打这条，免得开窗就报空名字
-            self._log("警告: DLL 加载的不是当前脚本「%s」——检查 overlay.ini 的 script= 或 active.txt"
+            self._log("警告: DLL 加载的不是当前脚本「%s」——检查 active.txt"
                       % self.current_name)
 
     def delete_script(self) -> None:
@@ -1397,7 +1382,7 @@ class App:
                            % (index, px, py, need))
         hit = self._gate_wait(cap, px, py, need, int(ev.get("wait_max_ms") or 0))
         path = os.path.join(os.environ.get("TEMP", "tools"),
-                            "ttvoice_probe_line%d.bmp" % index)
+                            "pplugin_probe_line%d.bmp" % index)
         if cap.save_bmp(path):
             self.msg_queue.put("probe: 抓帧已存 %s" % path)
         if hit:

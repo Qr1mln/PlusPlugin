@@ -37,7 +37,7 @@ if errorlevel 1 (
 
 rem /I"%~dp0.." puts the repo root on the include path so dllmain's
 rem "framework/..." includes resolve (framework/ and sdk/ live at the repo root,
-rem not under version_proxy/). Harmless if your VM already provides it another way.
+rem not under proxy/). Harmless if your VM already provides it another way.
 cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 /I"%~dp0.." dllmain.cpp stubs.obj /link user32.lib /DEF:exports.def /OUT:version.dll /MACHINE:X64
 if errorlevel 1 (
     echo [ERROR] link failed

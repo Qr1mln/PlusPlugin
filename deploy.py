@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 r"""
-TTVoice 运行时部署脚本（把项目里的 version.dll 装到运行时目录）
+PlusPlugin 运行时部署脚本（把项目里的 version.dll 装到运行时目录）
 流程：
   1) 关闭宿主 TTVoice.exe（杀进程树，释放 dll 句柄）
   2) 备份运行时旧 version.dll 为 .bak（若尚无备份）
-  3) 用项目 version_proxy\version.dll 覆盖运行时 version.dll（占用重试）
-  4) 启动 TTVoice（可在配置区关闭）
+  3) 用项目 proxy\version.dll 覆盖运行时 version.dll（占用重试）
+  4) 启动 pplugin（可在配置区关闭）
 说明：不编译、不连 VM。编译 + 回填项目请先跑 build.py。
       插件（plugin\ 下）用 build_plugin.py 编译并安装。
 """
@@ -15,11 +15,11 @@ import shutil
 import subprocess
 
 # ===================== 配置区（按需修改） =====================
-REPO_ROOT = r"D:\AIProjects\TTVoice"
-PROJECT_DLL = os.path.join(REPO_ROOT, "version_proxy", "version.dll")  # 源（build.py 产出）
-DST_DIR = r"C:\Users\111\AppData\Roaming\TTVoice"                      # 宿主 TTVoice 运行时目录
-TTVOICE_EXE = os.path.join(DST_DIR, "TTVoice.exe")
-START_AFTER_DEPLOY = True                               # 部署后是否自动启动 TTVoice
+REPO_ROOT = r"D:\PyProjects\PlusPlugin"
+PROJECT_DLL = os.path.join(REPO_ROOT, "proxy", "version.dll")  # 源（build.py 产出）
+DST_DIR = r"C:\Users\111\AppData\Roaming\TTVoice"               # 宿主运行时目录（= %APPDATA%\TTVoice）
+PPLUGIN_EXE = os.path.join(DST_DIR, "TTVoice.exe")
+START_AFTER_DEPLOY = True                               # 部署后是否自动启动 pplugin
 # =============================================================
 
 
@@ -32,7 +32,7 @@ def main():
         log(f"未找到 {PROJECT_DLL}，请先跑 build.py 编译并回填项目。")
         raise SystemExit(1)
 
-    # 1) 关闭宿主 TTVoice（杀整个进程树，确保释放 dll 句柄）
+    # 1) 关闭宿主 pplugin（杀整个进程树，确保释放 dll 句柄）
     log("关闭宿主 TTVoice.exe ...")
     subprocess.run("taskkill /im TTVoice.exe /f /t", shell=True)
     time.sleep(2)
@@ -69,9 +69,9 @@ def main():
 
     # 4) 启动
     if START_AFTER_DEPLOY:
-        log(f"启动 {TTVOICE_EXE} ...")
+        log(f"启动 {PPLUGIN_EXE} ...")
         os.chdir(DST_DIR)
-        subprocess.Popen([TTVOICE_EXE], shell=True)
+        subprocess.Popen([PPLUGIN_EXE], shell=True)
 
     log("完成。")
 

@@ -1,4 +1,4 @@
-// version.dll proxy payload: forwarding shell + early hooks + plugin loader.
+// version.dll proxy payload: forwarding shell + plugin loader.
 // Target process: TTVoice.exe (x64), Flutter + ANGLE(D3D11)
 //
 // Forwarding model:
@@ -11,13 +11,14 @@
 // the real DLL trivial (kernel32 only) so early loading cannot disturb the
 // graphics stack.
 //
-// Framework duties (this module is the framework, see ttplugin.h):
+// Framework duties (this module is the framework, see pplugin.h):
 //   1. Forward every version.dll export to the real one (stubs.asm).
-//   2. Own every hook installation: the D3D11 present patch and the early
-//      GetProcAddress interception. Plugins never install hooks themselves,
-//      which is exactly what makes a plugin unloadable at runtime.
+//   2. Provide the plugin framework only. The proxy does NOT render: no Present
+//      hook, no D3D/DXGI device, no overlay window. Each plugin owns its own
+//      window/UI and accesses the host through the Host API. Plugins never
+//      install hooks or create devices themselves, so they stay unloadable.
 //   3. Load and unload plugins from %APPDATA%\TTVoice\plugins. A plugin only
-//      books callbacks through TTPluginHost, so the loader can revoke the
+//      books callbacks through Host, so the loader can revoke the
 //      whole set and then FreeLibrary it.
 //
 // NOTE: keep this file pure ASCII.
@@ -39,7 +40,7 @@ PROXY_EXPORT_LIST(DEF_PTR)
 
 static int g_resolveMiss = -1;
 static const wchar_t* kTargetDll = L"version.dll";
-static const wchar_t* kLogFile = L"tt_version_proxy.log";
+static const wchar_t* kLogFile = L"proxy.log";
 
 // Installed by the framework package once plugins may be loaded. Declared
 // before Log() so the logger can mirror every line to the plugin log sinks.
@@ -96,6 +97,7 @@ static void Log(const char* fmt, ...) {
     }
 }
 
+// Populate g_pfn_* with the real System32 version.dll exports (forwarding model).
 static int ResolveRealDll() {
     wchar_t sysdir[MAX_PATH] = {};
     UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);
@@ -117,16 +119,10 @@ static int ResolveRealDll() {
 }
 
 #include "framework/plugin_api.inc"     // g_slots / entries / PluginState (guarded; also pulled by the loader)
-#include "framework/render.inc"         // M1 seam: plugins::RenderFrame / DispatchClick (needs plugin_api.inc)
-#include "overlay.inc"                  // old monolithic overlay; calls the render.inc seam (draw + click)
 #include "framework/plugin_loader.inc"  // lifecycle / control.txt (re-includes plugin_api.inc, no-op)
 
-namespace ov {
-static void LogFromOverlay(const char* text) {
-    Log("%s", text);   // file only: the log panel is the console plugin's window
-}
-}  // namespace ov
-
+// Cached base name of the host EXE, used to guard payload so we only act inside
+// TTVoice.exe and never a child process or the wrong target.
 static const wchar_t* ExeBaseName() {
     static wchar_t buf[MAX_PATH] = {};
     if (buf[0] == L'\0') {
@@ -138,13 +134,6 @@ static const wchar_t* ExeBaseName() {
         }
     }
     return buf;
-}
-
-static UINT QueryDpi(HWND hwnd) {
-    using PFN = UINT(WINAPI*)(HWND);
-    static PFN fn = reinterpret_cast<PFN>(
-        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
-    return fn ? fn(hwnd) : 0;
 }
 
 struct WindowSearch {
@@ -167,12 +156,20 @@ static BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lp) {
     return TRUE;
 }
 
+// TTVoice's UI is a Flutter desktop app whose top-level window uses the well-known
+// FLUTTER_RUNNER_WIN32_WINDOW class. We locate it to give its HWND to the framework
+// as Host::mainWindow / viewWindow.
 static HWND FindFlutterWindow() {
     WindowSearch ctx{GetCurrentProcessId(), nullptr};
     EnumWindows(EnumProc, reinterpret_cast<LPARAM>(&ctx));
     return ctx.found;
 }
 
+// Runs off DllMain (spawned by CreateThread) so plugins are never loaded while the
+// loader lock is held: a plugin's own DllMain may call user32 or start a thread.
+// Flow: confirm host -> wait for the graphics stack (dxgi signals the UI is coming
+// up) -> wait for the Flutter window -> hand HWND to framework (derives DPI scale,
+// then starts plugins).
 static DWORD WINAPI PayloadThread(LPVOID) {
     Log("attached exe=%ls resolve_miss=%d", ExeBaseName(), g_resolveMiss);
 
@@ -207,15 +204,13 @@ static DWORD WINAPI PayloadThread(LPVOID) {
 
     RECT rc = {};
     GetWindowRect(hwnd, &rc);
-    Log("flutter window hwnd=%p rect=%ld,%ld,%ld,%ld dpi=%u",
-        reinterpret_cast<void*>(hwnd), rc.left, rc.top, rc.right, rc.bottom, QueryDpi(hwnd));
-
-    const bool overlayReady = ov::Init(hwnd);
-    Log("overlay init=%d scale=%.2f", overlayReady ? 1 : 0, ov::g_scale);
+    Log("flutter window hwnd=%p rect=%ld,%ld,%ld,%ld",
+        reinterpret_cast<void*>(hwnd), rc.left, rc.top, rc.right, rc.bottom);
 
     // Plugins load only after the UI exists and never under the loader lock:
     // a plugin may touch user32 or create a thread in its own DllMain.
-    plugins::SetHostContext(hwnd, ov::g_scale);
+    // The framework derives the DPI scale from hwnd itself (see Host::scale()).
+    plugins::SetHostContext(hwnd);
     plugins::Start();
 
     return 0;
@@ -226,12 +221,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(hModule);
         g_resolveMiss = ResolveRealDll();
 
-        // Start the D3D11/GetProcAddress patch as early as possible: ANGLE
-        // creates its device during startup, before the main window exists.
-        if (lstrcmpiW(ExeBaseName(), L"TTVoice.exe") == 0) {
-            ov::StartD3D11Hook();
-        }
+        // No early hook: the proxy does not render. The framework owns the Host
+        // API (incl. scale, derived from the host window); plugins own their
+        // own windows/UI.
 
+        // Defer all plugin/host work to a worker thread, never under the loader lock.
         HANDLE th = CreateThread(nullptr, 0, PayloadThread, nullptr, 0, nullptr);
         if (th) CloseHandle(th);
     }

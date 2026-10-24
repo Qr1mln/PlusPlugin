@@ -1,7 +1,7 @@
-# TTVoice DLL 当前逻辑说明
+# PlusPlugin DLL 当前逻辑说明
 
 > 本文是**现状描述**（代码读出来的事实），不是待办计划。开发/里程碑/踩坑见 `改造开发-进度与交接.md`。
-> 对应源码：`../version_proxy/`（工作区）= `C:\native\version_proxy\`（VM 编译机）。
+> 对应源码：`../proxy/`（工作区）= `C:\native\proxy\`（VM 编译机）。
 
 ---
 
@@ -20,17 +20,17 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| [`dllmain.cpp`](file:///D:/AIProjects/TTVoice/native/version_proxy/dllmain.cpp) | 196 | 代理本体：解析真身导出、`Log()`、找主窗口、起线程 |
-| [`overlay.inc`](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc) | 1567 | Present hook、绘制、输入子类化、视觉门控抓帧/判色、ini 配置、D3D11 BGRA hook |
-| [`script_engine.inc`](file:///D:/AIProjects/TTVoice/native/version_proxy/script_engine.inc) | 833 | JSON 精简解析、脚本选择/热重载、逐行执行、全局热键 |
-| [`stubs.asm`](file:///D:/AIProjects/TTVoice/native/version_proxy/stubs.asm) | 93 | 17 个 `jmp qword ptr [g_pfn_X]`（**auto-generated**） |
-| [`exports.def`](file:///D:/AIProjects/TTVoice/native/version_proxy/exports.def) | 21 | `LIBRARY version` + 17 个导出名（**auto-generated**） |
-| [`proxy_exports.h`](file:///D:/AIProjects/TTVoice/native/version_proxy/proxy_exports.h) | 23 | X-macro 导出列表，驱动「定义指针」和「解析指针」两处（**auto-generated**） |
-| [`build.bat`](file:///D:/AIProjects/TTVoice/native/version_proxy/build.bat) | 47 | `vswhere` → `vcvars64` → `ml64` → `cl /LD /MT /O2 /EHsc /W4 /utf-8` |
+| [`dllmain.cpp`](file:///D:/AIProjects/PlusPlugin/native/proxy/dllmain.cpp) | 196 | 代理本体：解析真身导出、`Log()`、找主窗口、起线程 |
+| [`overlay.inc`](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc) | 1567 | Present hook、绘制、输入子类化、视觉门控抓帧/判色、ini 配置、D3D11 BGRA hook |
+| [`script_engine.inc`](file:///D:/AIProjects/PlusPlugin/native/proxy/script_engine.inc) | 833 | JSON 精简解析、脚本选择/热重载、逐行执行、全局热键 |
+| [`stubs.asm`](file:///D:/AIProjects/PlusPlugin/native/proxy/stubs.asm) | 93 | 17 个 `jmp qword ptr [g_pfn_X]`（**auto-generated**） |
+| [`exports.def`](file:///D:/AIProjects/PlusPlugin/native/proxy/exports.def) | 21 | `LIBRARY version` + 17 个导出名（**auto-generated**） |
+| [`proxy_exports.h`](file:///D:/AIProjects/PlusPlugin/native/proxy/proxy_exports.h) | 23 | X-macro 导出列表，驱动「定义指针」和「解析指针」两处（**auto-generated**） |
+| [`build.bat`](file:///D:/AIProjects/PlusPlugin/native/proxy/build.bat) | 47 | `vswhere` → `vcvars64` → `ml64` → `cl /LD /MT /O2 /EHsc /W4 /utf-8` |
 
-`.inc` 是被 `#include` 进 `dllmain.cpp` 的（`overlay.inc` 在 `namespace ov` 内，`overlay.inc` 自己又在 [L912](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L912) include `script_engine.inc`），所以整个 DLL 只有**一个编译单元**，所有符号都是 `static`。三个源文件必须**纯 ASCII**（中文一律 `\xXXXX` 转义），这是踩坑 1 的硬约束。
+`.inc` 是被 `#include` 进 `dllmain.cpp` 的（`overlay.inc` 在 `namespace ov` 内，`overlay.inc` 自己又在 [L912](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L912) include `script_engine.inc`），所以整个 DLL 只有**一个编译单元**，所有符号都是 `static`。三个源文件必须**纯 ASCII**（中文一律 `\xXXXX` 转义），这是踩坑 1 的硬约束。
 
-`native/dwmapi_proxy/` 是早期同类代理，载荷只到「找到窗口 + 打印 `payload ready (hook placeholder)`」就结束了（[dllmain.cpp L167-L170](file:///D:/AIProjects/TTVoice/native/dwmapi_proxy/dllmain.cpp#L167-L170)），**没有任何叠加绘制或点击逻辑，也不参与部署**——它留着只作为「为什么最后选了 version.dll」的历史证据（踩坑 12：dwmapi 代理会在 DllMain 里提前拉起 dcomp/图形栈，导致「序数 137 于 d3d9.dll」弹窗）。
+`native/dwmapi_proxy/` 是早期同类代理，载荷只到「找到窗口 + 打印 `payload ready (hook placeholder)`」就结束了（[dllmain.cpp L167-L170](file:///D:/AIProjects/PlusPlugin/native/dwmapi_proxy/dllmain.cpp#L167-L170)），**没有任何叠加绘制或点击逻辑，也不参与部署**——它留着只作为「为什么最后选了 version.dll」的历史证据（踩坑 12：dwmapi 代理会在 DllMain 里提前拉起 dcomp/图形栈，导致「序数 137 于 d3d9.dll」弹窗）。
 
 ---
 
@@ -56,7 +56,7 @@ TTVoice.exe 启动
             └─ ov::Init(hwnd)
 ```
 
-`ov::Init`（[overlay.inc L1543](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1543)）五步，顺序有意义：
+`ov::Init`（[overlay.inc L1543](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L1543)）五步，顺序有意义：
 
 | 步骤 | 做什么 | 失败后果 |
 |---|---|---|
@@ -77,7 +77,7 @@ TTVoice.exe 启动
 ANGLE 建 device 时不带 `D3D11_CREATE_DEVICE_BGRA_SUPPORT`，导致 `ID2D1Factory1::CreateDevice` 报 `E_INVALIDARG`。修法是给 `D3D11CreateDevice` / `D3D11CreateDeviceAndSwapChain` 的 `flags` 按位或上这个标志，两条拦截路径并用：
 
 - **IAT 补丁**：`PatchIatForModule` 遍历模块导入表，只认**按名字**的导入；把 `d3d11.dll!D3D11CreateDevice(AndSwapChain)` 和任意模块的 `GetProcAddress` 换成我们的包装。触发点有两处：启动时 `PatchAllD3D11Iat()` 扫一遍已加载模块 + `LdrRegisterDllNotification` 在新模块加载瞬间补（回调在 loader lock 下，刻意不分配内存不打日志）。另外还有一个 100 × 100ms 的兜底重扫，覆盖延迟解析导入的模块。
-- **`GetProcAddress` 拦截**：`libGLESv2` 是动态加载 `d3d11.dll` 的，IAT 里没有那些符号，所以必须钩 `GetProcAddress`，当 `mod == g_d3d11Module` 且是名字导入时返回包装函数（拦截处 `HookGetProcAddress` [L1204](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1204)，替换 IAT 槽在 [L1272](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L1272)）。
+- **`GetProcAddress` 拦截**：`libGLESv2` 是动态加载 `d3d11.dll` 的，IAT 里没有那些符号，所以必须钩 `GetProcAddress`，当 `mod == g_d3d11Module` 且是名字导入时返回包装函数（拦截处 `HookGetProcAddress` [L1204](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L1204)，替换 IAT 槽在 [L1272](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L1272)）。
 
 首次命中打一行 `d3d11: CreateDevice flags=0x%X -> add BGRA` 或 `gpa: D3D11CreateDevice intercepted`，都只打一次。
 
@@ -114,11 +114,11 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1035]
 
 ## 5. 绘制
 
-`Draw`（[L759](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L759)）：`EnsureDevice` → 首次 `InitD2D` → `DrawD2D`，返回 false 才 `DrawFallback`。
+`Draw`（[L759](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L759)）：`EnsureDevice` → 首次 `InitD2D` → `DrawD2D`，返回 false 才 `DrawFallback`。
 
 **flip-model 缓存**：ANGLE 是多缓冲轮转，`GetBuffer(0)` 每次可能给不同纹理，所以 `ObtainBuffer` 按「纹理指针 + 宽高」缓存最多 4 个 `BufEntry{tex, rtv, bmp, w, h}`；超了就复用第 0 项重建。`ResizeBuffers` 时整表清空。
 
-### 5.1 D2D 主路径（`DrawD2D`，[L664](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L664)）
+### 5.1 D2D 主路径（`DrawD2D`，[L664](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L664)）
 
 变换矩阵强制 Identity（自己乘 `g_scale`），画两坨东西：
 
@@ -134,11 +134,11 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1035]
 
 `EndDraw` 失败 → `ResetTargets()` 并返回 false，下一帧自动走兜底路径。
 
-### 5.2 D3D11 兜底（`DrawFallback`，[L727](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L727)）
+### 5.2 D3D11 兜底（`DrawFallback`，[L727](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L727)）
 
 只用 `ClearView` 往 RTV 刷两块纯色矩形：按钮主体（press 时亮 0.08）+ 顶部 6 物理 px 的强调条。**没有任何文字，也没有界面日志**。第一次进入打一行 `overlay: using d3d11 fallback (no text)`，看到它就意味着「界面上看不到状态提示」是正常的。
 
-### 5.3 字体链（`InitTextFormat`，[L327](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L327)）
+### 5.3 字体链（`InitTextFormat`，[L327](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L327)）
 
 优先级从高到低，任一级成功即止：
 
@@ -153,9 +153,9 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1035]
 
 ## 6. 输入接管
 
-`EnsureViewSubclass`（[L979](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L979)）在 Present 回调里对 `FLUTTERVIEW` 做一次 `SetWindowLongPtrW(GWLP_WNDPROC)`，原过程存 `g_origViewProc`；`SetWindowLongPtr` 失败只打一次 `overlay: SetWindowLongPtr failed, no click handling`。之后 `ViewProc` 在 UI 线程被调用（P2-1 已实测点击可用）。
+`EnsureViewSubclass`（[L979](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L979)）在 Present 回调里对 `FLUTTERVIEW` 做一次 `SetWindowLongPtrW(GWLP_WNDPROC)`，原过程存 `g_origViewProc`；`SetWindowLongPtr` 失败只打一次 `overlay: SetWindowLongPtr failed, no click handling`。之后 `ViewProc` 在 UI 线程被调用（P2-1 已实测点击可用）。
 
-`ViewProc`（[L928](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L928)）的分流原则是**只吃按钮矩形内的事件**，其余一律转发：
+`ViewProc`（[L928](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L928)）的分流原则是**只吃按钮矩形内的事件**，其余一律转发：
 
 | 消息 | 矩形内 | 矩形外 |
 |---|---|---|
@@ -170,7 +170,7 @@ HookPresent(sc) → OnPresent(sc)                    [overlay.inc L1035]
 
 ## 7. 点击之后跑什么（核心分流）
 
-`OnButtonClick()`（[L922](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L922)）就是全部逻辑：
+`OnButtonClick()`（[L922](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L922)）就是全部逻辑：
 
 ```cpp
 (void)ScriptTryRun(true);   // verbose：抢不到东西时也要把原因说出来
@@ -202,7 +202,7 @@ ini 里硬编码的两段点击链（`click_x` / `click_y` / `click2_*` / `click
 
 ### 7.2 视觉门控（为什么不用固定延时）
 
-「要等上一页跳完才出现的元素」不能靠固定延时点：实测 600ms 稳定偏早（踩坑 15）。门控只有 `WaitForCreamAt` 一处（[script_engine.inc L680](file:///D:/AIProjects/TTVoice/native/version_proxy/script_engine.inc#L680)），由每行的 `wait_px` 调用；它复用 `overlay.inc` 里的 `CaptureView` / `CountCreamBand`：
+「要等上一页跳完才出现的元素」不能靠固定延时点：实测 600ms 稳定偏早（踩坑 15）。门控只有 `WaitForCreamAt` 一处（[script_engine.inc L680](file:///D:/AIProjects/PlusPlugin/native/proxy/script_engine.inc#L680)），由每行的 `wait_px` 调用；它复用 `overlay.inc` 里的 `CaptureView` / `CountCreamBand`：
 
 ```
 limit = wait_max_ms > 0 ? wait_max_ms : 4000
@@ -223,13 +223,13 @@ poll  = gate_poll_ms < 30 ? 120 : 值        （ini 键，默认 120）
 
 ### 8.1 选脚本 + 热重载
 
-`ScriptResolvePath`（[L445](file:///D:/AIProjects/TTVoice/native/version_proxy/script_engine.inc#L445)）三档优先级：
+`ScriptResolvePath`（[L445](file:///D:/AIProjects/PlusPlugin/native/proxy/script_engine.inc#L445)）三档优先级：
 
 1. `overlay.ini` 的 `script=<名>`（不带 `.json` 会自动补）→ 文件不存在**直接判「没脚本」，不会继续往下看后两档**；
 2. `scripts\active.txt`：只读**前 159 字节**的首行，无条件补 `.json`；文件不存在则静默降到第 3 档；
 3. `scripts\*.json` 里**修改时间最新**的那个（`>=` 比较，同时间取后遍历到的）。
 
-`ScriptReload(bool verbose)`（[L512](file:///D:/AIProjects/TTVoice/native/version_proxy/script_engine.inc#L512)）的三条短路：
+`ScriptReload(bool verbose)`（[L512](file:///D:/AIProjects/PlusPlugin/native/proxy/script_engine.inc#L512)）的三条短路：
 
 - `g_scriptActive != 0`（正在跑）→ 直接返回 `g_script.count > 0`，**绝不在运行中途换脚本**；
 - 路径没变且 `ftLastWriteTime` 没变 → 复用已解析结果（一次 `GetFileAttributesExW`，很便宜）；但 `verbose` 且上次是被拒收 → 重复打一行 `script: parse failed ...`（§7）；
@@ -266,7 +266,7 @@ for round in 1..loop:
      本轮最后一行之外   → Sleep(delay_ms)      # 整份脚本的最后一行不 delay
 ```
 
-同时 `ScriptReload` 的三个出口会写「脚本状态」，由 `SetScriptStatus`（[overlay.inc L434](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L434)）落到界面上：
+同时 `ScriptReload` 的三个出口会写「脚本状态」，由 `SetScriptStatus`（[overlay.inc L434](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L434)）落到界面上：
 
 | code | 触发条件 | 常驻状态行 | 胶囊文字 |
 |---|---|---|---|
@@ -278,7 +278,7 @@ for round in 1..loop:
 
 ### 8.4 热键与 2 秒轮询线程
 
-`ScriptHotkeyThread`（[L786](file:///D:/AIProjects/TTVoice/native/version_proxy/script_engine.inc#L786)）是一个死循环：
+`ScriptHotkeyThread`（[L786](file:///D:/AIProjects/PlusPlugin/native/proxy/script_engine.inc#L786)）是一个死循环：
 
 ```
 每轮：ScriptReload(false)                     ← 热重载的实际驱动，不只在按钮点击时；静默防屏
@@ -296,17 +296,17 @@ for round in 1..loop:
 
 ## 9. 日志
 
-两条输出，同一个入口 `ov::LogFromOverlay`（[dllmain.cpp L85](file:///D:/AIProjects/TTVoice/native/version_proxy/dllmain.cpp#L85)）：
+两条输出，同一个入口 `ov::LogFromOverlay`（[dllmain.cpp L85](file:///D:/AIProjects/PlusPlugin/native/proxy/dllmain.cpp#L85)）：
 
 ```
-LogFromOverlay(text) → Log()        写 tt_version_proxy.log（默认 version.dll 同目录 %APPDATA%\TTVoice\，回退 %TEMP%），前缀 [HH:MM:SS.mmm][pid][tid]
+LogFromOverlay(text) → Log()        写 proxy.log（默认 version.dll 同目录 %APPDATA%\TTVoice\，回退 %TEMP%），前缀 [HH:MM:SS.mmm][pid][tid]
                    → PushScreenLog() 进界面环形缓冲（自己拼 [HH:MM:SS.mmm] 前缀，见 §9）
 ```
 
-**界面日志**（`log_on_screen=1`，[overlay.inc L346-L551](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L346-L551)）：本质是左下角的一个 **tail -f 面板**。
+**界面日志**（`log_on_screen=1`，[overlay.inc L346-L551](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L346-L551)）：本质是左下角的一个 **tail -f 面板**。
 
 - 环形缓冲 `24 × 200` 个宽字符，满了 `memmove` 丢最旧的一条（**下标 0 永远是最旧、末尾永远是最新**，所以绘制时取尾部 `log_lines` 行就是天然的时间序）；跨线程写入全程 `SRWLOCK`；
-- **每一行都带 `[HH:MM:SS.mmm]` 前缀**（`StampPrefix` [L382](file:///D:/AIProjects/TTVoice/native/version_proxy/overlay.inc#L382)，与日志文件同一个时钟）：这不是装饰 —— 同一个错误反复出现时（连点「活动」每次都是 `overlay: button clicked` + `script: no json found ...`），正文逐字符相同，没有时间戳的话 6 行窗口里的内容永远一模一样，**环形缓冲在滚但眼睛看不出来**，会被当成「面板卡住了」；
+- **每一行都带 `[HH:MM:SS.mmm]` 前缀**（`StampPrefix` [L382](file:///D:/AIProjects/PlusPlugin/native/proxy/overlay.inc#L382)，与日志文件同一个时钟）：这不是装饰 —— 同一个错误反复出现时（连点「活动」每次都是 `overlay: button clicked` + `script: no json found ...`），正文逐字符相同，没有时间戳的话 6 行窗口里的内容永远一模一样，**环形缓冲在滚但眼睛看不出来**，会被当成「面板卡住了」；
 - 长行只截不断：`kStampLen = 16` 是给前缀留的位，剩下的 `184` 字容不下的部分就地截断（不用 `strncpy_s(_TRUNCATE)`，它溢出时会走 CRT invalid-parameter 处理器 → 直接带死宿主进程）；
 - 每帧在共享锁里取**快照**（常驻状态行 + 最近 `log_lines` 行），绘制时只碰本地数组；
 - 位置：左下角，边距 12 逻辑 px，半透明黑底 `#0A0D12 α0.78` 圆角 5 逻辑 px，宽度 `min(画面 55%, 980 逻辑 px)`，小于 120 逻辑 px 直接不画；
@@ -388,15 +388,15 @@ LogFromOverlay(text) → Log()        写 tt_version_proxy.log（默认 version.
 
 ```bat
 :: 构建（VM：VS 2022 Build Tools + MASM）
-C:\native\version_proxy\build.bat
+C:\native\proxy\build.bat
 
 :: 部署（就一个文件）
 taskkill /f /im TTVoice.exe 2>nul
-copy /y "C:\native\version_proxy\version.dll" "%APPDATA%\TTVoice\version.dll"
+copy /y "C:\native\proxy\version.dll" "%APPDATA%\TTVoice\version.dll"
 start "" "%APPDATA%\TTVoice\TTVoice.exe"
 
 :: 看日志
-type "%APPDATA%\TTVoice\tt_version_proxy.log"   REM 默认 version.dll 同目录；回退则在 %TEMP%
+type "%APPDATA%\TTVoice\proxy.log"   REM 默认 version.dll 同目录；回退则在 %TEMP%
 ```
 
 **回滚**：删 `%APPDATA%\TTVoice\version.dll`。安装目录本来没有这个文件，删掉即恢复原样。
@@ -409,8 +409,8 @@ type "%APPDATA%\TTVoice\tt_version_proxy.log"   REM 默认 version.dll 同目录
 | `%APPDATA%\TTVoice\overlay.ini` | 首次运行由 `LoadConfig` 生成的模板；老 ini 缺 `log_*` 键时追加一次（修好 `=` 被改 NUL 的探测 bug 后不再每次启动都追加） |
 | `%APPDATA%\TTVoice\scripts\<名称>.json` | `../script_editor.py` 保存 |
 | `%APPDATA%\TTVoice\scripts\active.txt` | 编辑器保存时写，DLL 按它选脚本 |
-| `%APPDATA%\TTVoice\tt_version_proxy.log` | DLL 日志（默认 version.dll 同目录；模块路径取不到时回退 `%TEMP%\tt_version_proxy.log`） |
-| `%TEMP%\ttvoice_probe_line<N>.bmp` | 编辑器「门控检查」存的抓帧（DLL 不产生） |
+| `%APPDATA%\TTVoice\proxy.log` | DLL 日志（默认 version.dll 同目录；模块路径取不到时回退 `%TEMP%\proxy.log`） |
+| `%TEMP%\pplugin_probe_line<N>.bmp` | 编辑器「门控检查」存的抓帧（DLL 不产生） |
 
 ---
 
@@ -444,13 +444,13 @@ version.dll（代理）
 
 | 文件 | 职责 |
 |---|---|
-| [`plugin/script/script_plugin.cpp`](file:///D:/AIProjects/TTVoice/plugin/script/script_plugin.cpp) | 插件本体：`TTPlugin_GetDesc`/init/tick/shutdown、`script_engine.inc` 需要的同名 shim（`LogFromOverlay`/`SetScriptStatus`/`g_hwnd`/`g_viewHwnd`/`g_scale`/`g_gatePollMs`）、`CaptureView`/`CountCreamBand`、**分步执行器**、热键轮询、`run.txt` 触发 |
-| [`plugin/script/plugin.json`](file:///D:/AIProjects/TTVoice/plugin/script/plugin.json) | 清单：`name=script`、`dll=script.dll`、`priority=10`、`enabled=true` |
-| [`plugin/script/build_plugin.bat`](file:///D:/AIProjects/TTVoice/plugin/script/build_plugin.bat) | VM 侧编译（`cl /LD /MT /O2 /EHsc /W4 /utf-8`） |
-| [`build_plugin.py`](file:///D:/AIProjects/TTVoice/build_plugin.py) | 通用插件流水线：建 `C:\native` → 上传 → 编译 → 回填项目 → 装到 `%APPDATA%\TTVoice\plugins\<name>\` |
+| [`plugin/script/script_plugin.cpp`](file:///D:/AIProjects/PlusPlugin/plugin/script/script_plugin.cpp) | 插件本体：`GetDesc`/init/tick/shutdown、`script_engine.inc` 需要的同名 shim（`LogFromOverlay`/`SetScriptStatus`/`g_hwnd`/`g_viewHwnd`/`g_scale`/`g_gatePollMs`）、`CaptureView`/`CountCreamBand`、**分步执行器**、热键轮询、`run.txt` 触发 |
+| [`plugin/script/plugin.json`](file:///D:/AIProjects/PlusPlugin/plugin/script/plugin.json) | 清单：`name=script`、`dll=script.dll`、`priority=10`、`enabled=true` |
+| [`plugin/script/build_plugin.bat`](file:///D:/AIProjects/PlusPlugin/plugin/script/build_plugin.bat) | VM 侧编译（`cl /LD /MT /O2 /EHsc /W4 /utf-8`） |
+| [`build_plugin.py`](file:///D:/AIProjects/PlusPlugin/build_plugin.py) | 通用插件流水线：建 `C:\native` → 上传 → 编译 → 回填项目 → 装到 `%APPDATA%\TTVoice\plugins\<name>\` |
 | 产物 `plugin/script/script.dll` | x64 单文件 |
 
-引擎仍是**同一份源码**：`script_plugin.cpp` 直接 `#include "../../version_proxy/script_engine.inc"`（`overlay.inc` 在 include 之前提供的东西，这里由插件的 shim 提供同名同义的一份）。所以 §8 的 JSON 契约、§10 的 parity 常量表对它逐条成立，改引擎两边同步生效。引擎里「起线程跑整份脚本」和「`RegisterHotKey` 热键线程」这两半被**刻意不使用**（编译器会给 C4505，文件里已用 pragma 局部关掉）。
+引擎仍是**同一份源码**：`script_plugin.cpp` 直接 `#include "../../proxy/script_engine.inc"`（`overlay.inc` 在 include 之前提供的东西，这里由插件的 shim 提供同名同义的一份）。所以 §8 的 JSON 契约、§10 的 parity 常量表对它逐条成立，改引擎两边同步生效。引擎里「起线程跑整份脚本」和「`RegisterHotKey` 热键线程」这两半被**刻意不使用**（编译器会给 C4505，文件里已用 pragma 局部关掉）。
 
 ### 14.2 生命周期与线程归属
 
@@ -460,7 +460,7 @@ PayloadThread（框架）                 PluginControlThread（框架，每 16m
     └─ ScanPlugins()                      ├─ 每 1s：ScriptReload(false)（stat 一次，静默）
          └─ LoadPlugin("script")          ├─ 每 tick：轮询 hotkey（GetAsyncKeyState 边沿）
               ├─ LoadLibraryExW           └─ 每 300ms：看 scripts\run.txt
-              ├─ TTPlugin_GetDesc()
+              ├─ GetDesc()
               └─ init(host)              RunPendingTasks()
                    ├─ LoadConfig()           └─ RunStep()：延迟/门控/动作，各一步
                    ├─ RefreshView()               └─ 自己 submitTask 再排下一步
@@ -490,7 +490,7 @@ PayloadThread（框架）                 PluginControlThread（框架，每 16m
 | 绘制、屏上日志、胶囊状态行 | 有 | 无（`SetScriptStatus` 只记 code + 原因写日志） |
 | 执行线程 | 自建 `ScriptRunThread` | 框架线程上的分步 task |
 | 门控等待 | `Sleep` 轮询（阻塞该线程） | 每步一帧（不阻塞） |
-| 日志 | `%APPDATA%\TTVoice\tt_version_proxy.log` | 同一条日志（走 `host->log`）：`init`/`shutdown` 带 `[plugin:script]`，`tick`/task 带 `[plugin:framework]`（框架只在 init/shutdown 期设置 `g_activeSlot`），正文一律以 `script: ` 开头 |
+| 日志 | `%APPDATA%\TTVoice\proxy.log` | 同一条日志（走 `host->log`）：`init`/`shutdown` 带 `[plugin:script]`，`tick`/task 带 `[plugin:framework]`（框架只在 init/shutdown 期设置 `g_activeSlot`），正文一律以 `script: ` 开头 |
 | 中止 | 没有 | 没有（编辑器才有停止），但卸载插件即可丢弃后续步骤 |
 
 ### 14.5 构建 / 安装
@@ -502,7 +502,7 @@ python build_plugin.py console          :: 同一脚本也支持 console
 python build_plugin.py script console   :: 依次编
 ```
 
-**全新插件目录不会被运行中的框架发现**（`ScanPlugins` 只在 `Start()` 跑一次，之后只有热重载已扫描到的槽位），所以第一次装上 `script` 后需要重启一次 TTVoice；之后改代码重编，`build_plugin.py` 会用 `enabled=false → 覆盖 → enabled=true` 让框架自动加载新版本。
+**全新插件目录不会被运行中的框架发现**（`ScanPlugins` 只在 `Start()` 跑一次，之后只有热重载已扫描到的槽位），所以第一次装上 `script` 后需要重启一次 pplugin；之后改代码重编，`build_plugin.py` 会用 `enabled=false → 覆盖 → enabled=true` 让框架自动加载新版本。
 
 ### 14.6 已知边界
 
@@ -510,5 +510,5 @@ python build_plugin.py script console   :: 依次编
 - **热键抢不到**：轮询实现意味着按键仍会送进应用；`addHotkey` 派发落地后应改成真正的全局热键。
 - **门控是硬阈值**（§11 同一条）：±200×±40 物理 px 带 + `R>228,G>210,B<228,R-B>22`，换主题/分辨率要重新取样。
 - **DPI**：`g_scale` 在 `RefreshView` 时刷新（每次 run 前都刷），但一次 run 中途不重算。
-- 粘贴仍要求 TTVoice 在前台（`SetForegroundWindow` 受焦点策略限制），与代理一模一样。
+- 粘贴仍要求 pplugin 在前台（`SetForegroundWindow` 受焦点策略限制），与代理一模一样。
 

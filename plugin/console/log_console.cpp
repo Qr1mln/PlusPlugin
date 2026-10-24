@@ -21,7 +21,7 @@
 // Keep this file pure ASCII.
 // ============================================================================
 
-#include "../sdk/ttplugin.h"
+#include "../sdk/pplugin.h"
 
 #include <d2d1.h>
 #include <d2d1helper.h>
@@ -56,7 +56,7 @@ const float kTotalH       = kTitleH + kPanelH;                     // whole wind
 const UINT  kIdleRepaintMs = 250;    // refresh floor when no new line arrives
 const wchar_t* kTitleText = L"console";
 
-const wchar_t* kPanelClass = L"TTVoiceConsolePanel";
+const wchar_t* kPanelClass = L"ppluginConsolePanel";
 
 struct RingEntry {
     char text[kRingLineChars];
@@ -68,7 +68,7 @@ int       g_tail = 0;                // oldest unread position
 SRWLOCK   g_ringLock = SRWLOCK_INIT;
 volatile LONG g_dirty = 1;           // ring changed, needs a repaint
 
-const TTPluginHost*       g_host = nullptr;
+const Host*       g_host = nullptr;
 HINSTANCE                 g_inst = nullptr;
 ComPtr<IDWriteFactory>    g_dw;
 ComPtr<IDWriteTextFormat> g_fmt;
@@ -571,17 +571,17 @@ int __cdecl OnPluginTick(void) {
     return 0;
 }
 
-int __cdecl OnPluginInit(const TTPluginHost* host) {
+int __cdecl OnPluginInit(const Host* host) {
     g_host = host;
-    if (host == nullptr) return TTPLUGIN_ERR_PARAM;
-    if (host->abi != TTPLUGIN_ABI) return TTPLUGIN_ERR_PARAM;
+    if (host == nullptr) return ERR_PARAM;
+    if (host->abi != P_ABI) return ERR_PARAM;
 
     // addLogSink sits after query in the table. Refuse instead of reading past
     // the end of an older framework build.
-    if (host->structSize < sizeof(TTPluginHost)) {
+    if (host->structSize < sizeof(Host)) {
         if (host->log != nullptr) host->log("console: framework too old");
         g_host = nullptr;
-        return TTPLUGIN_ERR_STATE;
+        return ERR_STATE;
     }
 
     if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
@@ -589,7 +589,7 @@ int __cdecl OnPluginInit(const TTPluginHost* host) {
             reinterpret_cast<IUnknown**>(g_dw.GetAddressOf())))) {
         if (host->log != nullptr) host->log("console: DWrite factory failed");
         g_host = nullptr;
-        return TTPLUGIN_ERR_STATE;
+        return ERR_STATE;
     }
     g_scale = host->scale();
     if (g_scale <= 0.0f) g_scale = 1.0f;
@@ -600,7 +600,7 @@ int __cdecl OnPluginInit(const TTPluginHost* host) {
         if (host->log != nullptr) host->log("console: text format failed");
         g_dw.Reset();
         g_host = nullptr;
-        return TTPLUGIN_ERR_STATE;
+        return ERR_STATE;
     }
     g_fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     g_fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -615,14 +615,14 @@ int __cdecl OnPluginInit(const TTPluginHost* host) {
         g_fmt.Reset();
         g_dw.Reset();
         g_host = nullptr;
-        return TTPLUGIN_ERR_STATE;
+        return ERR_STATE;
     }
     g_titleFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     g_titleFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     g_titleFmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
     const int sinkRc = host->addLogSink(&OnLogLine, nullptr);
-    if (sinkRc != TTPLUGIN_OK) {
+    if (sinkRc != P_OK) {
         if (host->log != nullptr) host->log("console: log sink rejected");
         g_fmt.Reset();
         g_dw.Reset();
@@ -631,7 +631,7 @@ int __cdecl OnPluginInit(const TTPluginHost* host) {
     }
 
     host->log("console: attached, panel is its own window");
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
 int __cdecl OnPluginShutdown(void) {
@@ -650,12 +650,12 @@ int __cdecl OnPluginShutdown(void) {
     ReleaseSRWLockExclusive(&g_ringLock);
     InterlockedExchange(&g_dirty, 1);
     g_lastPaint = 0;
-    return TTPLUGIN_OK;
+    return P_OK;
 }
 
-const TTPluginDesc kDesc = {
-    TTPLUGIN_ABI,
-    static_cast<uint32_t>(sizeof(TTPluginDesc)),
+const Desc kDesc = {
+    P_ABI,
+    static_cast<uint32_t>(sizeof(Desc)),
     "console",
     "0.3.0",
     &OnPluginInit,
@@ -666,7 +666,7 @@ const TTPluginDesc kDesc = {
 }  // namespace
 
 // The single export the framework looks up.
-extern "C" __declspec(dllexport) const TTPluginDesc* __cdecl TTPlugin_GetDesc(void) {
+extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
     return &kDesc;
 }
 

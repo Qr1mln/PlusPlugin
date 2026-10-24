@@ -27,7 +27,7 @@ if errorlevel 1 (
 if exist console.dll del /q console.dll
 
 rem /I"%~dp0.." puts plugin/ on the include path so the source's
-rem "../sdk/ttplugin.h" resolves to the repo-root sdk/ directory.
+rem "../sdk/pplugin.h" resolves to the repo-root sdk/ directory.
 cl /nologo /LD /MT /O2 /EHsc /W4 /utf-8 /I"%~dp0.." log_console.cpp ^
    /link /OUT:console.dll /MACHINE:X64 d2d1.lib dwrite.lib
 if errorlevel 1 (
