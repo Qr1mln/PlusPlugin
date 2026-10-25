@@ -185,7 +185,15 @@ static void LoadConfig() {
                 "; script plugin config\r\n"
                 "; panel_hotkey = VK code that toggles the panel (0 = disabled).\r\n"
                 "; Examples: F1=0x70, F9=0x78, F10=0x79, F12=0x7B\r\n"
-                "panel_hotkey=0\r\n";
+                "panel_hotkey=0\r\n"
+                ";\r\n"
+                "; click_input = how coordinate rows click\r\n"
+                ";   msg  = PostMessage WM_*BUTTONDOWN/UP at the view window\r\n"
+                ";          (no cursor movement, no foreground needed; reaches\r\n"
+                ";          Flutter widgets, NOT WebView2/H5 content)\r\n"
+                ";   send = SendInput with the real cursor (moves the mouse,\r\n"
+                ";          needs the window in front; reaches WebView2 too)\r\n"
+                "click_input=msg\r\n";
             fwrite(tmpl, 1, strlen(tmpl), fp);
             fclose(fp);
             LogFromOverlay("script: wrote plugin config template");
@@ -213,11 +221,15 @@ static void LoadConfig() {
 
         if (_stricmp(key, "panel_hotkey") == 0) {
             g_panelVk = atoi(val);
+        } else if (_stricmp(key, "click_input") == 0) {
+            // msg (default) = posted window messages, send = SendInput
+            g_inputMsg = (_stricmp(val, "send") != 0);
         }
     }
 
-    char line[96] = {};
-    sprintf_s(line, "script: config panel_hotkey=%d", g_panelVk);
+    char line[128] = {};
+    sprintf_s(line, "script: config panel_hotkey=%d click_input=%s", g_panelVk,
+              g_inputMsg ? "msg" : "send");
     LogFromOverlay(line);
 }
 
@@ -781,7 +793,12 @@ static void RequestRunChecked() {
     g_dirty = true;
 }
 
+// Implemented further down (mini bar section).
+static void HidePanel();
+static void ShowPanelAgain();
+
 static void OnButton(HWND hwnd, int i) {
+    (void)hwnd;
     switch (i) {
     case 0: RequestRunChecked(); break;
     case 1:
@@ -789,7 +806,7 @@ static void OnButton(HWND hwnd, int i) {
         InterlockedExchange(&g_stopRequested, 1);
         break;
     case 2: EnumerateScripts(); break;
-    case 3: ShowWindow(hwnd, SW_HIDE); break;
+    case 3: HidePanel(); break;   // collapse to the mini chip
     default: break;
     }
 }
@@ -994,6 +1011,280 @@ static void Paint() {
     g_dirty = false;
 }
 
+// ---- mini chip (collapsed state) -------------------------------------------
+//
+// Hiding the panel leaves a small chip in its place, so the plugin stays
+// reachable without a hotkey or a tray icon. Click the chip to bring the panel
+// back, drag it anywhere. Same layered / no-activate treatment as the panel:
+// it never takes focus from the app. A dot on the right shows whether a run is
+// active (green) or the plugin is idle (grey).
+
+static const float kMiniW = 96.0f;
+static const float kMiniH = 26.0f;
+
+static HWND    g_mini = nullptr;
+static bool    g_miniHover = false;
+static bool    g_miniDrag = false;
+static bool    g_miniVisible = false;   // kept across app minimize/restore
+static POINT   g_miniGrab = {0, 0};
+static POINT   g_miniDown = {0, 0};
+static HDC     g_mmemDC = nullptr;
+static HBITMAP g_mbmp = nullptr;
+static HGDIOBJ g_moldBmp = nullptr;
+static ComPtr<ID2D1DCRenderTarget> g_mrt;
+static int     g_mwinW = 0;
+static int     g_mwinH = 0;
+
+static void MiniReleaseSurfaces() {
+    g_mrt.Reset();
+    if (g_mmemDC != nullptr && g_moldBmp != nullptr) {
+        SelectObject(g_mmemDC, g_moldBmp);
+        g_moldBmp = nullptr;
+    }
+    if (g_mbmp != nullptr) {
+        DeleteObject(g_mbmp);
+        g_mbmp = nullptr;
+    }
+    if (g_mmemDC != nullptr) {
+        DeleteDC(g_mmemDC);
+        g_mmemDC = nullptr;
+    }
+}
+
+static bool MiniEnsureSurfaces(UINT w, UINT h) {
+    if (g_mrt != nullptr && w == static_cast<UINT>(g_mwinW) &&
+        h == static_cast<UINT>(g_mwinH)) {
+        return true;
+    }
+    MiniReleaseSurfaces();
+    if (w == 0 || h == 0) return false;
+
+    if (g_d2d == nullptr) {
+        D2D1_FACTORY_OPTIONS opts = {};
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                                     __uuidof(ID2D1Factory), &opts,
+                                     reinterpret_cast<void**>(g_d2d.GetAddressOf())))) {
+            return false;
+        }
+    }
+
+    HDC screen = GetDC(nullptr);
+    g_mmemDC = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (g_mmemDC == nullptr) return false;
+
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = static_cast<LONG>(w);
+    bi.bmiHeader.biHeight = -static_cast<LONG>(h);   // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    g_mbmp = CreateDIBSection(g_mmemDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (g_mbmp == nullptr || bits == nullptr) {
+        MiniReleaseSurfaces();
+        return false;
+    }
+    g_moldBmp = SelectObject(g_mmemDC, g_mbmp);
+
+    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        0.0f, 0.0f, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT);
+    if (FAILED(g_d2d->CreateDCRenderTarget(&props, g_mrt.GetAddressOf()))) {
+        MiniReleaseSurfaces();
+        return false;
+    }
+    g_mrt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    g_mrt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    g_mwinW = static_cast<int>(w);
+    g_mwinH = static_cast<int>(h);
+    return true;
+}
+
+static void PaintMini() {
+    if (g_mini == nullptr || g_titleFmt == nullptr) return;
+    if (!MiniEnsureSurfaces(static_cast<UINT>(kMiniW * g_scale + 0.5f),
+                            static_cast<UINT>(kMiniH * g_scale + 0.5f))) {
+        return;
+    }
+    const RECT bounds = {0, 0, g_mwinW, g_mwinH};
+    if (FAILED(g_mrt->BindDC(g_mmemDC, &bounds))) return;
+
+    const float W = static_cast<float>(g_mwinW);
+    const float H = static_cast<float>(g_mwinH);
+    const float s = g_scale;
+
+    ComPtr<ID2D1SolidColorBrush> body, fg, dot;
+    const bool running = InterlockedCompareExchange(&g_scriptActive, 0, 0) != 0;
+    const bool ok =
+        SUCCEEDED(g_mrt->CreateSolidColorBrush(
+            g_miniHover ? D2D1::ColorF(0.16f, 0.19f, 0.25f, 0.95f)
+                        : D2D1::ColorF(0.06f, 0.07f, 0.10f, 0.88f),
+            body.GetAddressOf())) &&
+        SUCCEEDED(g_mrt->CreateSolidColorBrush(D2D1::ColorF(0.86f, 0.89f, 0.93f, 1.0f),
+                                               fg.GetAddressOf())) &&
+        SUCCEEDED(g_mrt->CreateSolidColorBrush(
+            running ? D2D1::ColorF(0.35f, 0.80f, 0.50f, 1.0f)
+                    : D2D1::ColorF(0.45f, 0.50f, 0.58f, 1.0f),
+            dot.GetAddressOf()));
+    if (!ok) return;
+
+    g_mrt->BeginDraw();
+    g_mrt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+        D2D1::RectF(0.0f, 0.0f, W, H), 5.0f * s, 5.0f * s);
+    g_mrt->FillRoundedRectangle(rr, body.Get());
+    g_mrt->DrawRoundedRectangle(rr, dot.Get(), 1.0f * s);
+
+    const D2D1_RECT_F tr = D2D1::RectF(10.0f * s, 0.0f, W - 22.0f * s, H);
+    g_mrt->DrawText(L"script", 6, g_titleFmt.Get(), &tr, fg.Get());
+    g_mrt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(W - 13.0f * s, H * 0.5f),
+                                     3.0f * s, 3.0f * s),
+                       dot.Get());
+
+    if (FAILED(g_mrt->EndDraw())) {
+        MiniReleaseSurfaces();
+        return;
+    }
+
+    BLENDFUNCTION blend = {};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    POINT src = {0, 0};
+    SIZE size = {g_mwinW, g_mwinH};
+    UpdateLayeredWindow(g_mini, nullptr, nullptr, &size, g_mmemDC, &src, 0, &blend,
+                        ULW_ALPHA);
+}
+
+static void ShowMini(bool show) {
+    if (g_mini == nullptr || !IsWindow(g_mini)) return;
+    if (!show) {
+        ShowWindow(g_mini, SW_HIDE);
+        g_miniVisible = false;
+        return;
+    }
+    // Appear exactly where the panel was, so the eye does not have to hunt.
+    RECT pr = {};
+    if (g_panel != nullptr && IsWindow(g_panel) && GetWindowRect(g_panel, &pr)) {
+        SetWindowPos(g_mini, HWND_TOP, pr.left, pr.top, 0, 0,
+                     SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    ShowWindow(g_mini, SW_SHOWNOACTIVATE);
+    g_miniVisible = true;
+    PaintMini();
+}
+
+static void HidePanel() {
+    if (g_panel != nullptr && IsWindow(g_panel)) {
+        ShowWindow(g_panel, SW_HIDE);
+    }
+    ShowMini(true);
+}
+
+static void ShowPanelAgain() {
+    ShowMini(false);
+    if (g_panel != nullptr && IsWindow(g_panel)) {
+        ShowWindow(g_panel, SW_SHOWNOACTIVATE);
+        g_dirty = true;
+        Paint();
+    }
+}
+
+static LRESULT CALLBACK MiniProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        POINT cur = {};
+        GetCursorPos(&cur);
+        RECT wr = {};
+        GetWindowRect(hwnd, &wr);
+        g_miniGrab.x = cur.x - wr.left;
+        g_miniGrab.y = cur.y - wr.top;
+        g_miniDown = cur;
+        g_miniDrag = true;
+        SetCapture(hwnd);
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (g_miniDrag) {
+            POINT cur = {};
+            GetCursorPos(&cur);
+            SetWindowPos(hwnd, HWND_TOP, cur.x - g_miniGrab.x, cur.y - g_miniGrab.y,
+                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            return 0;
+        }
+        if (!g_miniHover) {
+            g_miniHover = true;
+            TRACKMOUSEEVENT tme = {};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+            PaintMini();
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        if (g_miniHover) {
+            g_miniHover = false;
+            PaintMini();
+        }
+        return 0;
+    case WM_LBUTTONUP: {
+        if (!g_miniDrag) return 0;
+        g_miniDrag = false;
+        ReleaseCapture();
+        POINT cur = {};
+        GetCursorPos(&cur);
+        const int dx = cur.x - g_miniDown.x;
+        const int dy = cur.y - g_miniDown.y;
+        if (dx * dx + dy * dy < 16) {   // a click, not a drag
+            ShowPanelAgain();
+        }
+        return 0;
+    }
+    case WM_RBUTTONUP:
+        ShowPanelAgain();
+        return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32649)));   // hand
+            return TRUE;
+        }
+        break;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DESTROY:
+        g_mini = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void CreateMini() {
+    if (g_mini != nullptr && IsWindow(g_mini)) return;
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &MiniProc;
+    wc.hInstance = g_panelInst;
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    wc.lpszClassName = L"ppluginScriptMini";
+    RegisterClassExW(&wc);   // ERROR_CLASS_ALREADY_EXISTS tolerated
+
+    g_mini = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"ppluginScriptMini",
+        L"", WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
+        static_cast<int>(kMiniW * g_scale + 0.5f),
+        static_cast<int>(kMiniH * g_scale + 0.5f), g_owner, nullptr, g_panelInst,
+        nullptr);
+    if (g_mini == nullptr) {
+        LogFromOverlay("script: mini window create failed");
+        return;
+    }
+    ShowWindow(g_mini, SW_HIDE);
+}
+
 // ---- hit testing / messages ------------------------------------------------
 
 static bool InTitle(float ly) { return ly >= 0.0f && ly < kTitleH; }
@@ -1038,11 +1329,17 @@ static void OwnerFollow(HWND hwnd) {
     const bool iconic = IsIconic(g_owner) != 0;
     if (iconic && !g_ownerIconic) {
         ShowWindow(hwnd, SW_HIDE);
+        if (g_mini != nullptr) ShowWindow(g_mini, SW_HIDE);
         g_ownerIconic = true;
         return;
     }
     if (!iconic && g_ownerIconic) {
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // Restore whichever form was showing: the chip means "still collapsed".
+        if (g_miniVisible && g_mini != nullptr) {
+            ShowWindow(g_mini, SW_SHOWNOACTIVATE);
+        } else {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
         g_ownerIconic = false;
         g_dirty = true;
     }
@@ -1510,7 +1807,7 @@ static LRESULT CALLBACK ScriptPanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         const float lx = static_cast<float>(pt.x);
         const float ly = static_cast<float>(pt.y);
         if (InClose(lx, ly)) {
-            ShowWindow(hwnd, SW_HIDE);
+            HidePanel();   // same as 隐藏: collapse to the mini chip
             return 0;
         }
         if (InTitle(ly)) {
@@ -1623,12 +1920,13 @@ static LRESULT CALLBACK ScriptPanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             if (!IsWindow(hwnd)) return 0;
             UpdateStatuses();
             if (g_dirty) Paint();
+            if (g_miniVisible) PaintMini();   // the dot tracks the run state
         }
         return 0;
     case WM_RBUTTONDOWN:
         return 0;
     case WM_CLOSE:
-        ShowWindow(hwnd, SW_HIDE);
+        HidePanel();   // same as the 隐藏 button: collapse to the mini chip
         return 0;
     case WM_ERASEBKGND:
         return 1;   // layered window paints itself
@@ -1727,6 +2025,7 @@ static DWORD WINAPI ScriptPanelThread(LPVOID) {
         return 0;
     }
 
+    CreateMini();   // created hidden; the 隐藏 button swaps to it
     EnumerateScripts();
     ShowWindow(g_panel, SW_SHOW);
     SetTimer(g_panel, 1, 150, nullptr);
@@ -1742,10 +2041,15 @@ static DWORD WINAPI ScriptPanelThread(LPVOID) {
         DestroyWindow(g_panel);   // own thread, as required
         g_panel = nullptr;
     }
+    if (g_mini != nullptr) {
+        DestroyWindow(g_mini);
+        g_mini = nullptr;
+    }
     if (g_viewer != nullptr) {
         DestroyWindow(g_viewer);
         g_viewer = nullptr;
     }
+    MiniReleaseSurfaces();
     ViewReleaseSurfaces();
     ReleaseSurfaces();
     g_monoFmt.Reset();
@@ -1755,6 +2059,7 @@ static DWORD WINAPI ScriptPanelThread(LPVOID) {
     g_dw.Reset();
     UnregisterClassW(L"ppluginScriptPanel", g_panelInst);
     UnregisterClassW(L"ppluginScriptViewer", g_panelInst);
+    UnregisterClassW(L"ppluginScriptMini", g_panelInst);
     return 0;
 }
 
@@ -1786,11 +2091,16 @@ static void StopPanel() {
     g_owner = nullptr;
 }
 
-// Toggle panel visibility from the optional panel hotkey.
+// Toggle panel visibility from the optional panel hotkey: visible -> collapse
+// to the mini chip, hidden -> bring the panel back.
 static void __cdecl OnPanelKey(int vk, void*) {
     (void)vk;
     if (g_panel == nullptr) return;
-    ShowWindow(g_panel, IsWindowVisible(g_panel) ? SW_HIDE : SW_SHOW);
+    if (IsWindowVisible(g_panel)) {
+        HidePanel();
+    } else {
+        ShowPanelAgain();
+    }
 }
 
 // ============================================================================

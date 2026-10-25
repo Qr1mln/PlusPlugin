@@ -96,6 +96,31 @@ bool    g_titleHover = false;        // cursor over the title bar
 POINT   g_grab = {0, 0};             // cursor offset inside the window at DOWN
 ULONGLONG g_lastPaint = 0;
 
+// -- collapsed chip ---------------------------------------------------------
+//
+// Same idea as the script panel: folding the console leaves a small chip in the
+// same place, and clicking the chip brings the panel back. There is no toolbar
+// here, so the fold button lives at the right end of the title bar.
+
+const float kFoldW = 26.0f;          // fold button width inside the title bar
+const float kMiniW = 96.0f;
+const float kMiniH = 26.0f;
+const wchar_t* kMiniText = L"console";
+
+HWND    g_mini = nullptr;
+bool    g_miniHover = false;
+bool    g_miniDrag = false;
+bool    g_miniVisible = false;       // survives app minimize/restore
+bool    g_foldHover = false;
+POINT   g_miniGrab = {0, 0};
+POINT   g_miniDown = {0, 0};
+HDC     g_mmemDC = nullptr;
+HBITMAP g_mbmp = nullptr;
+HGDIOBJ g_moldBmp = nullptr;
+ComPtr<ID2D1DCRenderTarget> g_mrt;
+UINT    g_mbmpW = 0;
+UINT    g_mbmpH = 0;
+
 // Amber-highlight the same keywords the built-in overlay panel uses, so a
 // failure line stands out in the plugin panel too. Case sensitive wcsstr.
 bool IsWarn(const wchar_t* s) {
@@ -140,6 +165,16 @@ bool InTitleBar(int y) {
     return y >= 0 && y < static_cast<int>(kTitleH * g_scale + 0.5f);
 }
 
+// The fold button sits at the right end of the title bar.
+bool InFoldZone(int x) {
+    return x >= g_winW - static_cast<int>(kFoldW * g_scale + 0.5f);
+}
+
+// Implemented in the surfaces section below.
+void HidePanel();
+void ShowPanelAgain();
+void MiniPaint();
+
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_LBUTTONDOWN: {
@@ -148,6 +183,10 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         GetCursorPos(&cur);
         client = cur;
         ScreenToClient(hwnd, &client);
+        if (InTitleBar(client.y) && InFoldZone(client.x)) {
+            HidePanel();   // fold to the chip instead of dragging
+            return 0;
+        }
         if (!InTitleBar(client.y)) {
             return 0;   // only the title bar drags; the log body stays inert
         }
@@ -173,6 +212,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         POINT client = cur;
         ScreenToClient(hwnd, &client);
         const bool hover = InTitleBar(client.y);
+        const bool fold = hover && InFoldZone(client.x);
         if (hover && !g_titleHover) {
             TRACKMOUSEEVENT tme = {};
             tme.cbSize = sizeof(tme);
@@ -180,15 +220,17 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             tme.hwndTrack = hwnd;
             TrackMouseEvent(&tme);
         }
-        if (hover != g_titleHover) {
+        if (hover != g_titleHover || fold != g_foldHover) {
             g_titleHover = hover;
+            g_foldHover = fold;
             InterlockedExchange(&g_dirty, 1);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g_titleHover) {
+        if (g_titleHover || g_foldHover) {
             g_titleHover = false;
+            g_foldHover = false;
             InterlockedExchange(&g_dirty, 1);
         }
         return 0;
@@ -197,7 +239,11 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         GetCursorPos(&cur);
         ScreenToClient(hwnd, &cur);
         if (LOWORD(lp) == HTCLIENT && InTitleBar(cur.y)) {
-            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32646)));  // IDC_SIZEALL
+            if (InFoldZone(cur.x)) {
+                SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32649)));  // hand
+            } else {
+                SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32646)));  // SIZEALL
+            }
             return TRUE;
         }
         break;
@@ -378,6 +424,22 @@ void Paint() {
                            g_titleFmt.Get(), &titleRect, titleFg.Get());
         }
 
+        // Fold button: one short bar at the right end of the title bar.
+        {
+            const float cx = w - (kFoldW * g_scale) * 0.5f;
+            const float cy = titleH * 0.5f;
+            const float half = 5.0f * g_scale;
+            ComPtr<ID2D1SolidColorBrush> fold;
+            if (SUCCEEDED(g_rt->CreateSolidColorBrush(
+                    g_foldHover ? D2D1::ColorF(0.86f, 0.89f, 0.93f, 1.0f)
+                                : D2D1::ColorF(0.55f, 0.60f, 0.68f, 1.0f),
+                    fold.GetAddressOf()))) {
+                g_rt->DrawLine(D2D1::Point2F(cx - half, cy),
+                               D2D1::Point2F(cx + half, cy), fold.Get(),
+                               1.4f * g_scale);
+            }
+        }
+
         // Log body. Clip so a long line (NO_WRAP) cannot spill outside.
         g_rt->PushAxisAlignedClip(D2D1::RectF(0.0f, titleH, w, h),
                                   D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -412,6 +474,277 @@ void Paint() {
     }
     g_lastPaint = GetTickCount64();
     InterlockedExchange(&g_dirty, 0);
+}
+
+// -- collapsed chip ---------------------------------------------------------
+
+void MiniReleaseSurfaces() {
+    g_mrt.Reset();
+    if (g_mmemDC != nullptr && g_moldBmp != nullptr) {
+        SelectObject(g_mmemDC, g_moldBmp);
+        g_moldBmp = nullptr;
+    }
+    if (g_mbmp != nullptr) {
+        DeleteObject(g_mbmp);
+        g_mbmp = nullptr;
+    }
+    if (g_mmemDC != nullptr) {
+        DeleteDC(g_mmemDC);
+        g_mmemDC = nullptr;
+    }
+    g_mbmpW = 0;
+    g_mbmpH = 0;
+}
+
+bool MiniEnsureSurfaces(UINT w, UINT h) {
+    if (g_mrt != nullptr && w == g_mbmpW && h == g_mbmpH) return true;
+    MiniReleaseSurfaces();
+    if (w == 0 || h == 0) return false;
+
+    if (g_d2d == nullptr) {
+        D2D1_FACTORY_OPTIONS opts = {};
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                                     __uuidof(ID2D1Factory), &opts,
+                                     reinterpret_cast<void**>(g_d2d.GetAddressOf())))) {
+            return false;
+        }
+    }
+
+    HDC screen = GetDC(nullptr);
+    g_mmemDC = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (g_mmemDC == nullptr) return false;
+
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = static_cast<LONG>(w);
+    bi.bmiHeader.biHeight = -static_cast<LONG>(h);   // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    g_mbmp = CreateDIBSection(g_mmemDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (g_mbmp == nullptr || bits == nullptr) {
+        MiniReleaseSurfaces();
+        return false;
+    }
+    g_moldBmp = SelectObject(g_mmemDC, g_mbmp);
+
+    const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        0.0f, 0.0f, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT);
+    if (FAILED(g_d2d->CreateDCRenderTarget(&props, g_mrt.GetAddressOf()))) {
+        MiniReleaseSurfaces();
+        return false;
+    }
+    g_mrt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    g_mrt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    g_mbmpW = w;
+    g_mbmpH = h;
+    return true;
+}
+
+// Chip repaint: dark rounded body, "console", and a dot that turns amber while
+// there are lines the user has not looked at yet.
+void MiniPaint() {
+    if (g_mini == nullptr || g_titleFmt == nullptr) return;
+    if (!MiniEnsureSurfaces(static_cast<UINT>(kMiniW * g_scale + 0.5f),
+                            static_cast<UINT>(kMiniH * g_scale + 0.5f))) {
+        return;
+    }
+    const RECT bounds = {0, 0, static_cast<LONG>(g_mbmpW),
+                         static_cast<LONG>(g_mbmpH)};
+    if (FAILED(g_mrt->BindDC(g_mmemDC, &bounds))) return;
+
+    const float w = static_cast<float>(g_mbmpW);
+    const float h = static_cast<float>(g_mbmpH);
+    const bool unread = (g_dirty != 0);
+
+    ComPtr<ID2D1SolidColorBrush> body, fg, dot;
+    if (FAILED(g_mrt->CreateSolidColorBrush(
+            g_miniHover ? D2D1::ColorF(0.16f, 0.19f, 0.25f, 0.95f)
+                        : D2D1::ColorF(0.06f, 0.07f, 0.10f, 0.88f),
+            body.GetAddressOf())) ||
+        FAILED(g_mrt->CreateSolidColorBrush(D2D1::ColorF(0.86f, 0.89f, 0.93f, 1.0f),
+                                            fg.GetAddressOf())) ||
+        FAILED(g_mrt->CreateSolidColorBrush(
+            unread ? D2D1::ColorF(1.00f, 0.72f, 0.30f, 1.0f)
+                   : D2D1::ColorF(0.45f, 0.50f, 0.58f, 1.0f),
+            dot.GetAddressOf()))) {
+        return;
+    }
+
+    g_mrt->BeginDraw();
+    g_mrt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+        D2D1::RectF(0.0f, 0.0f, w, h), 5.0f * g_scale, 5.0f * g_scale);
+    g_mrt->FillRoundedRectangle(rr, body.Get());
+    g_mrt->DrawRoundedRectangle(rr, dot.Get(), 1.0f * g_scale);
+
+    const D2D1_RECT_F tr = D2D1::RectF(10.0f * g_scale, 0.0f,
+                                       w - 22.0f * g_scale, h);
+    g_mrt->DrawText(kMiniText, static_cast<UINT32>(wcslen(kMiniText)),
+                    g_titleFmt.Get(), &tr, fg.Get());
+    g_mrt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(w - 13.0f * g_scale, h * 0.5f),
+                                     3.0f * g_scale, 3.0f * g_scale),
+                       dot.Get());
+
+    if (FAILED(g_mrt->EndDraw())) {
+        MiniReleaseSurfaces();
+        return;
+    }
+
+    BLENDFUNCTION blend = {};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    POINT src = {0, 0};
+    SIZE size = {static_cast<LONG>(g_mbmpW), static_cast<LONG>(g_mbmpH)};
+    UpdateLayeredWindow(g_mini, nullptr, nullptr, &size, g_mmemDC, &src, 0, &blend,
+                        ULW_ALPHA);
+}
+
+void ShowMini(bool show) {
+    if (g_mini == nullptr || !IsWindow(g_mini)) return;
+    if (!show) {
+        ShowWindow(g_mini, SW_HIDE);
+        g_miniVisible = false;
+        return;
+    }
+    RECT pr = {};
+    if (g_panel != nullptr && IsWindow(g_panel) && GetWindowRect(g_panel, &pr)) {
+        SetWindowPos(g_mini, HWND_TOP, pr.left, pr.top, 0, 0,
+                     SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    ShowWindow(g_mini, SW_SHOWNOACTIVATE);
+    g_miniVisible = true;
+    MiniPaint();
+}
+
+void HidePanel() {
+    if (g_panel != nullptr && IsWindow(g_panel)) {
+        ShowWindow(g_panel, SW_HIDE);
+    }
+    g_foldHover = false;
+    ShowMini(true);
+}
+
+void ShowPanelAgain() {
+    ShowMini(false);
+    if (g_panel != nullptr && IsWindow(g_panel)) {
+        ShowWindow(g_panel, SW_SHOWNOACTIVATE);
+        InterlockedExchange(&g_dirty, 1);
+        Paint();
+    }
+}
+
+LRESULT CALLBACK MiniProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        POINT cur = {};
+        GetCursorPos(&cur);
+        RECT wr = {};
+        GetWindowRect(hwnd, &wr);
+        g_miniGrab.x = cur.x - wr.left;
+        g_miniGrab.y = cur.y - wr.top;
+        g_miniDown = cur;
+        g_miniDrag = true;
+        SetCapture(hwnd);
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (g_miniDrag) {
+            POINT cur = {};
+            GetCursorPos(&cur);
+            SetWindowPos(hwnd, HWND_TOP, cur.x - g_miniGrab.x,
+                         cur.y - g_miniGrab.y, 0, 0,
+                         SWP_NOSIZE | SWP_NOACTIVATE);
+            return 0;
+        }
+        if (!g_miniHover) {
+            g_miniHover = true;
+            TRACKMOUSEEVENT tme = {};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+            MiniPaint();
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        if (g_miniHover) {
+            g_miniHover = false;
+            MiniPaint();
+        }
+        return 0;
+    case WM_LBUTTONUP: {
+        if (!g_miniDrag) return 0;
+        g_miniDrag = false;
+        ReleaseCapture();
+        POINT cur = {};
+        GetCursorPos(&cur);
+        const int dx = cur.x - g_miniDown.x;
+        const int dy = cur.y - g_miniDown.y;
+        if (dx * dx + dy * dy < 16) {   // a click, not a drag
+            ShowPanelAgain();
+        }
+        return 0;
+    }
+    case WM_RBUTTONUP:
+        ShowPanelAgain();
+        return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32649)));   // hand
+            return TRUE;
+        }
+        break;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DESTROY:
+        g_mini = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+bool CreateMini() {
+    if (g_mini != nullptr && IsWindow(g_mini)) return true;
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &MiniProc;
+    wc.hInstance = g_inst;
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    wc.lpszClassName = L"ppluginConsoleMini";
+    if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        LogLine("console: mini class registration failed");
+        return false;
+    }
+
+    g_mini = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        L"ppluginConsoleMini", L"", WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT,
+        static_cast<int>(kMiniW * g_scale + 0.5f),
+        static_cast<int>(kMiniH * g_scale + 0.5f), g_owner, nullptr, g_inst,
+        nullptr);
+    if (g_mini == nullptr) {
+        LogLine("console: mini window create failed");
+        return false;
+    }
+    ShowWindow(g_mini, SW_HIDE);
+    return true;
+}
+
+void DestroyMini() {
+    if (g_mini != nullptr) {
+        DestroyWindow(g_mini);
+        g_mini = nullptr;
+    }
+    MiniReleaseSurfaces();
+    g_miniHover = false;
+    g_miniDrag = false;
+    g_miniVisible = false;
 }
 
 // -- window -----------------------------------------------------------------
@@ -485,6 +818,8 @@ bool CreatePanel() {
         ShowWindow(g_panel, SW_HIDE);
     }
 
+    CreateMini();   // created hidden; the title bar fold button swaps to it
+
     char line[160] = {};
     _snprintf_s(line, sizeof(line), _TRUNCATE,
                 "console: panel window up (%dx%d at screen %d,%d, unclamped)",
@@ -499,6 +834,7 @@ void DestroyPanel() {
         DestroyWindow(g_panel);   // must run on the thread that created it
         g_panel = nullptr;
     }
+    DestroyMini();
     ReleaseSurfaces();
     g_dragging = false;
     g_winW = 0;
@@ -522,9 +858,10 @@ int __cdecl OnPluginTick(void) {
     }
 
     // The plugin owns no thread: this is the pump, and it is also why the
-    // window had to be created here instead of in init().
+    // window had to be created here instead of in init(). Pump the whole
+    // thread queue (panel + chip), not just the panel's messages.
     MSG msg = {};
-    while (PeekMessageW(&msg, g_panel, 0, 0, PM_REMOVE)) {
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -535,11 +872,17 @@ int __cdecl OnPluginTick(void) {
     const bool iconic = IsIconic(g_owner) != 0;
     if (iconic && !g_ownerIconic) {
         ShowWindow(g_panel, SW_HIDE);
+        if (g_mini != nullptr) ShowWindow(g_mini, SW_HIDE);
         g_ownerIconic = true;
         return 0;
     }
     if (!iconic && g_ownerIconic) {
-        ShowWindow(g_panel, SW_SHOWNOACTIVATE);
+        // Restore whichever form was up: the chip means "still folded".
+        if (g_miniVisible && g_mini != nullptr) {
+            ShowWindow(g_mini, SW_SHOWNOACTIVATE);
+        } else {
+            ShowWindow(g_panel, SW_SHOWNOACTIVATE);
+        }
         g_ownerIconic = false;
         InterlockedExchange(&g_dirty, 1);
     }
@@ -554,11 +897,16 @@ int __cdecl OnPluginTick(void) {
         ClientToScreen(g_owner, &origin);
         const int dx = origin.x - g_ownerOrigin.x;
         const int dy = origin.y - g_ownerOrigin.y;
-        if ((dx != 0 || dy != 0) && !g_dragging) {
+        if ((dx != 0 || dy != 0) && !g_dragging && !g_miniDrag) {
             RECT wr = {};
-            GetWindowRect(g_panel, &wr);
-            SetWindowPos(g_panel, nullptr, wr.left + dx, wr.top + dy, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_panel != nullptr && GetWindowRect(g_panel, &wr)) {
+                SetWindowPos(g_panel, nullptr, wr.left + dx, wr.top + dy, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            if (g_mini != nullptr && GetWindowRect(g_mini, &wr)) {
+                SetWindowPos(g_mini, nullptr, wr.left + dx, wr.top + dy, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
         }
         g_ownerOrigin = origin;
     }
@@ -566,7 +914,14 @@ int __cdecl OnPluginTick(void) {
     const bool due = (g_dirty != 0) ||
         (GetTickCount64() - g_lastPaint >= static_cast<ULONGLONG>(kIdleRepaintMs));
     if (due) {
-        Paint();
+        // While folded the chip repaints instead; g_dirty stays set so the dot
+        // keeps flagging lines the user has not looked at yet.
+        if (g_miniVisible) {
+            MiniPaint();
+        }
+        if (IsWindowVisible(g_panel)) {
+            Paint();
+        }
     }
     return 0;
 }
@@ -657,7 +1012,7 @@ const Desc kDesc = {
     P_ABI,
     static_cast<uint32_t>(sizeof(Desc)),
     "console",
-    "0.3.0",
+    "0.4.0",
     &OnPluginInit,
     &OnPluginTick,     // pumps the panel window and repaints it
     &OnPluginShutdown

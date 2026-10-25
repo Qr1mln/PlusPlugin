@@ -1151,13 +1151,21 @@ static bool CdpClickSelector(const ScriptEvent& ev) {
 // Actions
 // ---------------------------------------------------------------------------
 
-// Real (hardware-level) input. TT voice's H5 popups - WebView2 composited
-// inside Flutter (HeadlessInAppWebView) - do not react to posted WM_LBUTTONDOWN:
-// their pointer pipeline only sees OS-generated input, so a synthetic message
-// click is a no-op there (verified 2026-10). SendInput is indistinguishable
-// from a real mouse. Cost: the point must be on screen and unobstructed - the
-// app window is raised first, and if something else still covers the point the
-// click is skipped instead of landing in that other window.
+// Two backends for coordinate rows:
+//
+//   msg  (default) - PostMessage(WM_*BUTTONDOWN/UP, WM_MOUSEWHEEL) straight at
+//         the view window. No cursor movement, no foreground requirement, no
+//         occlusion check. Reaches Flutter's own widgets, because they consume
+//         ordinary window messages. WebView2 content (the H5 popups composited
+//         into Flutter) does NOT react to posted messages - that is exactly what
+//         the CDP selector path above exists for (verified 2026-10).
+//   send  - SendInput, hardware-grade input with the real cursor. It is
+//         indistinguishable from a physical mouse and does reach WebView2, but
+//         it needs the app in front and the point unobstructed.
+//
+// Switch with "click_input=send" in <pluginDir>\config.ini.
+static bool g_inputMsg = true;
+
 static void SendMouse(ULONG flags, SHORT wheelDelta) {
     INPUT in = {};
     in.type = INPUT_MOUSE;
@@ -1166,12 +1174,8 @@ static void SendMouse(ULONG flags, SHORT wheelDelta) {
     SendInput(1, &in, sizeof(INPUT));
 }
 
-static void SimulateClickKindAt(float lx, float ly, int kind) {
-    HWND view = g_viewHwnd ? g_viewHwnd : g_hwnd;
-    if (!view) return;
-
-    const LONG px = static_cast<LONG>(lx * g_scale);
-    const LONG py = static_cast<LONG>(ly * g_scale);
+// SendInput backend: real cursor, raises the window, skips when covered.
+static void ClickSendAt(HWND view, LONG px, LONG py, int kind) {
     POINT pt = {px, py};
     if (!ClientToScreen(view, &pt)) return;
 
@@ -1212,13 +1216,52 @@ static void SimulateClickKindAt(float lx, float ly, int kind) {
     LogFromOverlay(buf);
 }
 
-static void SimulateWheelAt(float lx, float ly, int notches) {
-    if (!notches) return;
+// Message backend: posted to the view window, client coordinates, no cursor.
+static void ClickMsgAt(HWND view, LONG px, LONG py, int kind) {
+    const LPARAM pos = MAKELPARAM(px, py);
+
+    PostMessageW(view, WM_MOUSEMOVE, 0, pos);
+    Sleep(10);   // lets the hover frame land before the press
+
+    if (kind == 2) {   // right
+        PostMessageW(view, WM_RBUTTONDOWN, MK_RBUTTON, pos);
+        Sleep(15);
+        PostMessageW(view, WM_RBUTTONUP, 0, pos);
+    } else if (kind == 1) {   // double
+        PostMessageW(view, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+        Sleep(15);
+        PostMessageW(view, WM_LBUTTONUP, 0, pos);
+        Sleep(40);   // same gap the SendInput double uses
+        PostMessageW(view, WM_LBUTTONDBLCLK, MK_LBUTTON, pos);
+        Sleep(15);
+        PostMessageW(view, WM_LBUTTONUP, 0, pos);
+    } else {   // left
+        PostMessageW(view, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+        Sleep(15);
+        PostMessageW(view, WM_LBUTTONUP, 0, pos);
+    }
+
+    char buf[128] = {};
+    sprintf_s(buf, "script: click kind=%d %ld,%ld (posted message)",
+              kind, px, py);
+    LogFromOverlay(buf);
+}
+
+static void SimulateClickKindAt(float lx, float ly, int kind) {
     HWND view = g_viewHwnd ? g_viewHwnd : g_hwnd;
     if (!view) return;
 
     const LONG px = static_cast<LONG>(lx * g_scale);
     const LONG py = static_cast<LONG>(ly * g_scale);
+    if (g_inputMsg) {
+        ClickMsgAt(view, px, py, kind);
+    } else {
+        ClickSendAt(view, px, py, kind);
+    }
+}
+
+// SendInput backend for the wheel: real cursor, same occlusion rules.
+static void WheelSendAt(HWND view, LONG px, LONG py, int notches) {
     POINT pt = {px, py};
     if (!ClientToScreen(view, &pt)) return;
 
@@ -1239,6 +1282,34 @@ static void SimulateWheelAt(float lx, float ly, int notches) {
     sprintf_s(buf, "script: wheel %+d at %ld,%ld (real input, screen %ld,%ld)",
               notches, px, py, pt.x, pt.y);
     LogFromOverlay(buf);
+}
+
+// Message backend for the wheel: WM_MOUSEWHEEL carries SCREEN coordinates.
+static void WheelMsgAt(HWND view, LONG px, LONG py, int notches) {
+    POINT pt = {px, py};
+    if (!ClientToScreen(view, &pt)) return;
+
+    const WPARAM wp = MAKEWPARAM(0, static_cast<WORD>(120 * notches));
+    PostMessageW(view, WM_MOUSEWHEEL, wp, MAKELPARAM(pt.x, pt.y));
+
+    char buf[128] = {};
+    sprintf_s(buf, "script: wheel %+d at %ld,%ld (posted message)",
+              notches, px, py);
+    LogFromOverlay(buf);
+}
+
+static void SimulateWheelAt(float lx, float ly, int notches) {
+    if (!notches) return;
+    HWND view = g_viewHwnd ? g_viewHwnd : g_hwnd;
+    if (!view) return;
+
+    const LONG px = static_cast<LONG>(lx * g_scale);
+    const LONG py = static_cast<LONG>(ly * g_scale);
+    if (g_inputMsg) {
+        WheelMsgAt(view, px, py, notches);
+    } else {
+        WheelSendAt(view, px, py, notches);
+    }
 }
 
 // Puts the text on the clipboard and sends Ctrl+V to the app. Only lands when
