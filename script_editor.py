@@ -1,15 +1,17 @@
 """pplugin 点击脚本编辑器（极简版）。
 
 独立窗口，做三件事：
-  1. 在 pplugin 界面上「拾取坐标」——点一下目标位置即记录（这次点击会被吞掉，
-     不会触发应用），坐标按 FLUTTERVIEW 相对逻辑 px（96 dpi）保存；
-  2. 编辑事件表（坐标 / 点击类型 / 间隔 / 滚轮 / 门控 / 粘贴内容）；
+  1. 拾取坐标——点一下目标位置即记录（这次点击会被吞掉，不会触发应用），
+     坐标按 FLUTTERVIEW 相对逻辑 px（96 dpi）保存；
+  2. 编辑事件表（坐标 / 点击类型 / 间隔 / 滚轮 / 备注）。第一行是「第一坐标」
+     （绝对基准），其余行按相对它的「偏移坐标」编辑——改第一坐标，其余行
+     自动跟着平移；
   3. 存成 JSON 供 DLL 读取执行；本窗口也能直接「试跑」验证坐标。
 
 脚本目录：%APPDATA%\\TTVoice\\scripts\\<名称>.json
 保存时还会写同目录的 active.txt（记下刚保存的脚本名），DLL 优先跑这一个；
 没有就跑最新的 .json。指定/运行某个脚本改由插件自带面板窗口完成。
-运行：python tools/script_editor.py
+运行：python script_editor.py
 
 JSON 格式（DLL 侧读取的就是这一份）：
 
@@ -19,48 +21,66 @@ JSON 格式（DLL 侧读取的就是这一份）：
       "hotkey": "",
       "loop": 1,
       "events": [
-        {"x": 27, "y": 113, "click": "left", "delay_ms": 600,
-         "wheel": 0, "text": "", "wait_px": 0, "wait_max_ms": 0},
-        {"x": 1573, "y": 87, "click": "left", "delay_ms": 0,
-         "wheel": 0, "text": "", "wait_px": 40, "wait_max_ms": 4000}
+        {"x": 27, "y": 113, "ox": 0, "oy": 0, "click": "left", "delay_ms": 600,
+         "wheel": 0, "remark": ""},
+        {"x": 27, "y": 113, "ox": 1546, "oy": -26, "click": "left", "delay_ms": 0,
+         "wheel": 0, "remark": ""}
       ]
     }
 
 字段含义：
-  x, y          坐标，FLUTTERVIEW 客户区相对逻辑 px（96 dpi）；物理 px = 逻辑 * DPI/96
+  x, y          第一坐标（基准），每一行都写同样的值；FLUTTERVIEW 客户区相对
+                逻辑 px（96 dpi），物理 px = 逻辑 * DPI/96
+  ox, oy        本行相对第一坐标的偏移（每一行都可非 0，含第一行；默认 0,0）
+  执行坐标      **真正执行的是 (x + ox, y + oy)**：DLL 解析完就把偏移折算进
+                x/y，编辑器试跑同样按这个点执行。改第一坐标（x/y）即整条链
+                平移，ox/oy 不变。老脚本没有 ox/oy，折算时加 0，按其绝对
+                x/y 执行；编辑器保存时会补齐 ox/oy 并把 x/y 统一写成基准
   click         left | double | right
+  selector      可选 CSS 选择器。填了本行先走 CDP：Runtime.evaluate 定位元素
+                （getBoundingClientRect，页面 CSS px），Input.dispatchMouseEvent
+                在元素中心派发鼠标事件——事件走浏览器真实输入管线
+                （isTrusted=true），不需要目标窗口在前台、不怕被遮挡。CDP
+                不可用或页面里没有该元素时，回退到本行坐标的 SendInput 点击
+                （x/y 都是 0 视为「没拾取过」，跳过并打日志）。端口由
+                version.dll 代理在宿主启动时布下（9223），编辑器试跑/测试
+                选择器连的是同一个端口
+  target_url    可选，脚本级。宿主里开了多个 WebView 页面时按 URL 子串挑目
+                标页（大小写不敏感）；空 = 唯一页直接用，多页取最后一条
+                （新页追加在列表尾部）
   hotkey        F1..F24 / 单个字母或数字；空 = 不注册（避免抢应用自己的键）
   loop          整份脚本重复执行的轮数
   delay_ms      本行执行完之后的等待（下一行开始前）
-  wheel         滚轮格数：正=向上，负=向下，0=不滚
-  text          非空时先把文本写进剪贴板，再给 pplugin 发 Ctrl+V（需 pplugin 在前台）
-  wait_px       门控：先等到 (x,y) 周围出现至少这么多「奶油色」像素再执行本行；0=不等
-  wait_max_ms   门控最长等待，超时后照常执行本行（不中止）
+  wheel         滚轮格数：正=向上，负=向下，0=不滚；有 selector 时滚在元素上
+                （CDP deltaY = -100 * 格数，与 DLL 一致）
+  remark        备注，随便写（原 note 键已更名）；DLL 用 JsonSkip 跳过，只给人和编辑器看
   view_size     编辑器额外写的 [w,h]（保存时的 view 客户区），DLL 不认这个键，只用来提醒坐标基准变了
 
                 注意：events 为空时 DLL 拒收（count>0 才算解析成功），会打
-                script: parse failed <path> (no events / bad json)。硬编码的两段
-                点击链已移除，所以这时点叠加层按钮不会有任何动作。
-                叠加层按钮走 ScriptTryRun(true)：这类「跑不起来」的原因行
-                **每次点击都会重打一次**（DLL 的 2s 轮询线程仍只打一次）。
+                script: parse failed <path> (no events / bad json)。
+                门控 / 门控上限已整体移除：DLL 与编辑器都不再读
+                wait_px / wait_max_ms，老脚本里的这两个键按未知键跳过。
 
 与 DLL 的关系（很重要）：
   DLL（script_engine.inc）是最终交付的执行器；本编辑器是它的开发/调试镜像，
-  所以「试跑」的每一步都与 DLL 逐字对齐：同一套消息序列、同一个门控算法
-  （先睡 poll 再抓帧、连续 3 次命中、±200×±40 物理px 带内同色阈值）、同一套
-  坐标换算（int(逻辑px * DPI/96) 截断）、同一批日志字样（可直接与叠加层界面
-  日志/%TEMP% 日志逐行比对）。执行日志窗格可以勾「跟随 DLL 日志」把 DLL 自己写的
-  行拉进来，两边放在一个窗里看。保存后还会打印「DLL 下次会加载哪份脚本」。
-  只有两处故意不同：编辑器能「停止」（DLL 跑完为止），以及「门控检查（不点）」
-  只看不动。其他任何行为差异都是 bug，要两边同步改。
+  所以「试跑」的每一步都与 DLL 逐字对齐：同一套消息序列、同一套坐标换算、
+  同一套真实输入注入（H5 弹层不理会 PostMessage 的合成消息，只用 SendInput；
+  点击点被其他窗口挡住时跳过并打日志）
+  （int(逻辑px * DPI/96) 截断）、同一批日志字样（可与插件面板日志/%TEMP%
+  日志逐行比对）。执行日志窗格可以勾「跟随 DLL 日志」把 DLL 自己写的行拉
+  进来，两边放在一个窗里看。保存后还会打印「DLL 下次会加载哪份脚本」。
+  只有一处故意不同：编辑器能「停止」（DLL 跑完为止）。
+  其他任何行为差异都是 bug，要两边同步改。
 """
 from __future__ import annotations
 
+import base64
 import ctypes
+import http.client
 import json
 import os
 import queue
-import struct
+import socket
 import threading
 import time
 import tkinter as tk
@@ -68,7 +88,6 @@ from ctypes import wintypes
 from tkinter import messagebox, simpledialog, ttk
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
-gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 # --- 常量 -----------------------------------------------------------------
@@ -83,20 +102,10 @@ WM_QUIT = 0x0012
 MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
 WH_MOUSE_LL = 14
-PW_RENDERFULLCONTENT = 0x00000002
-CF_UNICODETEXT = 13
-GMEM_MOVEABLE = 0x0002
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-VK_CONTROL = 0x11
-VK_V = 0x56
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 MAIN_CLASS = "FLUTTER_RUNNER_WIN32_WINDOW"
 VIEW_CLASS = "FLUTTERVIEW"
-
-# 奶油色胶囊的判定（与 overlay.inc / 文档同一套阈值）
-CREAM_R, CREAM_G, CREAM_B, CREAM_DIFF = 228, 210, 228, 22
 
 CLICK_LABELS = {"left": "左键单击", "double": "左键双击", "right": "右键单击"}
 LABEL_CLICKS = {v: k for k, v in CLICK_LABELS.items()}
@@ -105,14 +114,8 @@ LABEL_CLICKS = {v: k for k, v in CLICK_LABELS.items()}
 CLICK_KINDS = {"left": 0, "double": 1, "right": 2}
 
 # --- 与 DLL 对齐的常量/上限（改一边必须改另一边）-------------------------
-GATE_POLL_MS = 120        # = DLL g_gatePollMs 固定值（编辑器模拟轮询，两边必须一致）
-GATE_STABLE = 3           # DLL：连续 3 次命中才放行
-GATE_MAX_MS = 4000        # wait_max_ms <= 0 时 DLL 用的上限
-CREAM_MIN_PX = 40         # 「门控检查（不点）」没填 wait_px 时用的默认阈值
 DBLCLK_GAP_MS = 40        # 双击两条消息之间的 Sleep
-PASTE_FOCUS_MS = 80       # 粘贴前 SetForegroundWindow 后的等待
 MAX_EVENTS = 32           # kScriptMaxEvents：DLL 只读前 32 行
-MAX_TEXT = 255            # kScriptText-1：更长的 text 会被 DLL 截断
 MAX_LOOP = 99             # loop 上限
 
 # DLL 的日志文件（LogFromOverlay 写）
@@ -132,55 +135,6 @@ class MSLLHOOKSTRUCT(ctypes.Structure):
         ("time", wintypes.DWORD),
         ("dwExtraInfo", ctypes.c_void_p),
     ]
-
-
-class BITMAPINFOHEADER(ctypes.Structure):
-    """ctypes.wintypes 没有这个结构（GDI 的 DIB 头）。"""
-
-    _fields_ = [
-        ("biSize", wintypes.DWORD),
-        ("biWidth", wintypes.LONG),
-        ("biHeight", wintypes.LONG),
-        ("biPlanes", wintypes.WORD),
-        ("biBitCount", wintypes.WORD),
-        ("biCompression", wintypes.DWORD),
-        ("biSizeImage", wintypes.DWORD),
-        ("biXPelsPerMeter", wintypes.LONG),
-        ("biYPelsPerMeter", wintypes.LONG),
-        ("biClrUsed", wintypes.DWORD),
-        ("biClrImportant", wintypes.DWORD),
-    ]
-
-
-class RGBQUAD(ctypes.Structure):
-    _fields_ = [
-        ("rgbBlue", ctypes.c_ubyte),
-        ("rgbGreen", ctypes.c_ubyte),
-        ("rgbRed", ctypes.c_ubyte),
-        ("rgbReserved", ctypes.c_ubyte),
-    ]
-
-
-class BITMAPINFO(ctypes.Structure):
-    _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", RGBQUAD * 1)]
-
-
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", wintypes.WORD),
-        ("wScan", wintypes.WORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_void_p),
-    ]
-
-
-class _INPUTUNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT), ("pad", ctypes.c_byte * 32)]
-
-
-class INPUT(ctypes.Structure):
-    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
 
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -206,13 +160,6 @@ user32.TranslateMessage.argtypes = (ctypes.POINTER(wintypes.MSG),)
 user32.DispatchMessageW.argtypes = (ctypes.POINTER(wintypes.MSG),)
 user32.PostThreadMessageW.argtypes = (wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
-user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
-user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
-user32.OpenClipboard.argtypes = (wintypes.HWND,)
-user32.EmptyClipboard.argtypes = ()
-user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
-user32.SetClipboardData.restype = wintypes.HANDLE
-user32.CloseClipboard.argtypes = ()
 
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
@@ -220,22 +167,6 @@ kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.QueryFullProcessImageNameW.argtypes = (
     wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
 kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
-kernel32.GlobalAlloc.restype = wintypes.HANDLE
-kernel32.GlobalLock.argtypes = (wintypes.HANDLE,)
-kernel32.GlobalLock.restype = ctypes.c_void_p
-kernel32.GlobalUnlock.argtypes = (wintypes.HANDLE,)
-
-gdi32.CreateCompatibleDC.argtypes = (wintypes.HDC,)
-gdi32.CreateCompatibleDC.restype = wintypes.HDC
-gdi32.CreateDIBSection.argtypes = (
-    wintypes.HDC, ctypes.POINTER(BITMAPINFO), wintypes.UINT,
-    ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD)
-gdi32.CreateDIBSection.restype = wintypes.HBITMAP
-gdi32.SelectObject.argtypes = (wintypes.HDC, wintypes.HGDIOBJ)
-gdi32.SelectObject.restype = wintypes.HGDIOBJ
-gdi32.DeleteObject.argtypes = (wintypes.HGDIOBJ,)
-gdi32.DeleteDC.argtypes = (wintypes.HDC,)
 
 
 def enable_dpi_awareness() -> None:
@@ -345,179 +276,293 @@ def find_target() -> Target:
     return t
 
 
-# --- 点击/滚轮/粘贴 -------------------------------------------------------
+# --- 点击/滚轮 ------------------------------------------------------------
 # 下面三个函数是 script_engine.inc SimulateClickKindAt / SimulateWheelAt /
 # PasteTextToApp 的等价物：消息顺序、wParam、时间间隔都要一致。
-def post_click(view: int, px: int, py: int, kind: str) -> None:
-    lp = make_lparam(px, py)
-    user32.PostMessageW(view, WM_MOUSEMOVE, 0, lp)
-    if kind == "right":
-        user32.PostMessageW(view, WM_RBUTTONDOWN, MK_RBUTTON, lp)
-        user32.PostMessageW(view, WM_RBUTTONUP, 0, lp)
-        return
-    if kind == "double":
-        user32.PostMessageW(view, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-        user32.PostMessageW(view, WM_LBUTTONUP, 0, lp)
-        time.sleep(DBLCLK_GAP_MS / 1000.0)
-        user32.PostMessageW(view, WM_LBUTTONDBLCLK, MK_LBUTTON, lp)
-        user32.PostMessageW(view, WM_LBUTTONUP, 0, lp)
-        return
-    user32.PostMessageW(view, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-    user32.PostMessageW(view, WM_LBUTTONUP, 0, lp)
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_WHEEL = 0x0800
 
 
-def post_wheel(view: int, px: int, py: int, notches: int) -> tuple[int, int]:
-    """返回消息里的屏幕坐标（DLL 的日志就是打这两个数）。"""
-    if not notches:
-        return px, py
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _INPUTU(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _anonymous_ = ("u",)
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTU)]
+
+
+user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+user32.SendInput.restype = wintypes.UINT
+user32.SetCursorPos.argtypes = (wintypes.INT, wintypes.INT)
+user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+user32.WindowFromPoint.argtypes = (wintypes.POINT,)
+user32.WindowFromPoint.restype = wintypes.HWND
+user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+user32.GetAncestor.restype = wintypes.HWND
+
+
+def send_mouse(flags: int, wheel: int = 0) -> None:
+    inp = INPUT()
+    inp.type = 0                       # INPUT_MOUSE
+    inp.mi.dwFlags = flags
+    inp.mi.mouseData = wheel & 0xFFFFFFFF
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+
+def post_click(view: int, px: int, py: int, kind: str) -> tuple[bool, str]:
+    """真实点击（与 DLL 相同）：TT语音的 H5 弹层不理会 PostMessage 的合成
+    消息，只响应 OS 生成的输入。前置应用到前台 -> 遮挡检查 -> SetCursorPos +
+    SendInput。返回 (是否发送, 信息)。"""
+    main = user32.GetAncestor(view, 2)   # GA_ROOT
     pt = wintypes.POINT(px, py)
     user32.ClientToScreen(view, ctypes.byref(pt))
-    delta = 120 * int(notches)
-    wparam = (delta & 0xFFFF) << 16
-    user32.PostMessageW(view, WM_MOUSEWHEEL, wparam, make_lparam(pt.x, pt.y))
-    return pt.x, pt.y
+    user32.SetForegroundWindow(main)
+    time.sleep(0.2)
+    hit = user32.WindowFromPoint(pt)
+    if hit != view:
+        return False, get_class(hit) if hit else "?"
+    user32.SetCursorPos(pt.x, pt.y)
+    time.sleep(0.05)                     # 等悬停帧落下再按键
+    down = MOUSEEVENTF_RIGHTDOWN if kind == "right" else MOUSEEVENTF_LEFTDOWN
+    up = MOUSEEVENTF_RIGHTUP if kind == "right" else MOUSEEVENTF_LEFTUP
+    send_mouse(down)
+    send_mouse(up)
+    if kind == "double":
+        time.sleep(DBLCLK_GAP_MS / 1000.0)
+        send_mouse(down)
+        send_mouse(up)
+    return True, "%d,%d" % (px, py)
 
 
-def set_clipboard_text(text: str) -> bool:
-    if not user32.OpenClipboard(None):
-        return False
-    try:
-        user32.EmptyClipboard()
-        data = text.encode("utf-16-le") + b"\x00\x00"
-        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-        if not handle:
-            return False
-        ptr = kernel32.GlobalLock(handle)
-        if ptr:
-            ctypes.memmove(ptr, data, len(data))
-            kernel32.GlobalUnlock(handle)
-        user32.SetClipboardData(CF_UNICODETEXT, handle)  # 所有权移交给系统
-    finally:
-        user32.CloseClipboard()
-    return True
+def post_wheel(view: int, px: int, py: int, notches: int) -> tuple[bool, str]:
+    """真实滚轮：光标移到点上下滚。返回 (是否发送, 信息)。"""
+    if not notches:
+        return True, "%d,%d" % (px, py)
+    main = user32.GetAncestor(view, 2)
+    pt = wintypes.POINT(px, py)
+    user32.ClientToScreen(view, ctypes.byref(pt))
+    user32.SetForegroundWindow(main)
+    time.sleep(0.2)
+    hit = user32.WindowFromPoint(pt)
+    if hit != view:
+        return False, get_class(hit) if hit else "?"
+    user32.SetCursorPos(pt.x, pt.y)
+    time.sleep(0.05)
+    send_mouse(MOUSEEVENTF_WHEEL, 120 * int(notches))
+    return True, "%d,%d" % (px, py)
 
 
-def _key(vk: int, up: bool = False) -> INPUT:
-    item = INPUT()
-    item.type = INPUT_KEYBOARD
-    item.u.ki.wVk = vk
-    item.u.ki.dwFlags = KEYEVENTF_KEYUP if up else 0
-    return item
+# --- CDP（选择器点击，与 DLL script_engine.inc 的 CDP 节逐字对齐）----------
+# 端口由 version.dll 代理在进程启动时给 WebView2 布下（WEBVIEW2_ADDITIONAL_
+# BROWSER_ARGUMENTS --remote-debugging-port）。编辑器自己连同一端口，试跑选择
+# 器行时与 DLL 走同一套：Runtime.evaluate 定位元素 -> Input.dispatchMouseEvent
+# 派发鼠标事件。CDP 输入走浏览器真实输入管线（isTrusted=true），不需要目标
+# 窗口在前台、也不怕被遮挡。
+CDP_HOST = "127.0.0.1"
+CDP_PORT = 9223            # 与 proxy/dllmain.cpp kCdpArg、script_engine.inc kCdpPort 一致
+CDP_DELTA_PER_NOTCH = 100  # DLL: deltaY = -100 * wheel（正格数=向上）
+
+# 与 DLL CdpQuerySelector 的表达式一字不差（selector 以 JSON 字面量嵌入，
+# JSON 字符串字面量本身就是合法的 JS 字符串字面量）
+CDP_QUERY_JS = (
+    "(function(){var e=document.querySelector(%s);"
+    "if(!e)return '{\"found\":0}';"
+    "e.scrollIntoView({block:'nearest',inline:'nearest'});"
+    "var r=e.getBoundingClientRect();"
+    "return JSON.stringify({found:1,x:r.left+r.width/2,y:r.top+r.height/2,"
+    "w:r.width,h:r.height,vw:innerWidth,vh:innerHeight});})()"
+)
 
 
-def send_ctrl_v() -> None:
-    arr = (INPUT * 4)(
-        _key(VK_CONTROL), _key(VK_V), _key(VK_V, up=True), _key(VK_CONTROL, up=True))
-    user32.SendInput(4, arr, ctypes.sizeof(INPUT))
+class CdpError(Exception):
+    pass
 
 
-# --- 抓帧 + 奶油色像素计数（门控用）--------------------------------------
-class ViewCapture:
-    """PrintWindow(PW_RENDERFULLCONTENT) 抓 FLUTTERVIEW，只读需要的像素带。"""
+class CdpClient:
+    """最小 DevTools 客户端（纯标准库）：/json/list 选页 + 一条 WebSocket。"""
 
-    def __init__(self, view: int):
-        self.view = view
-        self.w = 0
-        self.h = 0
-        self.hdc = None
-        self.bmp = None
-        self.bits = None
+    def __init__(self, host: str = CDP_HOST, port: int = CDP_PORT):
+        self.host = host
+        self.port = port
+        self._msg_id = 0
+        self._sock: socket.socket | None = None
 
-    def _free(self) -> None:
-        if self.hdc and self.bmp:
-            gdi32.SelectObject(self.hdc, None)
-            gdi32.DeleteObject(self.bmp)
-            self.bmp = None
-        if self.hdc:
-            gdi32.DeleteDC(self.hdc)
-            self.hdc = None
-        self.bits = None
-
-    def _ensure(self) -> bool:
-        rect = wintypes.RECT()
-        if not user32.GetClientRect(self.view, ctypes.byref(rect)):
-            return False
-        w, h = rect.right - rect.left, rect.bottom - rect.top
-        if w <= 0 or h <= 0:
-            return False
-        if self.hdc and self.w == w and self.h == h:
-            return True
-
-        self._free()
-        self.hdc = gdi32.CreateCompatibleDC(None)
-        if not self.hdc:
-            return False
-        info = BITMAPINFO()
-        info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        info.bmiHeader.biWidth = w
-        info.bmiHeader.biHeight = -h          # 负数 = 顶朝下，行 0 是最上面
-        info.bmiHeader.biPlanes = 1
-        info.bmiHeader.biBitCount = 32
-        info.bmiHeader.biCompression = 0      # BI_RGB
-        bits = ctypes.c_void_p()
-        self.bmp = gdi32.CreateDIBSection(self.hdc, ctypes.byref(info), 0,
-                                          ctypes.byref(bits), None, 0)
-        if not self.bmp or not bits.value:
-            self._free()
-            return False
-        gdi32.SelectObject(self.hdc, self.bmp)
-        self.bits = bits
-        self.w, self.h = w, h
-        return True
-
-    def grab(self) -> bool:
-        if not self._ensure():
-            return False
-        return bool(user32.PrintWindow(self.view, self.hdc, PW_RENDERFULLCONTENT))
-
-    def count_cream(self, cx: int, cy: int, half_w: int = 200, half_h: int = 40):
-        """数 (cx,cy) 周围带内奶油色像素，返回 (hits, centroid_x, centroid_y)。"""
-        if not self.bits:
-            return 0, 0, 0
-        x0, x1 = max(0, cx - half_w), min(self.w - 1, cx + half_w)
-        y0, y1 = max(0, cy - half_h), min(self.h - 1, cy + half_h)
-        if x0 > x1 or y0 > y1:
-            return 0, 0, 0
-
-        stride = self.w * 4
-        row_bytes = (x1 - x0 + 1) * 4
-        base = self.bits.value
-        hits = 0
-        sum_x = 0
-        sum_y = 0
-        for y in range(y0, y1 + 1):
-            row = ctypes.string_at(base + y * stride + x0 * 4, row_bytes)
-            for i in range(0, row_bytes, 4):
-                b = row[i]
-                g = row[i + 1]
-                r = row[i + 2]
-                if r > CREAM_R and g > CREAM_G and b < CREAM_B and (r - b) > CREAM_DIFF:
-                    hits += 1
-                    sum_x += x0 + i // 4
-                    sum_y += y
-        if not hits:
-            return 0, 0, 0
-        return hits, sum_x // hits, sum_y // hits
-
-    def save_bmp(self, path: str) -> bool:
-        """把整帧存成 32bpp BMP，看「DLL 门控看到的是什么画面」。"""
-        if not self.bits or self.w <= 0 or self.h <= 0:
-            return False
-        stride = self.w * 4
+    # -- 目标页 --------------------------------------------------------------
+    def list_pages(self) -> list[dict]:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=3)
         try:
-            with open(path, "wb") as fh:
-                # BITMAPFILEHEADER：bfType/ bfSize/ 两个 WORD 保留 / bfOffBits = 14 字节
-                fh.write(struct.pack("<2sIHHI", b"BM", 14 + 40 + stride * self.h,
-                                     0, 0, 54))
-                fh.write(struct.pack("<IiiHHIIiiII", 40, self.w, self.h, 1, 32, 0,
-                                     stride * self.h, 0, 0, 0, 0))
-                base = self.bits.value
-                # DIB 是顶朝下，BMP 是底朝下，所以逐行逆序写
-                for y in range(self.h - 1, -1, -1):
-                    fh.write(ctypes.string_at(base + y * stride, stride))
-        except OSError:
-            return False
-        return True
+            conn.request("GET", "/json/list")
+            resp = conn.getresponse()
+            if resp.status != 200:
+                raise CdpError("/json/list HTTP %d" % resp.status)
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        finally:
+            conn.close()
+        return [t for t in data
+                if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+
+    @staticmethod
+    def pick_page(pages: list[dict], match: str = "") -> dict:
+        """DLL CdpPickTarget 同一套规则：match 子串优先，否则唯一页/最后一页。"""
+        if match:
+            low = match.lower()
+            for page in pages:
+                if low in (page.get("url") or "").lower():
+                    return page
+        if len(pages) == 1:
+            return pages[0]
+        if pages:
+            return pages[-1]    # 新开的页追加在列表尾部
+        raise CdpError("no page target on %s:%d" % (CDP_HOST, CDP_PORT))
+
+    def connect(self, match: str = "") -> str:
+        """连上目标页的 DevTools WebSocket，返回页面 URL（给日志用）。"""
+        page = self.pick_page(self.list_pages(), match)
+        ws = page["webSocketDebuggerUrl"]
+        path = ws[ws.find("/devtools/"):]
+        self.close()
+        self._sock = socket.create_connection((self.host, self.port), timeout=5)
+        self._sock.settimeout(5)
+        key = base64.b64encode(os.urandom(16)).decode()
+        request = (
+            "GET %s HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: %s\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ) % (path, self.host, self.port, key)
+        self._sock.sendall(request.encode())
+        head = self._recv_until(b"\r\n\r\n")
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            self.close()
+            raise CdpError("websocket upgrade failed")
+        return page.get("url") or ""
+
+    def close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    # -- 帧收发（客户端发出的帧必须带掩码，服务端帧不带） ----------------------
+    def _recv_exact(self, n: int) -> bytes:
+        chunks = []
+        while n > 0:
+            assert self._sock is not None
+            chunk = self._sock.recv(n)
+            if not chunk:
+                raise CdpError("socket closed")
+            chunks.append(chunk)
+            n -= len(chunk)
+        return b"".join(chunks)
+
+    def _recv_until(self, marker: bytes) -> bytes:
+        data = b""
+        while marker not in data:
+            chunk = self._recv_exact(1)
+            data += chunk
+        return data
+
+    def _send_frame(self, payload: bytes) -> None:
+        assert self._sock is not None
+        header = bytes([0x81])            # FIN + text
+        n = len(payload)
+        if n < 126:
+            header += bytes([0x80 | n])
+        elif n < 65536:
+            header += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+        else:
+            header += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self._sock.sendall(header + mask + masked)
+
+    def _recv_message(self) -> str:
+        """收一条完整文本消息；分片拼接，ping 回 pong，close 报错。"""
+        payload = b""
+        while True:
+            assert self._sock is not None
+            h = self._recv_exact(2)
+            fin, opcode, n = h[0] & 0x80, h[0] & 0x0F, h[1] & 0x7F
+            if n == 126:
+                n = int.from_bytes(self._recv_exact(2), "big")
+            elif n == 127:
+                n = int.from_bytes(self._recv_exact(8), "big")
+            chunk = self._recv_exact(n)
+            if opcode == 0x8:                        # close
+                raise CdpError("websocket closed by peer")
+            if opcode == 0x9:                        # ping -> pong
+                pong = bytes([0x8A, 0x80]) + os.urandom(4)
+                self._sock.sendall(pong)
+                continue
+            if opcode in (0x1, 0x0):                 # text / continuation
+                payload += chunk
+            if fin:
+                return payload.decode("utf-8", "replace")
+
+    def call(self, method: str, params: dict | None = None) -> dict:
+        """一条命令一应答；事件（没有 id）丢弃。"""
+        if self._sock is None:
+            raise CdpError("not connected")
+        self._msg_id += 1
+        frame = {"id": self._msg_id, "method": method, "params": params or {}}
+        self._send_frame(json.dumps(frame).encode())
+        while True:
+            resp = json.loads(self._recv_message())
+            if resp.get("id") == self._msg_id:
+                if "error" in resp:
+                    raise CdpError(resp["error"].get("message", "cdp error"))
+                return resp.get("result", {})
+
+    def evaluate(self, expression: str) -> str:
+        """Runtime.evaluate，返回页面的字符串结果（与 DLL CdpEvaluate 同构）。"""
+        result = self.call("Runtime.evaluate", {"expression": expression})
+        if result.get("exceptionDetails"):
+            raise CdpError("page exception")
+        inner = result.get("result", {})
+        if inner.get("type") != "string":
+            raise CdpError("evaluate returned %s" % inner.get("type"))
+        return inner.get("value", "")
+
+
+def cdp_query_selector(client: CdpClient, selector: str) -> dict:
+    """与 DLL CdpQuerySelector 同一表达式、同一结果字典。"""
+    return json.loads(client.evaluate(CDP_QUERY_JS % json.dumps(selector)))
+
+
+def cdp_mouse(client: CdpClient, mtype: str, x: float, y: float,
+              button: str | None = None, click_count: int = 0) -> None:
+    params: dict = {"type": mtype, "x": x, "y": y}
+    if button:
+        params["button"] = button
+        params["clickCount"] = click_count
+    client.call("Input.dispatchMouseEvent", params)
+
+
+def cdp_click_at(client: CdpClient, x: float, y: float, kind: int) -> None:
+    """与 DLL CdpClickAt 同一序列：moved -> press/release（双击第二对 clickCount=2）。"""
+    cdp_mouse(client, "mouseMoved", x, y)
+    time.sleep(0.02)                      # DLL Sleep(20)：等悬停落下
+    button = "right" if kind == 2 else "left"
+    cdp_mouse(client, "mousePressed", x, y, button, 1)
+    cdp_mouse(client, "mouseReleased", x, y, button, 1)
+    if kind == 1:                         # 双击
+        time.sleep(DBLCLK_GAP_MS / 1000.0)
+        cdp_mouse(client, "mousePressed", x, y, button, 2)
+        cdp_mouse(client, "mouseReleased", x, y, button, 2)
 
 
 # --- 坐标拾取（全局低级鼠标钩子）----------------------------------------
@@ -579,46 +624,81 @@ class ClickPicker:
 
 # --- 事件编辑对话框 -------------------------------------------------------
 class EventDialog(tk.Toplevel):
-    FIELDS = ("x", "y", "click", "delay_ms", "wheel", "text", "wait_px", "wait_max_ms")
+    FIELDS = ("x", "y", "ox", "oy", "click", "delay_ms", "wheel", "selector",
+              "remark")
 
-    def __init__(self, master, event: dict, on_pick, on_cancel=None):
+    def __init__(self, master, event: dict, on_pick, on_cancel=None,
+                 base: tuple[float, float] = (0.0, 0.0),
+                 on_test_selector=None):
         super().__init__(master)
         self.title("事件")
         self.resizable(False, False)
         self.result = None
         self._on_pick = on_pick
         self._on_cancel = on_cancel
+        self._base = base
+        self._on_test_selector = on_test_selector
 
-        self.x_var = tk.StringVar(value=str(event.get("x", 0)))
-        self.y_var = tk.StringVar(value=str(event.get("y", 0)))
+        # X/Y = 第一坐标（基准，各行相同，改了整条链平移）；
+        # DX/DY = 本行相对第一坐标的偏移（每一行都可改，包括第一行）。
+        # 本行执行点 = (x + ox, y + oy)。
+        self.x_var = tk.StringVar(value=self._fmt(event.get("x", 0)))
+        self.y_var = tk.StringVar(value=self._fmt(event.get("y", 0)))
+        self.dx_var = tk.StringVar(value=self._fmt(event.get("ox", 0)))
+        self.dy_var = tk.StringVar(value=self._fmt(event.get("oy", 0)))
         self.click_var = tk.StringVar(value=CLICK_LABELS.get(event.get("click", "left"), "左键单击"))
         self.delay_var = tk.StringVar(value=str(event.get("delay_ms", 0)))
         self.wheel_var = tk.StringVar(value=str(event.get("wheel", 0)))
-        self.text_var = tk.StringVar(value=event.get("text", "") or "")
-        self.wait_px_var = tk.StringVar(value=str(event.get("wait_px", 0)))
-        self.wait_max_var = tk.StringVar(value=str(event.get("wait_max_ms", 4000)))
+        self.sel_var = tk.StringVar(value=str(event.get("selector") or "").strip())
+        self.note_var = tk.StringVar(value=event.get("remark", "") or "")
 
         body = ttk.Frame(self, padding=10)
         body.grid(row=0, column=0, sticky="nsew")
 
-        rows = [
-            ("坐标 X（逻辑 px）", ttk.Entry(body, textvariable=self.x_var, width=12)),
-            ("坐标 Y（逻辑 px）", ttk.Entry(body, textvariable=self.y_var, width=12)),
-            ("点击事件", ttk.Combobox(body, textvariable=self.click_var, width=12,
-                                      state="readonly", values=list(CLICK_LABELS.values()))),
-            ("间隔时间 ms（点完后等）", ttk.Entry(body, textvariable=self.delay_var, width=12)),
-            ("滚轮格数（负=向下）", ttk.Entry(body, textvariable=self.wheel_var, width=12)),
-            ("粘贴内容（需前台）", ttk.Entry(body, textvariable=self.text_var, width=32)),
-            ("门控：等到 ≥N px 奶油色", ttk.Entry(body, textvariable=self.wait_px_var, width=12)),
-            ("门控上限 ms", ttk.Entry(body, textvariable=self.wait_max_var, width=12)),
+        grid = [
+            (0, "X（第一坐标，逻辑 px）", ttk.Entry(body, textvariable=self.x_var, width=12)),
+            (1, "Y（第一坐标，逻辑 px）", ttk.Entry(body, textvariable=self.y_var, width=12)),
+            (2, "偏移 DX（本行，相对第一坐标）", ttk.Entry(body, textvariable=self.dx_var, width=12)),
+            (3, "偏移 DY（本行，相对第一坐标）", ttk.Entry(body, textvariable=self.dy_var, width=12)),
+            (4, "点击事件", ttk.Combobox(body, textvariable=self.click_var, width=12,
+                                         state="readonly", values=list(CLICK_LABELS.values()))),
+            (5, "间隔时间 ms（点完后等）", ttk.Entry(body, textvariable=self.delay_var, width=12)),
+            (6, "滚轮格数（负=向下）", ttk.Entry(body, textvariable=self.wheel_var, width=12)),
+            (7, "CSS 选择器（可选，CDP 点击）", ttk.Entry(body, textvariable=self.sel_var, width=32)),
+            (8, "备注（DLL 不看）", ttk.Entry(body, textvariable=self.note_var, width=32)),
         ]
-        for i, (label, widget) in enumerate(rows):
-            ttk.Label(body, text=label).grid(row=i, column=0, sticky="w", pady=3, padx=(0, 8))
-            widget.grid(row=i, column=1, sticky="w", pady=3)
+        for row, label, widget in grid:
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 8))
+            widget.grid(row=row, column=1, sticky="w", pady=3)
+
+        # 拾取坐标 = 取第一坐标（基准）；拾取偏移 = 取本行落点换算成偏移
+        self.pick_xy_btn = ttk.Button(body, text="拾取坐标\n（第一坐标）", width=10,
+                                      command=self._pick_xy)
+        self.pick_xy_btn.grid(row=0, column=2, rowspan=2, sticky="ns", padx=(8, 0))
+        self.pick_off_btn = ttk.Button(body, text="拾取偏移\n（本行点击点）", width=10,
+                                       command=self._pick_off)
+        self.pick_off_btn.grid(row=2, column=2, rowspan=2, sticky="ns", padx=(8, 0))
+
+        # 有选择器就能现场验证（连 DLL 同一个 CDP 端口查一次元素矩形）
+        if self._on_test_selector is not None:
+            self.test_btn = ttk.Button(body, text="测试选择器", width=10,
+                                       command=self._test_selector)
+            self.test_btn.grid(row=7, column=2, sticky="ns", padx=(8, 0))
+
+        # 实时显示本行真正的执行点，基准/偏移没配对一眼就能看出来
+        self.exec_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self.exec_var, foreground="#B06",
+                  font=("Microsoft YaHei UI", 9, "bold")).grid(
+            row=9, column=0, columnspan=3, sticky="w")
+        for v in (self.x_var, self.y_var, self.dx_var, self.dy_var):
+            v.trace_add("write", lambda *_: self._update_exec())
+        self._update_exec()
+
+        ttk.Label(body, text="本行执行点 = 第一坐标 + 偏移；填了选择器则按元素点击（坐标作后备）",
+                  foreground="#777").grid(row=10, column=0, columnspan=3, sticky="w")
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=len(rows), column=0, columnspan=2, sticky="e", pady=(10, 0))
-        ttk.Button(buttons, text="拾取坐标", command=self._pick).pack(side="left", padx=4)
+        buttons.grid(row=11, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="确定", command=self._ok).pack(side="left", padx=4)
         ttk.Button(buttons, text="取消", command=self.destroy).pack(side="left")
 
@@ -626,12 +706,36 @@ class EventDialog(tk.Toplevel):
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-    def _pick(self):
+    @staticmethod
+    def _fmt(v: float) -> str:
+        v = round(float(v), 1)
+        return str(int(v)) if v.is_integer() else str(v)
+
+    def _update_exec(self):
+        """实时显示 第一坐标+偏移 的结果，执行点一眼可查。"""
+        try:
+            ex = float(self.x_var.get()) + float(self.dx_var.get())
+            ey = float(self.y_var.get()) + float(self.dy_var.get())
+        except ValueError:
+            self.exec_var.set("本行执行点 = 第一坐标 + 偏移 = （有字段不是数字）")
+            return
+        self.exec_var.set("本行执行点（脚本真正点这里）= (%s, %s)"
+                          % (self._fmt(ex), self._fmt(ey)))
+
+    def _pick_xy(self):
         def fill(lx, ly):
             if not self.winfo_exists():
                 return
-            self.x_var.set(str(lx))
-            self.y_var.set(str(ly))
+            self.x_var.set(self._fmt(lx))
+            self.y_var.set(self._fmt(ly))
+        self._on_pick(fill)
+
+    def _pick_off(self):
+        def fill(lx, ly):
+            if not self.winfo_exists():
+                return
+            self.dx_var.set(self._fmt(lx - self._base[0]))
+            self.dy_var.set(self._fmt(ly - self._base[1]))
         self._on_pick(fill)
 
     def destroy(self):
@@ -648,47 +752,57 @@ class EventDialog(tk.Toplevel):
         except tk.TclError:
             pass
 
+    def _test_selector(self):
+        """现场验证选择器（连 DLL 同一个 CDP 端口，只查询不点击）。"""
+        sel = self.sel_var.get().strip()
+        if not sel:
+            messagebox.showinfo("测试选择器", "先填一个 CSS 选择器", parent=self)
+            return
+        if self._on_test_selector is not None:
+            self._on_test_selector(sel, self)
+
     def _ok(self):
         try:
             event = {
                 "x": float(self.x_var.get()),
                 "y": float(self.y_var.get()),
+                "ox": float(self.dx_var.get()),
+                "oy": float(self.dy_var.get()),
                 "click": LABEL_CLICKS.get(self.click_var.get(), "left"),
                 "delay_ms": int(float(self.delay_var.get() or 0)),
                 "wheel": int(float(self.wheel_var.get() or 0)),
-                "text": self.text_var.get(),
-                "wait_px": int(float(self.wait_px_var.get() or 0)),
-                "wait_max_ms": int(float(self.wait_max_var.get() or 0)),
+                "selector": self.sel_var.get().strip(),
+                "remark": self.note_var.get().strip(),
             }
         except ValueError:
-            messagebox.showerror("格式错误", "坐标/间隔/滚轮/门控必须是数字", parent=self)
+            messagebox.showerror("格式错误", "坐标/偏移/间隔/滚轮必须是数字", parent=self)
             return
-        if event["x"].is_integer():
-            event["x"] = int(event["x"])
-        if event["y"].is_integer():
-            event["y"] = int(event["y"])
+        for key in ("x", "y", "ox", "oy"):
+            if float(event[key]).is_integer():
+                event[key] = int(event[key])
         self.result = event
         self.destroy()
 
 
 # --- 主窗口 ---------------------------------------------------------------
 DEFAULT_EVENTS = [
-    {"x": 27, "y": 113, "click": "left", "delay_ms": 600,
-     "wheel": 0, "text": "", "wait_px": 0, "wait_max_ms": 0},
-    {"x": 1573, "y": 87, "click": "left", "delay_ms": 0,
-     "wheel": 0, "text": "", "wait_px": 40, "wait_max_ms": 4000},
+    {"x": 27, "y": 113, "ox": 0, "oy": 0, "click": "left", "delay_ms": 600,
+     "wheel": 0, "selector": "", "remark": ""},
+    {"x": 27, "y": 113, "ox": 1546, "oy": -26, "click": "left", "delay_ms": 0,
+     "wheel": 0, "selector": "", "remark": ""},
 ]
 
 
 class App:
     COLUMNS = (
         ("idx", "序号", 50, "center"),
-        ("pos", "坐标", 130, "center"),
+        ("pos", "坐标", 120, "center"),
+        ("off", "偏移", 110, "center"),
         ("click", "点击", 90, "center"),
         ("delay", "间隔ms", 80, "center"),
         ("wheel", "滚轮", 70, "center"),
-        ("gate", "门控", 120, "center"),
-        ("text", "粘贴内容", 200, "w"),
+        ("sel", "选择器", 120, "w"),
+        ("note", "备注", 130, "w"),
     )
 
     def __init__(self, root: tk.Tk):
@@ -722,7 +836,13 @@ class App:
         self.name_var = tk.StringVar(value="活动")
         self.hotkey_var = tk.StringVar(value="")
         self.loop_var = tk.StringVar(value="1")
+        self.target_var = tk.StringVar(value="")     # target_url：多个页面时选页
         self.status_var = tk.StringVar(value="")
+
+        # 一次试跑共用一条 CDP 连接；失败一次后本轮不再重试（与 DLL 一致）
+        self._cdp: CdpClient | None = None
+        self._cdp_failed = False
+        self._cdp_target = ""
 
         self._build()
         self.refresh_target(quiet=True)
@@ -765,13 +885,14 @@ class App:
         ttk.Entry(meta, textvariable=self.hotkey_var, width=8).pack(side="left", padx=(4, 12))
         ttk.Label(meta, text="循环次数").pack(side="left")
         ttk.Entry(meta, textvariable=self.loop_var, width=6).pack(side="left", padx=(4, 12))
-        ttk.Label(meta, text="（空 = 不注册；F1~F24 / 单字母）", foreground="#777").pack(side="left")
+        ttk.Label(meta, text="目标页URL").pack(side="left")
+        ttk.Entry(meta, textvariable=self.target_var, width=24).pack(side="left", padx=(4, 12))
+        ttk.Label(meta, text="（热键：空 = 不注册；目标页 = URL 子串，空 = 自动选）",
+                  foreground="#777").pack(side="left")
 
         tools = ttk.Frame(outer)
         tools.pack(fill="x", pady=(0, 6))
-        self.pick_btn = ttk.Button(tools, text="添加坐标（拾取）", command=self.add_by_pick)
-        self.pick_btn.pack(side="left")
-        ttk.Button(tools, text="添加事件", command=self.add_manual).pack(side="left", padx=(4, 0))
+        ttk.Button(tools, text="添加事件", command=self.add_manual).pack(side="left")
         ttk.Button(tools, text="修改", command=self.edit_selected).pack(side="left", padx=(4, 0))
         ttk.Button(tools, text="删除行", command=self.delete_selected).pack(side="left", padx=(4, 0))
         ttk.Button(tools, text="上移", width=6, command=lambda: self.move_row(-1)).pack(side="left", padx=(4, 0))
@@ -783,8 +904,6 @@ class App:
         self.run_btn = ttk.Button(bottom, text="试跑", command=self.do_run)
         self.run_btn.pack(side="left")
         ttk.Button(bottom, text="跑选中行", command=self.do_run_selected).pack(
-            side="left", padx=(4, 0))
-        ttk.Button(bottom, text="门控检查（不点）", command=self.do_probe).pack(
             side="left", padx=(4, 0))
         self.stop_btn = ttk.Button(bottom, text="停止", command=self.do_stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 12))
@@ -819,7 +938,7 @@ class App:
         for key, title, width, anchor in self.COLUMNS:
             self.tree.heading(key, text=title)
             self.tree.column(key, width=int(width * self.scale), anchor=anchor,
-                             stretch=(key == "text"))
+                             stretch=(key == "note"))
         scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -850,18 +969,27 @@ class App:
     def render_table(self) -> None:
         self.tree.delete(*self.tree.get_children())
         for i, ev in enumerate(self.events, 1):
-            gate = ""
-            if int(ev.get("wait_px") or 0) > 0:
-                gate = "≥%dpx/%dms" % (int(ev["wait_px"]), int(ev.get("wait_max_ms") or 0))
+            off = "%s, %s" % (self._num(ev.get("ox", 0)), self._num(ev.get("oy", 0)))
+            sel = str(ev.get("selector") or "").strip()
             self.tree.insert("", "end", iid=str(i - 1), values=(
                 i,
-                "%s, %s" % (self._num(ev.get("x", 0)), self._num(ev.get("y", 0))),
+                "%s, %s" % (self._exec(ev, "x", "ox"), self._exec(ev, "y", "oy")),
+                off,
                 CLICK_LABELS.get(ev.get("click", "left"), "左键单击"),
                 ev.get("delay_ms", 0),
                 ev.get("wheel", 0),
-                gate or "-",
-                ev.get("text", "") or "",
+                sel if len(sel) <= 24 else sel[:23] + "…",
+                ev.get("remark", "") or "",
             ))
+
+    @staticmethod
+    def _exec(ev, key, off_key):
+        # 执行坐标 = 第一坐标 + 偏移（与 DLL 的 x+ox 折算一致）
+        try:
+            v = float(ev.get(key, 0) or 0) + float(ev.get(off_key, 0) or 0)
+        except (TypeError, ValueError):
+            return "?"
+        return App._num(round(v, 1))
 
     @staticmethod
     def _num(value) -> str:
@@ -881,26 +1009,39 @@ class App:
         self.tree.selection_set(str(len(self.events) - 1))
         self.tree.see(str(len(self.events) - 1))
 
-    def add_by_pick(self) -> None:
-        if self.picker is not None:
-            self._end_pick()
-            self._status("已取消拾取")
-            return
-        if not self._ensure_target():
-            return
+    def _base(self) -> tuple[float, float]:
+        """第一坐标（第一行）的绝对值，没有行时为 (0, 0)。"""
+        if not self.events:
+            return (0.0, 0.0)
+        return (float(self.events[0].get("x", 0) or 0),
+                float(self.events[0].get("y", 0) or 0))
 
-        def on_point(lx, ly):
-            ev = dict(DEFAULT_EVENTS[0])
-            ev.update(x=lx, y=ly, delay_ms=0, wait_px=0, wait_max_ms=0)
-            dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick)
-            self.root.wait_window(dialog)
-            if dialog.result:
-                self._add_event(dialog.result)
-
-        self.start_pick(on_point)
+    def _normalize_events(self) -> None:
+        """统一成新格式：x/y = 第一坐标（各行相同），ox/oy = 偏移，note→remark。"""
+        if not self.events:
+            return
+        bx = float(self.events[0].get("x", 0) or 0)
+        by = float(self.events[0].get("y", 0) or 0)
+        for i, ev in enumerate(self.events):
+            if "remark" not in ev:
+                ev["remark"] = str(ev.pop("note", "") or "")
+            if "ox" not in ev or "oy" not in ev:
+                if i == 0:
+                    ev["ox"] = 0
+                    ev["oy"] = 0
+                # 老格式：x/y 是绝对执行坐标，换算成相对基准的偏移
+                ev["ox"] = self._shift(ev.get("x", 0), -bx)
+                ev["oy"] = self._shift(ev.get("y", 0), -by)
+            ev["x"] = self._shift(bx, 0)
+            ev["y"] = self._shift(by, 0)
 
     def add_manual(self) -> None:
-        dialog = EventDialog(self.root, dict(DEFAULT_EVENTS[0]), self.start_pick, self._end_pick)
+        bx, by = self._base()
+        ev = {"x": bx, "y": by, "ox": 0, "oy": 0, "click": "left",
+              "delay_ms": 0, "wheel": 0, "selector": "", "remark": ""}
+        dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
+                             base=self._base(),
+                             on_test_selector=self.test_selector)
         self.root.wait_window(dialog)
         if dialog.result:
             self._add_event(dialog.result)
@@ -910,13 +1051,29 @@ class App:
         if idx is None:
             self._status("先选中一行")
             return
-        dialog = EventDialog(self.root, self.events[idx], self.start_pick, self._end_pick)
+        ev = dict(self.events[idx])
+        old_base = self._base()
+        dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
+                             base=old_base, on_test_selector=self.test_selector)
         self.root.wait_window(dialog)
         if dialog.result:
             self.events[idx] = dialog.result
+            # 对话框里改了第一坐标 = 整条链平移：各行 x/y 统一成新基准
+            if (float(dialog.result["x"]), float(dialog.result["y"])) != old_base:
+                for other in self.events:
+                    other["x"] = dialog.result["x"]
+                    other["y"] = dialog.result["y"]
+                self._status("第一坐标已更新为 (%s,%s)，整条链随之平移"
+                             % (self._num(dialog.result["x"]),
+                                self._num(dialog.result["y"])))
             self.dirty = True
             self.render_table()
             self.tree.selection_set(str(idx))
+
+    @staticmethod
+    def _shift(value, delta) -> float:
+        v = round(float(value or 0) + float(delta), 1)
+        return int(v) if v.is_integer() else v
 
     def delete_selected(self) -> None:
         idx = self._selected_index()
@@ -950,7 +1107,6 @@ class App:
         self.pick_queue = queue.Queue()
         self.picker = ClickPicker(self.target.view, self.target.scale, self.pick_queue)
         self.picker.start()
-        self.pick_btn.config(text="取消拾取")
         self._status("拾取中：请在 TT语音 界面上点一下目标位置…")
         self.root.after(80, self._poll_pick)
 
@@ -984,10 +1140,6 @@ class App:
         self.picker = None
         self.pick_queue = None
         self.pick_cb = None
-        try:
-            self.pick_btn.config(text="添加坐标（拾取）")
-        except tk.TclError:
-            pass
 
     # -- 文件 --------------------------------------------------------------
     def refresh_script_list(self, load_first: bool = False) -> None:
@@ -1024,7 +1176,9 @@ class App:
         self.name_var.set(data.get("name", name))
         self.hotkey_var.set(data.get("hotkey", ""))
         self.loop_var.set(str(data.get("loop", 1)))
+        self.target_var.set(str(data.get("target_url") or ""))
         self.events = [dict(e) for e in data.get("events", [])]
+        self._normalize_events()
         size = data.get("view_size") or []
         self.script_view_size = (int(size[0]), int(size[1])) if len(size) == 2 else None
         self.dirty = False
@@ -1034,13 +1188,41 @@ class App:
 
     def _collect(self) -> dict:
         w, h = self.target.w, self.target.h
+        bx = float(self.events[0].get("x", 0) or 0) if self.events else 0.0
+        by = float(self.events[0].get("y", 0) or 0) if self.events else 0.0
+        events = []
+        for i, ev in enumerate(self.events):
+            item = dict(ev)
+            item.pop("text", None)  # 粘贴功能已移除，老脚本里的 text 一并清掉
+            # 门控已整体移除，老脚本里的这两个键一并清掉（DLL 当未知键跳过）
+            item.pop("wait_px", None)
+            item.pop("wait_max_ms", None)
+            # 老脚本没有 remark 键，保存时补齐，DLL 会 JsonSkip 掉
+            item["remark"] = str(item.get("remark") or "").strip()
+            # selector 同理补齐（空 = 本行走坐标点击），DLL 认这个键
+            item["selector"] = str(item.get("selector") or "").strip()
+            # x/y 每行统一写第一坐标；ox/oy 缺失时（老格式：x/y 是绝对执行坐
+            # 标）按与基准的差值补齐。DLL 执行 (x+ox, y+oy)。
+            if i == 0:
+                item.setdefault("ox", 0)
+                item.setdefault("oy", 0)
+            elif "ox" not in item or "oy" not in item:
+                item["ox"] = self._shift(item.get("x", 0), -bx)
+                item["oy"] = self._shift(item.get("y", 0), -by)
+            item["x"] = self._shift(bx, 0)
+            item["y"] = self._shift(by, 0)
+            events.append(item)
         data = {
             "version": 1,
             "name": self.name_var.get().strip() or self.current_name or "script",
             "hotkey": self.hotkey_var.get().strip(),
             "loop": min(MAX_LOOP, max(1, self._int(self.loop_var.get(), 1))),
-            "events": self.events,
+            "events": events,
         }
+        # target_url：多个页面时按 URL 子串挑目标页（空 = 自动挑，不写进 JSON）
+        target = self.target_var.get().strip()
+        if target:
+            data["target_url"] = target
         if w > 0 and h > 0:
             # DLL 不认这个键（JsonSkip 会跳过），只给编辑器做坐标基准提醒
             data["view_size"] = [w, h]
@@ -1061,6 +1243,7 @@ class App:
         self.name_var.set("新脚本")
         self.hotkey_var.set("")
         self.loop_var.set("1")
+        self.target_var.set("")
         self.events = []
         self.dirty = True
         self.render_table()
@@ -1123,10 +1306,6 @@ class App:
         if len(self.events) > MAX_EVENTS:
             self._log("parity: 事件 %d 行 > %d，DLL 只读前 %d 行（试跑会全部跑完）"
                       % (len(self.events), MAX_EVENTS, MAX_EVENTS))
-        for i, ev in enumerate(self.events, 1):
-            text = str(ev.get("text") or "")
-            if len(text) > MAX_TEXT:
-                self._log("parity: 第 %d 行 text %d 字符 > %d，DLL 会截断" % (i, len(text), MAX_TEXT))
 
     def _dll_will_run(self) -> tuple[str, str]:
         """按 DLL 的优先级算它下一次会加载哪份：active.txt > 最新 .json。"""
@@ -1238,14 +1417,6 @@ class App:
             return
         self._start_job([dict(self.events[idx])], 1, idx + 1, "单行")
 
-    def do_probe(self) -> None:
-        """门控检查：按 DLL 的算法走一遍等待，但一个消息都不发。"""
-        idx = self._selected_index()
-        if idx is None:
-            self._status("先选中一行")
-            return
-        self._start_job([dict(self.events[idx])], 1, idx + 1, "probe")
-
     def _start_job(self, events: list[dict], loop: int, first_index: int,
                    mode: str) -> None:
         if self.running:
@@ -1259,12 +1430,16 @@ class App:
         loop = min(MAX_LOOP, max(1, loop))
         self.stop_evt = threading.Event()
         self.running = True
+        # 一次试跑共用一条 CDP 连接；target_url 在 Tk 线程里读，线程里只用副本
+        self._cdp = CdpClient()
+        self._cdp_failed = False
+        self._cdp_target = self.target_var.get().strip()
         self.run_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         threading.Thread(target=self._job_thread,
                          args=(events, loop, first_index, mode,
                                self.name_var.get().strip() or self.current_name or "script",
-                               self.target.main, self.target.view, self.target.scale,
+                               self.target.view, self.target.scale,
                                self.target.w, self.target.h),
                          daemon=True).start()
 
@@ -1273,122 +1448,189 @@ class App:
         self._status("正在停止…")
 
     def _job_thread(self, events, loop, first_index, mode, name,
-                    main_hwnd, view, scale, view_w, view_h) -> None:
-        cap = ViewCapture(view)
+                    view, scale, view_w, view_h) -> None:
+        del mode  # 只有日志前缀用；probe 模式已随门控一起移除
         started = time.time()
         try:
             self.msg_queue.put("target: view %dx%d scale %.2f" % (view_w, view_h, scale))
             self._check_view_size(view_w, view_h)
-            if mode == "probe":
-                self._probe_once(cap, events[0], first_index, scale)
-            else:
-                self.msg_queue.put('script: run "%s" events=%d loop=%d'
-                                   % (name, len(events), loop))
-                aborted = False
-                for round_index in range(1, loop + 1):
+            self.msg_queue.put('script: run "%s" events=%d loop=%d'
+                               % (name, len(events), loop))
+            aborted = False
+            for round_index in range(1, loop + 1):
+                if self.stop_evt.is_set():
+                    aborted = True
+                    break
+                for offset, ev in enumerate(events):
                     if self.stop_evt.is_set():
                         aborted = True
                         break
-                    for offset, ev in enumerate(events):
-                        if self.stop_evt.is_set():
-                            aborted = True
-                            break
-                        if loop > 1 or len(events) > 1:
-                            self.msg_queue.put("—— 第 %d 行 ——" % (first_index + offset))
-                        last = (round_index == loop and offset == len(events) - 1)
-                        self._run_event(cap, ev, main_hwnd, view, scale, last)
-                    if aborted:
-                        break
-                ms = int((time.time() - started) * 1000)
+                    if loop > 1 or len(events) > 1:
+                        self.msg_queue.put("—— 第 %d 行 ——" % (first_index + offset))
+                    last = (round_index == loop and offset == len(events) - 1)
+                    self._run_event(ev, view, scale, last)
                 if aborted:
-                    self.msg_queue.put("script: stopped in %dms" % ms)
-                    self.msg_queue.put("parity: 编辑器能中止，DLL 不能（它跑到最后一行为止）")
-                else:
-                    self.msg_queue.put("script: done in %dms" % ms)
+                    break
+            ms = int((time.time() - started) * 1000)
+            if aborted:
+                self.msg_queue.put("script: stopped in %dms" % ms)
+                self.msg_queue.put("parity: 编辑器能中止，DLL 不能（它跑到最后一行为止）")
+            else:
+                self.msg_queue.put("script: done in %dms" % ms)
             self.msg_queue.put("__DONE__")
         except Exception as exc:  # 线程里出错要回显，不能静默
             self.msg_queue.put("__ERROR__%s" % exc)
         finally:
-            cap._free()
+            if self._cdp is not None:
+                self._cdp.close()
+                self._cdp = None
 
-    def _run_event(self, cap, ev, main_hwnd, view, scale, skip_delay) -> None:
-        lx = float(ev.get("x", 0) or 0)
-        ly = float(ev.get("y", 0) or 0)
+    # -- CDP（选择器行）：与 DLL RunEventActions 的分支、日志逐字对齐 ------
+    def _cdp_ensure(self) -> bool:
+        """懒连接；失败一次本轮不重试（DLL CdpEnsure 同策略）。"""
+        if self._cdp is not None:
+            return True
+        if self._cdp_failed:
+            return False
+        client = CdpClient()   # 断线重连：旧实例已被 _cdp_query 清掉
+        try:
+            url = client.connect(self._cdp_target)
+        except (OSError, CdpError, ValueError) as exc:
+            client.close()
+            self._cdp_failed = True
+            self.msg_queue.put(
+                "script: cdp unavailable (%s) - selector rows fall back to x/y" % exc)
+            return False
+        self._cdp = client
+        self.msg_queue.put('script: cdp connect ok target="%s"' % url)
+        return True
+
+    def _cdp_query(self, selector: str) -> dict | None:
+        """查元素矩形；None = 查询失败（已打日志），found=0 = 页面里没有。
+
+        查询失败按断线处理：关掉连接，下一行 _cdp_ensure 重连（DLL 的
+        CdpCall 失败同样关 socket、CdpEnsure 重解析目标页）。
+        """
+        assert self._cdp is not None
+        try:
+            return cdp_query_selector(self._cdp, selector)
+        except (OSError, CdpError, KeyError, ValueError) as exc:
+            self.msg_queue.put('script: cdp "%s" evaluate failed (%s)'
+                               % (selector[:40], exc))
+            self._cdp.close()
+            self._cdp = None
+            return None
+
+    def _cdp_click(self, selector: str, kind: int) -> bool:
+        rc = self._cdp_query(selector)
+        if rc is None:
+            return False
+        if not rc.get("found") or rc.get("w", 0) < 0.5 or rc.get("h", 0) < 0.5:
+            return False
+        try:
+            cdp_click_at(self._cdp, rc["x"], rc["y"], kind)
+        except (OSError, CdpError) as exc:
+            self.msg_queue.put('script: cdp "%s" input failed (%s)'
+                               % (selector[:40], exc))
+            return False
+        self.msg_queue.put(
+            'script: cdp click kind=%d "%s" %.0f,%.0f (page px, trusted input)'
+            % (kind, selector[:40], rc["x"], rc["y"]))
+        return True
+
+    def _cdp_wheel(self, selector: str, notches: int) -> bool:
+        rc = self._cdp_query(selector)
+        if rc is None or not rc.get("found") or rc.get("w", 0) < 0.5 or rc.get("h", 0) < 0.5:
+            return False
+        try:
+            self._cdp.call("Input.dispatchMouseEvent",
+                           {"type": "mouseWheel", "x": rc["x"], "y": rc["y"],
+                            "deltaX": 0, "deltaY": -CDP_DELTA_PER_NOTCH * notches})
+        except (OSError, CdpError) as exc:
+            self.msg_queue.put('script: cdp "%s" input failed (%s)'
+                               % (selector[:40], exc))
+            return False
+        self.msg_queue.put('script: cdp wheel %+d "%s" %.0f,%.0f (page px)'
+                           % (notches, selector[:40], rc["x"], rc["y"]))
+        return True
+
+    def test_selector(self, selector: str, parent: tk.Toplevel) -> None:
+        """事件对话框里的「测试选择器」：连 DLL 同一端口，只查询不点击。"""
+        client = CdpClient()
+        try:
+            client.connect(self.target_var.get().strip())
+            rc = cdp_query_selector(client, selector)
+            if rc.get("found"):
+                messagebox.showinfo(
+                    "测试选择器",
+                    "找到了：中心 (%.0f, %.0f)，尺寸 %.0f x %.0f（页面 CSS px）"
+                    % (rc["x"], rc["y"], rc["w"], rc["h"]), parent=parent)
+            else:
+                messagebox.showwarning("测试选择器", "页面里没有这个元素", parent=parent)
+        except (OSError, CdpError, KeyError, ValueError) as exc:
+            messagebox.showerror("测试选择器",
+                                 "连不上或查询失败：%s\n（确认宿主已装新版 version.dll 并重启）"
+                                 % exc, parent=parent)
+        finally:
+            client.close()
+
+    def _run_event(self, ev, view, scale, skip_delay) -> None:
+        # DLL：解析完把偏移折算进 x/y，执行点 = (x+ox, y+oy)。这里同样折算。
+        lx = float(ev.get("x", 0) or 0) + float(ev.get("ox", 0) or 0)
+        ly = float(ev.get("y", 0) or 0) + float(ev.get("oy", 0) or 0)
         # DLL: static_cast<LONG>(lx * g_scale) —— 截断不是四舍五入，这里保持一致
         px, py = int(lx * scale), int(ly * scale)
 
-        wait_px = int(ev.get("wait_px") or 0)
-        if wait_px > 0:
-            self._gate_wait(cap, px, py, wait_px, int(ev.get("wait_max_ms") or 0))
-
+        selector = str(ev.get("selector") or "").strip()
         wheel = int(ev.get("wheel") or 0)
-        if wheel:
-            sx, sy = post_wheel(view, px, py, wheel)
-            self.msg_queue.put("script: wheel %+d at %d,%d" % (wheel, sx, sy))
-
-        text = ev.get("text") or ""
-        if text:
-            if len(str(text)) > MAX_TEXT:
-                self.msg_queue.put("parity: text %d 字符 > %d，DLL 只能粘前 %d 个"
-                                   % (len(str(text)), MAX_TEXT, MAX_TEXT))
-            if set_clipboard_text(str(text)):
-                user32.SetForegroundWindow(main_hwnd)
-                time.sleep(PASTE_FOCUS_MS / 1000.0)
-                send_ctrl_v()
-                self.msg_queue.put('script: pasted "%s"' % text)
-            else:
-                self.msg_queue.put("script: clipboard busy, paste skipped")
-
         kind = ev.get("click", "left")
-        post_click(view, px, py, kind)
-        self.msg_queue.put("script: click kind=%d %d,%d"
-                           % (CLICK_KINDS.get(kind, 0), px, py))
+        kind_n = CLICK_KINDS.get(kind, 0)
+        # 与 DLL RunEventActions 同一分支：有选择器先走 CDP，失败回退坐标
+        cdp = bool(selector) and self._cdp_ensure()
+
+        if wheel:
+            if selector and cdp:
+                if not self._cdp_wheel(selector, wheel):
+                    self._post_wheel_legacy(view, px, py, wheel)
+            else:
+                self._post_wheel_legacy(view, px, py, wheel)
+
+        if not selector:
+            self._post_click_legacy(view, px, py, kind, kind_n)
+        elif cdp and self._cdp_click(selector, kind_n):
+            pass
+        elif lx == 0 and ly == 0:
+            self.msg_queue.put(
+                'script: cdp "%s" not found and no x/y fallback, skipped'
+                % selector[:40])
+        else:
+            if cdp:
+                self.msg_queue.put(
+                    'script: cdp "%s" missing, click falls back to x/y'
+                    % selector[:40])
+            self._post_click_legacy(view, px, py, kind, kind_n)
 
         delay = max(0, int(ev.get("delay_ms") or 0))
         if delay and not skip_delay:
             self.stop_evt.wait(delay / 1000.0)
 
-    def _gate_wait(self, cap, px, py, wait_px, wait_max_ms) -> bool:
-        """WaitForCreamAt 的翻版：先睡 poll 再抓帧，连续 3 次命中才放行。"""
-        limit = wait_max_ms if wait_max_ms > 0 else GATE_MAX_MS
-        start = time.time()
-        stable = 0
-        max_hits = 0
-        while (time.time() - start) * 1000.0 < limit:
-            if self.stop_evt.is_set():
-                return False
-            time.sleep(GATE_POLL_MS / 1000.0)
-            if not cap.grab():
-                continue
-            hits, bx, by = cap.count_cream(px, py)
-            if hits > max_hits:
-                max_hits = hits
-            if hits >= wait_px:
-                stable += 1
-                if stable >= GATE_STABLE:
-                    self.msg_queue.put("script: gate hit %dpx at %d,%d after %dms"
-                                       % (hits, bx, by, int((time.time() - start) * 1000)))
-                    return True
-            else:
-                stable = 0
-        self.msg_queue.put("script: gate timeout %dms (max %dpx)" % (limit, max_hits))
-        return False
-
-    def _probe_once(self, cap, ev, index, scale) -> None:
-        wait_px = int(ev.get("wait_px") or 0)
-        need = wait_px if wait_px > 0 else CREAM_MIN_PX
-        px, py = int(float(ev.get("x", 0) or 0) * scale), int(float(ev.get("y", 0) or 0) * scale)
-        self.msg_queue.put("probe: 行%d 物理 %d,%d need=%dpx（不发任何点击）"
-                           % (index, px, py, need))
-        hit = self._gate_wait(cap, px, py, need, int(ev.get("wait_max_ms") or 0))
-        path = os.path.join(os.environ.get("TEMP", "tools"),
-                            "pplugin_probe_line%d.bmp" % index)
-        if cap.save_bmp(path):
-            self.msg_queue.put("probe: 抓帧已存 %s" % path)
-        if hit:
-            self.msg_queue.put("probe: 行%d 门控会命中 -> DLL 一到就点" % index)
+    def _post_wheel_legacy(self, view: int, px: int, py: int, wheel: int) -> None:
+        ok, info = post_wheel(view, px, py, wheel)
+        if ok:
+            self.msg_queue.put("script: wheel %+d at %s (real input)" % (wheel, info))
         else:
-            self.msg_queue.put("probe: 行%d 门控不命中 -> DLL 等满后照点（脚本没有 force 开关）" % index)
+            self.msg_queue.put("script: wheel skipped, covered by %s"
+                               "（把 TTVoice 窗口露出来再跑）" % info)
+
+    def _post_click_legacy(self, view: int, px: int, py: int, kind: str,
+                           kind_n: int) -> None:
+        ok, info = post_click(view, px, py, kind)
+        if ok:
+            self.msg_queue.put("script: click kind=%d %s (real input)"
+                               % (kind_n, info))
+        else:
+            self.msg_queue.put("script: click skipped, covered by %s"
+                               "（把 TTVoice 窗口露出来再跑）" % info)
 
     def _check_view_size(self, w: int, h: int) -> None:
         recorded = self.script_view_size

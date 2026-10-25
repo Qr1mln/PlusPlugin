@@ -12,9 +12,22 @@
 //
 // Schema (see tools/script_editor.py for the authoritative description):
 //   {"version":1,"name":"...","hotkey":"F1","loop":1,
-//    "events":[{"x":27,"y":113,"click":"left","delay_ms":600,"wheel":0,
-//               "text":"","wait_px":0,"wait_max_ms":0}, ...]}
+//    "events":[{"x":27,"y":113,"ox":0,"oy":0,"click":"left","delay_ms":600,
+//               "wheel":0,"remark":""}, ...]}
 // Coordinates are logical (96 dpi) view-relative, exactly like overlay.ini.
+// x/y is the first coordinate (the base, the same values on every row); ox/oy
+// is the row's offset from it (row 1 has 0,0). The executed point is
+// (x + ox, y + oy) - the engine folds the offsets into x/y right after the
+// parse, so old files without ox/oy keep clicking their absolute x/y.
+//
+// Optional per-event "selector" (CSS selector string): the element is located
+// in the H5 page over the WebView2 DevTools endpoint (armed by the proxy at
+// process start, see the CDP section below) and clicked there with
+// Input.dispatchMouseEvent - events enter Chromium's trusted input pipeline,
+// the same one OS mouse messages take, and need no foreground window. Optional
+// script-level "target_url" picks the page when several are open (substring
+// match on the page URL, UTF-8). A selector row that misses (no endpoint, no
+// element) falls back to the recorded x/y SendInput click.
 //
 // Keep this file pure ASCII.
 
@@ -23,14 +36,15 @@ static const int kScriptText      = 256;
 static const int kScriptHotkeyId  = 0x5454;  // "TT"
 
 struct ScriptEvent {
-    float   x = 0.0f;
+    float   x = 0.0f;        // first coordinate (base); folded with ox/oy below
     float   y = 0.0f;
+    float   ox = 0.0f;       // offset from the base (JSON "ox")
+    float   oy = 0.0f;       // offset from the base (JSON "oy")
     int     click = 0;       // 0 = left, 1 = double, 2 = right
     int     delayMs = 0;     // wait after this row
     int     wheel = 0;       // notches, negative scrolls down
-    int     waitPx = 0;      // gate: cream pixels required around (x,y)
-    int     waitMaxMs = 0;   // gate limit; 0 = no gate
     wchar_t text[kScriptText] = {};
+    char    selector[128] = {};   // CSS selector: click the element over CDP
 };
 
 struct Script {
@@ -38,6 +52,9 @@ struct Script {
     int         loop = 1;
     int         hotkeyVk = 0;
     int         count = 0;
+    int         viewW = 0;               // editor's view_size record (physical px)
+    int         viewH = 0;
+    char        targetUrl[160] = {};     // JSON "target_url": pick page by URL substring
     ScriptEvent events[kScriptMaxEvents];
 };
 
@@ -285,6 +302,14 @@ static bool JsonParseEvent(JsonScan* s, ScriptEvent* ev) {
             double v = 0;
             if (JsonNumber(s, &v)) ev->y = static_cast<float>(v);
             else JsonSkip(s);
+        } else if (_stricmp(key, "ox") == 0) {
+            double v = 0;
+            if (JsonNumber(s, &v)) ev->ox = static_cast<float>(v);
+            else JsonSkip(s);
+        } else if (_stricmp(key, "oy") == 0) {
+            double v = 0;
+            if (JsonNumber(s, &v)) ev->oy = static_cast<float>(v);
+            else JsonSkip(s);
         } else if (_stricmp(key, "click") == 0) {
             char kind[16] = {};
             if (JsonString(s, kind, sizeof(kind))) ev->click = ClickFromName(kind);
@@ -297,18 +322,12 @@ static bool JsonParseEvent(JsonScan* s, ScriptEvent* ev) {
             double v = 0;
             if (JsonNumber(s, &v)) ev->wheel = static_cast<int>(v);
             else JsonSkip(s);
-        } else if (_stricmp(key, "wait_px") == 0) {
-            double v = 0;
-            if (JsonNumber(s, &v)) ev->waitPx = static_cast<int>(v);
-            else JsonSkip(s);
-        } else if (_stricmp(key, "wait_max_ms") == 0) {
-            double v = 0;
-            if (JsonNumber(s, &v)) ev->waitMaxMs = static_cast<int>(v);
-            else JsonSkip(s);
         } else if (_stricmp(key, "text") == 0) {
             char text[1024] = {};
             if (JsonString(s, text, sizeof(text))) Utf8ToWideN(text, ev->text, kScriptText);
             else JsonSkip(s);
+        } else if (_stricmp(key, "selector") == 0) {
+            if (!JsonString(s, ev->selector, sizeof(ev->selector))) JsonSkip(s);
         } else {
             JsonSkip(s);
         }
@@ -381,12 +400,49 @@ static bool JsonParseScript(const char* text, size_t len, Script* out) {
             char nm[128] = {};
             if (JsonString(&s, nm, sizeof(nm))) Utf8ToWideN(nm, out->name, 64);
             else JsonSkip(&s);
+        } else if (_stricmp(key, "target_url") == 0) {
+            if (!JsonString(&s, out->targetUrl, sizeof(out->targetUrl))) JsonSkip(&s);
+        } else if (_stricmp(key, "view_size") == 0) {
+            // Editor records the view client size the coordinates were picked
+            // at; the plugin warns when it differs at run time (centered H5
+            // popups lay out differently per window size).
+            if (s.p < s.end && *s.p == '[') {
+                ++s.p;
+                int idx = 0;
+                while (s.p < s.end) {
+                    JsonWs(&s);
+                    if (s.p < s.end && *s.p == ']') {
+                        ++s.p;
+                        break;
+                    }
+                    double v = 0;
+                    if (JsonNumber(&s, &v)) {
+                        if (idx == 0) out->viewW = static_cast<int>(v);
+                        else if (idx == 1) out->viewH = static_cast<int>(v);
+                    } else {
+                        JsonSkip(&s);
+                    }
+                    ++idx;
+                    JsonWs(&s);
+                    if (s.p < s.end && *s.p == ',') ++s.p;
+                }
+            } else {
+                JsonSkip(&s);
+            }
         } else {
             JsonSkip(&s);
         }
 
         JsonWs(&s);
         if (s.p < s.end && *s.p == ',') ++s.p;
+    }
+
+    // The executed point is (x + ox, y + oy): fold the offsets into x/y once
+    // so every runner (plugin steps and the engine thread) just uses x/y.
+    // Files without ox/oy sum 0 and keep clicking their absolute x/y.
+    for (int i = 0; i < out->count; ++i) {
+        out->events[i].x += out->events[i].ox;
+        out->events[i].y += out->events[i].oy;
     }
 
     return out->count > 0;
@@ -582,52 +638,606 @@ static bool ScriptReload(bool verbose) {
 }
 
 // ---------------------------------------------------------------------------
+// WebView2 CDP channel (selector clicks)
+//
+// The version.dll proxy appends --remote-debugging-port to
+// WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS at process start (dllmain.cpp,
+// EnableWebView2Cdp), so the host's H5 layer - a WebView2 composited into
+// Flutter - exposes the DevTools endpoint on 127.0.0.1. Events with a
+// "selector" resolve their element through that endpoint:
+//
+//   Runtime.evaluate     -> document.querySelector(sel), scrollIntoView if
+//                           partly off-screen, getBoundingClientRect in CSS px
+//   Input.dispatchMouseEvent -> mouseMoved + mousePressed/mouseReleased at the
+//                           rect center, in the same CSS-px viewport coordinates
+//
+// CDP input events enter Chromium's real input pipeline: the page sees
+// isTrusted=true, exactly like the OS mouse messages SendInput produces -
+// that is why a click "comes back" as a message-grade event without the
+// window being in the foreground or the point being unobstructed. Coordinate
+// events keep the SendInput path; a selector row falls back to it only when
+// the channel or the element is missing.
+//
+// Concurrency: only the one active run (engine thread or the plugin's stepped
+// runner, never both - g_scriptActive serializes them) may call into here, so
+// no extra lock is needed.
+//
+// Keep this section pure ASCII.
+// ---------------------------------------------------------------------------
+#pragma comment(lib, "winhttp.lib")
+#include <winhttp.h>
+
+static const int kCdpPort = 9223;   // must equal kCdpArg in proxy/dllmain.cpp
+
+static HINTERNET g_cdpSession = nullptr;   // one WinHTTP session per process
+static HINTERNET g_cdpConnect = nullptr;   // 127.0.0.1:kCdpPort
+static HINTERNET g_cdpWs      = nullptr;   // upgraded websocket to the page
+static int       g_cdpMsgId   = 0;
+static bool      g_cdpFailed  = false;     // this run already failed to connect
+
+// One connect attempt per run: with the endpoint down, every selector row
+// falls straight to its x/y fallback instead of paying the timeout again.
+static void CdpRunBegin() { g_cdpFailed = false; }
+
+static void CdpCloseSocket() {
+    if (g_cdpWs != nullptr) {
+        WinHttpCloseHandle(g_cdpWs);
+        g_cdpWs = nullptr;
+    }
+}
+
+// Called from the plugin's shutdown so a hot reload cannot leak handles.
+static void CdpShutdown() {
+    CdpCloseSocket();
+    if (g_cdpConnect != nullptr) {
+        WinHttpCloseHandle(g_cdpConnect);
+        g_cdpConnect = nullptr;
+    }
+    if (g_cdpSession != nullptr) {
+        WinHttpCloseHandle(g_cdpSession);
+        g_cdpSession = nullptr;
+    }
+}
+
+// Escapes src into a complete JSON string literal (quotes included).
+static void CdpJsonQuote(const char* src, char* dst, int cap) {
+    int o = 0;
+    dst[o++] = '"';
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(src);
+         *p != 0 && o < cap - 8; ++p) {
+        const unsigned char c = *p;
+        if (c == '"' || c == '\\') {
+            dst[o++] = '\\';
+            dst[o++] = static_cast<char>(c);
+        } else if (c == '\n') { dst[o++] = '\\'; dst[o++] = 'n'; }
+        else if (c == '\r') { dst[o++] = '\\'; dst[o++] = 'r'; }
+        else if (c == '\t') { dst[o++] = '\\'; dst[o++] = 't'; }
+        else if (c < 0x20) { o += sprintf_s(dst + o, cap - o, "\\u%04x", c); }
+        else { dst[o++] = static_cast<char>(c); }   // UTF-8 passes through
+    }
+    dst[o++] = '"';
+    dst[o] = 0;
+}
+
+// ASCII case-insensitive substring (for URL matching).
+static bool CdpContainsI(const char* hay, const char* needle) {
+    if (needle == nullptr || needle[0] == 0) return true;
+    if (hay == nullptr) return false;
+    const int n = static_cast<int>(strlen(needle));
+    for (const char* p = hay; *p != 0; ++p) {
+        int i = 0;
+        while (i < n && p[i] != 0) {
+            char a = p[i], b = needle[i];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+            if (a != b) break;
+            ++i;
+        }
+        if (i == n) return true;
+    }
+    return false;
+}
+
+// Plain HTTP GET on the endpoint (used for /json/list before any websocket).
+static bool CdpHttpGet(const wchar_t* path, char* out, int cap) {
+    HINTERNET req = WinHttpOpenRequest(g_cdpConnect, L"GET", path, nullptr,
+                                       WINHTTP_NO_REFERER,
+                                       WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (req == nullptr) return false;
+
+    bool ok = false;
+    if (WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(req, nullptr)) {
+        DWORD status = 0, size = sizeof(status);
+        if (WinHttpQueryHeaders(req,
+                                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                nullptr, &status, &size, nullptr) &&
+            status == 200) {
+            int used = 0;
+            DWORD avail = 0;
+            while (used < cap - 1 &&
+                   WinHttpQueryDataAvailable(req, &avail) && avail > 0) {
+                DWORD want = avail;
+                if (want > static_cast<DWORD>(cap - 1 - used)) {
+                    want = static_cast<DWORD>(cap - 1 - used);
+                }
+                DWORD got = 0;
+                if (!WinHttpReadData(req, out + used, want, &got) || got == 0) break;
+                used += static_cast<int>(got);
+            }
+            out[used] = 0;
+            ok = (used > 0);
+        }
+    }
+    WinHttpCloseHandle(req);
+    return ok;
+}
+
+// Picks the page target out of /json/list. match (script "target_url", UTF-8)
+// selects the first page whose URL contains it; without a match: the only
+// page, or the last one when several are open (new pages append last).
+static bool CdpPickTarget(const char* match, wchar_t* wsPath, int wsCap,
+                          char* urlOut, int urlCap) {
+    char list[32768] = {};
+    if (!CdpHttpGet(L"/json/list", list, sizeof(list))) return false;
+
+    struct Page { char url[256]; char ws[256]; };
+    Page pages[16];
+    int count = 0;
+
+    JsonScan s;
+    s.p = list;
+    s.end = list + strlen(list);
+    JsonWs(&s);
+    if (s.p >= s.end || *s.p != '[') return false;
+    ++s.p;
+
+    while (s.p < s.end && count < 16) {
+        JsonWs(&s);
+        if (s.p < s.end && *s.p == ']') break;
+        if (s.p >= s.end || *s.p != '{') break;
+        ++s.p;
+
+        char url[256] = {}, ws[256] = {}, type[32] = {};
+        while (s.p < s.end) {
+            JsonWs(&s);
+            if (s.p < s.end && *s.p == '}') { ++s.p; break; }
+            char key[32] = {};
+            if (!JsonString(&s, key, sizeof(key))) return false;
+            JsonWs(&s);
+            if (s.p >= s.end || *s.p != ':') return false;
+            ++s.p;
+            JsonWs(&s);
+            if (s.p < s.end && *s.p == '"') {
+                if (_stricmp(key, "url") == 0) JsonString(&s, url, sizeof(url));
+                else if (_stricmp(key, "webSocketDebuggerUrl") == 0) {
+                    JsonString(&s, ws, sizeof(ws));
+                } else if (_stricmp(key, "type") == 0) {
+                    JsonString(&s, type, sizeof(type));
+                } else {
+                    JsonSkip(&s);
+                }
+            } else {
+                JsonSkip(&s);
+            }
+            JsonWs(&s);
+            if (s.p < s.end && *s.p == ',') ++s.p;
+        }
+        if (_stricmp(type, "page") == 0 && ws[0] != 0) {
+            Page& pg = pages[count++];
+            strcpy_s(pg.url, url);
+            strcpy_s(pg.ws, ws);
+        }
+        JsonWs(&s);
+        if (s.p < s.end && *s.p == ',') ++s.p;
+    }
+
+    int pick = -1;
+    if (match != nullptr && match[0] != 0) {
+        for (int i = 0; i < count; ++i) {
+            if (CdpContainsI(pages[i].url, match)) { pick = i; break; }
+        }
+    }
+    if (pick < 0 && count == 1) pick = 0;
+    if (pick < 0 && count > 1) pick = count - 1;
+    if (pick < 0) return false;
+
+    // webSocketDebuggerUrl = "ws://127.0.0.1:<port>/devtools/page/<id>" - the
+    // request path needs the LEADING slash or the websocket upgrade option
+    // rejects the handle with ERROR_INVALID_PARAMETER.
+    const char* dp = strstr(pages[pick].ws, "/devtools/page/");
+    if (dp == nullptr) return false;
+    MultiByteToWideChar(CP_UTF8, 0, dp, -1, wsPath, wsCap);
+
+    if (urlOut != nullptr && urlCap > 0) {
+        strncpy_s(urlOut, urlCap, pages[pick].url, _TRUNCATE);
+    }
+    return true;
+}
+
+static bool CdpFailOnce(const char* why) {
+    g_cdpFailed = true;
+    CdpCloseSocket();
+    char buf[192] = {};
+    sprintf_s(buf, "script: cdp unavailable (%s) - selector rows fall back to x/y",
+              why);
+    LogFromOverlay(buf);
+    return false;
+}
+
+// Connects to the endpoint lazily; idempotent while the socket lives. A dead
+// socket (page navigated away) is re-resolved on the next selector row of the
+// same run - only the very first failure latches for the whole run.
+static bool CdpEnsure(const char* targetMatch) {
+    if (g_cdpWs != nullptr) return true;
+    if (g_cdpFailed) return false;
+
+    if (g_cdpSession == nullptr) {
+        g_cdpSession = WinHttpOpen(L"pplugin/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                   WINHTTP_NO_PROXY_NAME,
+                                   WINHTTP_NO_PROXY_BYPASS, 0);
+        if (g_cdpSession == nullptr) return CdpFailOnce("winhttp open");
+        // resolve / connect / send / receive
+        WinHttpSetTimeouts(g_cdpSession, 3000, 3000, 3000, 4000);
+    }
+    if (g_cdpConnect == nullptr) {
+        g_cdpConnect = WinHttpConnect(g_cdpSession, L"127.0.0.1", kCdpPort, 0);
+        if (g_cdpConnect == nullptr) return CdpFailOnce("winhttp connect");
+    }
+
+    wchar_t wsPath[128] = {};
+    char url[256] = {};
+    if (!CdpPickTarget(targetMatch, wsPath, 128, url, sizeof(url))) {
+        return CdpFailOnce("no page target on 127.0.0.1:9223");
+    }
+
+    HINTERNET req = WinHttpOpenRequest(g_cdpConnect, L"GET", wsPath, nullptr,
+                                       WINHTTP_NO_REFERER,
+                                       WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (req == nullptr) return CdpFailOnce("ws request");
+    // The upgrade option takes NO buffer - (NULL, 0); any pointer makes it
+    // fail with ERROR_INVALID_PARAMETER (official WinhttpWebsocket sample).
+    DWORD err = 0;
+    bool ok = (WinHttpSetOption(req, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,
+                                nullptr, 0) != FALSE);
+    if (ok && (WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                  WINHTTP_NO_REQUEST_DATA, 0, 0, 0) == FALSE)) {
+        ok = false;
+    }
+    if (ok && (WinHttpReceiveResponse(req, nullptr) == FALSE)) ok = false;
+    HINTERNET ws = nullptr;
+    if (ok) ws = WinHttpWebSocketCompleteUpgrade(req, 0);
+    if (ws == nullptr) {
+        err = GetLastError();
+        WinHttpCloseHandle(req);
+        char why[64] = {};
+        sprintf_s(why, "websocket upgrade (err=%lu)", err);
+        return CdpFailOnce(why);
+    }
+    WinHttpCloseHandle(req);
+
+    g_cdpWs = ws;
+    char buf[320] = {};
+    sprintf_s(buf, "script: cdp connect ok target=\"%s\"", url);
+    LogFromOverlay(buf);
+    return true;
+}
+
+static bool CdpSendText(const char* text) {
+    if (g_cdpWs == nullptr) return false;
+    return WinHttpWebSocketSend(g_cdpWs,
+                                WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                const_cast<PVOID>(static_cast<const void*>(text)),
+                                static_cast<DWORD>(strlen(text))) == NO_ERROR;
+}
+
+// Reads one complete text message (fragments joined); false on close/error.
+static bool CdpRecvMessage(char* out, int cap) {
+    int used = 0;
+    for (;;) {
+        DWORD read = 0;
+        WINHTTP_WEB_SOCKET_BUFFER_TYPE type =
+            WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE;
+        // Receive returns a DWORD error code (0 = success), not a BOOL.
+        if (WinHttpWebSocketReceive(g_cdpWs, out + used, cap - 1 - used,
+                                    &read, &type) != NO_ERROR) {
+            return false;
+        }
+        used += static_cast<int>(read);
+        out[used] = 0;
+        if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) return true;
+        if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) return false;
+        if (used >= cap - 1) return false;
+    }
+}
+
+// One command round-trip. Responses are matched by their leading {"id":N,
+// events and unrelated responses in between are drained. A send/receive
+// failure closes the socket so the next CdpEnsure re-resolves the target.
+static bool CdpCall(const char* method, const char* params, char* resp, int cap) {
+    if (g_cdpWs == nullptr) return false;
+
+    const int id = ++g_cdpMsgId;
+    char msg[8192] = {};
+    sprintf_s(msg, sizeof(msg), "{\"id\":%d,\"method\":\"%s\",\"params\":%s}",
+              id, method, (params != nullptr && params[0] != 0) ? params : "{}");
+    if (!CdpSendText(msg)) {
+        CdpCloseSocket();
+        return false;
+    }
+
+    char prefix[32] = {};
+    sprintf_s(prefix, sizeof(prefix), "{\"id\":%d,", id);
+
+    char buf[8192] = {};
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    while (GetTickCount64() < deadline) {
+        if (!CdpRecvMessage(buf, sizeof(buf))) {
+            CdpCloseSocket();
+            return false;
+        }
+        if (strncmp(buf, prefix, strlen(prefix)) != 0) continue;   // event, skip
+        if (resp != nullptr && cap > 0) {
+            strncpy_s(resp, cap, buf, _TRUNCATE);
+        }
+        return true;
+    }
+    return false;
+}
+
+// Evaluates expr in the page and returns its string result in out.
+static bool CdpEvaluate(const char* expr, char* out, int cap) {
+    char quoted[2048] = {};
+    CdpJsonQuote(expr, quoted, sizeof(quoted));
+    char params[2200] = {};
+    sprintf_s(params, sizeof(params), "{\"expression\":%s}", quoted);
+
+    char resp[8192] = {};
+    if (!CdpCall("Runtime.evaluate", params, resp, sizeof(resp))) return false;
+    if (strstr(resp, "\"exceptionDetails\"") != nullptr) return false;
+
+    const char* v = strstr(resp, "\"value\":\"");
+    if (v == nullptr) return false;
+    JsonScan s;
+    s.p = v + 8;   // on the opening quote of the value
+    s.end = resp + strlen(resp);
+    return JsonString(&s, out, cap);
+}
+
+struct CdpRect {
+    float x = 0, y = 0, w = 0, h = 0, vw = 0, vh = 0;
+    int   found = 0;
+};
+
+// Resolves a CSS selector to the element's center in CSS px (viewport
+// coordinates - the same space Input.dispatchMouseEvent takes). The element
+// is scrolled to with block:'nearest' first, which is a no-op when visible.
+// Returns false on channel/JS errors; found=0 means "no such element".
+static bool CdpQuerySelector(const char* selector, CdpRect* out) {
+    char selQ[512] = {};
+    CdpJsonQuote(selector, selQ, sizeof(selQ));
+    // A JSON string literal is a valid JS string literal (same quotes, same
+    // escapes), so the quoted selector embeds directly - no JSON.parse needed.
+    char expr[1024] = {};
+    sprintf_s(expr, sizeof(expr),
+        "(function(){var e=document.querySelector(%s);"
+        "if(!e)return '{\"found\":0}';"
+        "e.scrollIntoView({block:'nearest',inline:'nearest'});"
+        "var r=e.getBoundingClientRect();"
+        "return JSON.stringify({found:1,x:r.left+r.width/2,y:r.top+r.height/2,"
+        "w:r.width,h:r.height,vw:innerWidth,vh:innerHeight});})()",
+        selQ);
+
+    char val[256] = {};
+    if (!CdpEvaluate(expr, val, sizeof(val))) return false;
+
+    *out = CdpRect();
+    JsonScan s;
+    s.p = val;
+    s.end = val + strlen(val);
+    JsonWs(&s);
+    if (s.p >= s.end || *s.p != '{') return false;
+    ++s.p;
+    while (s.p < s.end) {
+        JsonWs(&s);
+        if (s.p < s.end && *s.p == '}') break;
+        char key[16] = {};
+        if (!JsonString(&s, key, sizeof(key))) return false;
+        JsonWs(&s);
+        if (s.p >= s.end || *s.p != ':') return false;
+        ++s.p;
+        JsonWs(&s);
+        double v = 0;
+        if (JsonNumber(&s, &v)) {
+            if (strcmp(key, "found") == 0) out->found = static_cast<int>(v);
+            else if (strcmp(key, "x") == 0) out->x = static_cast<float>(v);
+            else if (strcmp(key, "y") == 0) out->y = static_cast<float>(v);
+            else if (strcmp(key, "w") == 0) out->w = static_cast<float>(v);
+            else if (strcmp(key, "h") == 0) out->h = static_cast<float>(v);
+        } else {
+            JsonSkip(&s);
+        }
+        JsonWs(&s);
+        if (s.p < s.end && *s.p == ',') ++s.p;
+    }
+    return true;
+}
+
+static bool CdpMouse(const char* type, float x, float y,
+                     const char* button, int clickCount) {
+    char params[192] = {};
+    if (button != nullptr && button[0] != 0) {
+        sprintf_s(params, sizeof(params),
+                  "{\"type\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"button\":\"%s\","
+                  "\"clickCount\":%d}",
+                  type, x, y, button, clickCount);
+    } else {
+        sprintf_s(params, sizeof(params),
+                  "{\"type\":\"%s\",\"x\":%.1f,\"y\":%.1f}", type, x, y);
+    }
+    return CdpCall("Input.dispatchMouseEvent", params, nullptr, 0);
+}
+
+// The visible part of a selector for log lines (long selectors get trimmed).
+static void CdpSelBrief(const char* selector, char* out, int cap) {
+    strncpy_s(out, cap, selector[0] != 0 ? selector : "?", 40);
+}
+
+static bool CdpClickAt(float x, float y, int kind, const char* selector) {
+    if (!CdpMouse("mouseMoved", x, y, nullptr, 0)) return false;
+    Sleep(20);   // let the hover state land, like the SendInput path does
+
+    const char* btn = (kind == 2) ? "right" : "left";
+    if (!CdpMouse("mousePressed", x, y, btn, 1)) return false;
+    if (!CdpMouse("mouseReleased", x, y, btn, 1)) return false;
+    if (kind == 1) {  // double: the second pair carries clickCount 2
+        Sleep(40);    // same gap the SendInput double uses
+        if (!CdpMouse("mousePressed", x, y, btn, 2)) return false;
+        if (!CdpMouse("mouseReleased", x, y, btn, 2)) return false;
+    }
+
+    char sel[48] = {};
+    CdpSelBrief(selector, sel, sizeof(sel));
+    char buf[160] = {};
+    sprintf_s(buf, "script: cdp click kind=%d \"%s\" %.0f,%.0f (page px, trusted input)",
+              kind, sel, x, y);
+    LogFromOverlay(buf);
+    return true;
+}
+
+// Wheel over the selector's element. CDP deltaY is pixels, positive scrolls
+// down; the JSON wheel keeps Windows semantics (notches, positive = up), so
+// one notch maps to -100 px.
+static bool CdpWheelSelector(const ScriptEvent& ev) {
+    CdpRect rc;
+    if (!CdpQuerySelector(ev.selector, &rc) || rc.found == 0 ||
+        rc.w < 0.5f || rc.h < 0.5f) {
+        return false;
+    }
+    char params[160] = {};
+    sprintf_s(params, sizeof(params),
+              "{\"type\":\"mouseWheel\",\"x\":%.1f,\"y\":%.1f,\"deltaX\":0,"
+              "\"deltaY\":%d}",
+              rc.x, rc.y, -100 * ev.wheel);
+    if (!CdpCall("Input.dispatchMouseEvent", params, nullptr, 0)) return false;
+
+    char sel[48] = {};
+    CdpSelBrief(ev.selector, sel, sizeof(sel));
+    char buf[160] = {};
+    sprintf_s(buf, "script: cdp wheel %+d \"%s\" %.0f,%.0f (page px)",
+              ev.wheel, sel, rc.x, rc.y);
+    LogFromOverlay(buf);
+    return true;
+}
+
+// True when the click was delivered over CDP. found=0, a hidden element and
+// every channel error return false so the caller can fall back to x/y.
+static bool CdpClickSelector(const ScriptEvent& ev) {
+    CdpRect rc;
+    if (!CdpQuerySelector(ev.selector, &rc)) {
+        char sel[48] = {};
+        CdpSelBrief(ev.selector, sel, sizeof(sel));
+        char buf[160] = {};
+        sprintf_s(buf, "script: cdp \"%s\" evaluate failed", sel);
+        LogFromOverlay(buf);
+        return false;
+    }
+    if (rc.found == 0 || rc.w < 0.5f || rc.h < 0.5f) return false;
+    return CdpClickAt(rc.x, rc.y, ev.click, ev.selector);
+}
+
+// ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
 
+// Real (hardware-level) input. TT voice's H5 popups - WebView2 composited
+// inside Flutter (HeadlessInAppWebView) - do not react to posted WM_LBUTTONDOWN:
+// their pointer pipeline only sees OS-generated input, so a synthetic message
+// click is a no-op there (verified 2026-10). SendInput is indistinguishable
+// from a real mouse. Cost: the point must be on screen and unobstructed - the
+// app window is raised first, and if something else still covers the point the
+// click is skipped instead of landing in that other window.
+static void SendMouse(ULONG flags, SHORT wheelDelta) {
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = flags;
+    in.mi.mouseData = static_cast<DWORD>(wheelDelta);
+    SendInput(1, &in, sizeof(INPUT));
+}
+
 static void SimulateClickKindAt(float lx, float ly, int kind) {
-    HWND target = g_viewHwnd ? g_viewHwnd : g_hwnd;
-    if (!target) return;
+    HWND view = g_viewHwnd ? g_viewHwnd : g_hwnd;
+    if (!view) return;
 
     const LONG px = static_cast<LONG>(lx * g_scale);
     const LONG py = static_cast<LONG>(ly * g_scale);
-    const LPARAM lp = MAKELPARAM(px, py);
+    POINT pt = {px, py};
+    if (!ClientToScreen(view, &pt)) return;
 
-    PostMessageW(target, WM_MOUSEMOVE, 0, lp);
-    if (kind == 2) {  // right
-        PostMessageW(target, WM_RBUTTONDOWN, MK_RBUTTON, lp);
-        PostMessageW(target, WM_RBUTTONUP, 0, lp);
-    } else if (kind == 1) {  // double
-        PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp);
-        PostMessageW(target, WM_LBUTTONUP, 0, lp);
+    if (g_hwnd) SetForegroundWindow(g_hwnd);   // so the point is clickable
+    Sleep(200);
+
+    HWND hit = WindowFromPoint(pt);
+    if (hit != view) {
+        wchar_t wcls[64] = {};
+        char cover[64] = {};
+        GetClassNameW(hit ? hit : g_hwnd, wcls, 64);
+        Nz(wcls, cover, sizeof(cover));
+        char buf[192] = {};
+        sprintf_s(buf, "script: click skipped, (%ld,%ld) covered by %s - "
+                       "bring the TTVoice window to front",
+                  pt.x, pt.y, cover);
+        LogFromOverlay(buf);
+        return;
+    }
+
+    if (!SetCursorPos(pt.x, pt.y)) return;
+    Sleep(50);   // let the hover frame land before the button press
+
+    const bool right = (kind == 2);
+    const ULONG down = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
+    const ULONG up = right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
+    SendMouse(down, 0);
+    SendMouse(up, 0);
+    if (kind == 1) {  // double
         Sleep(40);
-        PostMessageW(target, WM_LBUTTONDBLCLK, MK_LBUTTON, lp);
-        PostMessageW(target, WM_LBUTTONUP, 0, lp);
-    } else {
-        PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp);
-        PostMessageW(target, WM_LBUTTONUP, 0, lp);
+        SendMouse(down, 0);
+        SendMouse(up, 0);
     }
 
     char buf[128] = {};
-    sprintf_s(buf, "script: click kind=%d %ld,%ld", kind, px, py);
+    sprintf_s(buf, "script: click kind=%d %ld,%ld (real input, screen %ld,%ld)",
+              kind, px, py, pt.x, pt.y);
     LogFromOverlay(buf);
 }
 
 static void SimulateWheelAt(float lx, float ly, int notches) {
-    HWND target = g_viewHwnd ? g_viewHwnd : g_hwnd;
-    if (!target || notches == 0) return;
+    if (!notches) return;
+    HWND view = g_viewHwnd ? g_viewHwnd : g_hwnd;
+    if (!view) return;
 
-    // WM_MOUSEWHEEL takes screen coordinates, unlike the click messages.
-    POINT pt = {static_cast<LONG>(lx * g_scale), static_cast<LONG>(ly * g_scale)};
-    if (!ClientToScreen(target, &pt)) return;
+    const LONG px = static_cast<LONG>(lx * g_scale);
+    const LONG py = static_cast<LONG>(ly * g_scale);
+    POINT pt = {px, py};
+    if (!ClientToScreen(view, &pt)) return;
 
-    const int delta = 120 * notches;
-    const WPARAM wp =
-        static_cast<WPARAM>(static_cast<WORD>(delta & 0xFFFF)) << 16;
-    PostMessageW(target, WM_MOUSEWHEEL, wp, MAKELPARAM(pt.x, pt.y));
+    if (g_hwnd) SetForegroundWindow(g_hwnd);
+    Sleep(200);
+
+    HWND hit = WindowFromPoint(pt);
+    if (hit != view) {
+        LogFromOverlay("script: wheel skipped, point covered by another window");
+        return;
+    }
+
+    if (!SetCursorPos(pt.x, pt.y)) return;
+    Sleep(50);
+    SendMouse(MOUSEEVENTF_WHEEL, static_cast<SHORT>(120 * notches));
 
     char buf[128] = {};
-    sprintf_s(buf, "script: wheel %+d at %ld,%ld", notches, pt.x, pt.y);
+    sprintf_s(buf, "script: wheel %+d at %ld,%ld (real input, screen %ld,%ld)",
+              notches, px, py, pt.x, pt.y);
     LogFromOverlay(buf);
 }
 
@@ -675,40 +1285,51 @@ static void PasteTextToApp(const wchar_t* text) {
     LogFromOverlay(buf);
 }
 
-// Waits (up to maxMs) until at least minPx cream pixels sit around (lx,ly) for
-// three polls in a row. Returns the elapsed ms, or -1 on timeout.
-static long WaitForCreamAt(float lx, float ly, int minPx, int maxMs, int pollMs) {
-    const ULONGLONG start = GetTickCount64();
-    const ULONGLONG limit = (maxMs > 0) ? static_cast<ULONGLONG>(maxMs) : 4000ULL;
-    int stable = 0;
-    int maxHits = 0;
+// One event's actions in engine order (wheel -> paste -> click). A selector
+// event resolves its element over CDP and clicks it there - trusted input,
+// no foreground needed. Every failure path (endpoint down, element missing,
+// dispatch error) falls back to the recorded x/y SendInput click, which is
+// exactly what the same row did before selectors existed.
+static void RunEventActions(const ScriptEvent& ev, const char* targetUrl) {
+    const bool wantCdp = (ev.selector[0] != 0);
+    const bool cdp = wantCdp && CdpEnsure(targetUrl);
 
-    while (GetTickCount64() - start < limit) {
-        Sleep(static_cast<DWORD>(pollMs));
-        if (!CaptureView()) continue;
-
-        LONG bx = 0;
-        LONG by = 0;
-        const int n = CountCreamBand(lx, ly, &bx, &by);
-        if (n > maxHits) maxHits = n;
-        if (n >= minPx) {
-            if (++stable >= 3) {
-                char buf[160] = {};
-                sprintf_s(buf, "script: gate hit %dpx at %ld,%ld after %llums", n, bx, by,
-                          static_cast<unsigned long long>(GetTickCount64() - start));
-                LogFromOverlay(buf);
-                return static_cast<long>(GetTickCount64() - start);
-            }
-        } else {
-            stable = 0;
+    if (ev.wheel != 0) {
+        if (!(cdp && CdpWheelSelector(ev))) {
+            SimulateWheelAt(ev.x, ev.y, ev.wheel);
         }
     }
+    if (ev.text[0]) {
+        PasteTextToApp(ev.text);
+    }
 
-    char buf[160] = {};
-    sprintf_s(buf, "script: gate timeout %lums (max %dpx)", static_cast<unsigned long>(limit),
-              maxHits);
-    LogFromOverlay(buf);
-    return -1;
+    if (!wantCdp) {
+        SimulateClickKindAt(ev.x, ev.y, ev.click);
+        return;
+    }
+    if (cdp && CdpClickSelector(ev)) {
+        return;
+    }
+
+    // No element (or no channel): the recorded point is the fallback. x/y 0,0
+    // means "never picked" - skip instead of clicking the top-left corner.
+    if (ev.x == 0.0f && ev.y == 0.0f) {
+        char sel[48] = {};
+        CdpSelBrief(ev.selector, sel, sizeof(sel));
+        char buf[160] = {};
+        sprintf_s(buf, "script: cdp \"%s\" not found and no x/y fallback, skipped",
+                  sel);
+        LogFromOverlay(buf);
+        return;
+    }
+    if (cdp) {
+        char sel[48] = {};
+        CdpSelBrief(ev.selector, sel, sizeof(sel));
+        char buf[160] = {};
+        sprintf_s(buf, "script: cdp \"%s\" missing, click falls back to x/y", sel);
+        LogFromOverlay(buf);
+    }
+    SimulateClickKindAt(ev.x, ev.y, ev.click);
 }
 
 static DWORD WINAPI ScriptRunThread(LPVOID) {
@@ -716,7 +1337,6 @@ static DWORD WINAPI ScriptRunThread(LPVOID) {
     AcquireSRWLockShared(&g_scriptLock);
     local = g_script;
     ReleaseSRWLockShared(&g_scriptLock);
-    const int poll = (g_gatePollMs >= 30) ? g_gatePollMs : 120;
 
     {
         char nm[256] = {};
@@ -726,22 +1346,13 @@ static DWORD WINAPI ScriptRunThread(LPVOID) {
         LogFromOverlay(buf);
     }
 
+    CdpRunBegin();
     const ULONGLONG started = GetTickCount64();
 
     for (int round = 1; round <= local.loop; ++round) {
         for (int i = 0; i < local.count; ++i) {
             const ScriptEvent& ev = local.events[i];
-
-            if (ev.waitPx > 0) {
-                WaitForCreamAt(ev.x, ev.y, ev.waitPx, ev.waitMaxMs, poll);
-            }
-            if (ev.wheel != 0) {
-                SimulateWheelAt(ev.x, ev.y, ev.wheel);
-            }
-            if (ev.text[0]) {
-                PasteTextToApp(ev.text);
-            }
-            SimulateClickKindAt(ev.x, ev.y, ev.click);
+            RunEventActions(ev, local.targetUrl);
 
             if (round == local.loop && i == local.count - 1) continue;
             if (ev.delayMs > 0) Sleep(static_cast<DWORD>(ev.delayMs));
