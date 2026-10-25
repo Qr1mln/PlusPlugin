@@ -2,10 +2,11 @@
 
 独立窗口，做三件事：
   1. 拾取坐标——点一下目标位置即记录（这次点击会被吞掉，不会触发应用），
-     坐标按 FLUTTERVIEW 相对逻辑 px（96 dpi）保存；
-  2. 编辑事件表（坐标 / 点击类型 / 间隔 / 滚轮 / 备注）。第一行是「第一坐标」
-     （绝对基准），其余行按相对它的「偏移坐标」编辑——改第一坐标，其余行
-     自动跟着平移；
+     坐标按 FLUTTERVIEW 相对逻辑 px（96 dpi）保存；拾取期间目标窗口会盖上
+     一层透明遮罩：十字线跟随鼠标、实时显示当前位置的逻辑/物理坐标，鼠标
+     移出窗口时变红并提示「点了不算」；
+  2. 编辑事件表（坐标 / 点击类型 / 间隔 / 滚轮 / 备注）。每一行的坐标就是
+     该行自己的绝对落点（逻辑 px），改哪一行只影响哪一行；
   3. 存成 JSON 供 DLL 读取执行；本窗口也能直接「试跑」验证坐标。
 
 脚本目录：%APPDATA%\\TTVoice\\scripts\\<名称>.json
@@ -21,21 +22,18 @@ JSON 格式（DLL 侧读取的就是这一份）：
       "hotkey": "",
       "loop": 1,
       "events": [
-        {"x": 27, "y": 113, "ox": 0, "oy": 0, "click": "left", "delay_ms": 600,
+        {"x": 27, "y": 113, "click": "left", "delay_ms": 600,
          "wheel": 0, "remark": ""},
-        {"x": 27, "y": 113, "ox": 1546, "oy": -26, "click": "left", "delay_ms": 0,
+        {"x": 1573, "y": 87, "click": "left", "delay_ms": 0,
          "wheel": 0, "remark": ""}
       ]
     }
 
 字段含义：
-  x, y          第一坐标（基准），每一行都写同样的值；FLUTTERVIEW 客户区相对
-                逻辑 px（96 dpi），物理 px = 逻辑 * DPI/96
-  ox, oy        本行相对第一坐标的偏移（每一行都可非 0，含第一行；默认 0,0）
-  执行坐标      **真正执行的是 (x + ox, y + oy)**：DLL 解析完就把偏移折算进
-                x/y，编辑器试跑同样按这个点执行。改第一坐标（x/y）即整条链
-                平移，ox/oy 不变。老脚本没有 ox/oy，折算时加 0，按其绝对
-                x/y 执行；编辑器保存时会补齐 ox/oy 并把 x/y 统一写成基准
+  x, y          本行的执行坐标，每行独立；FLUTTERVIEW 客户区相对逻辑 px
+                （96 dpi），物理 px = 逻辑 * DPI/96。改哪一行只影响哪一行
+  ox, oy        已废弃：老脚本里的偏移在载入时折算进 x/y（x += ox），保存时
+                删掉这两个键。DLL 仍兼容（缺省 0，即直接执行 x/y）
   click         left | double | right
   selector      可选 CSS 选择器。填了本行先走 CDP：Runtime.evaluate 定位元素
                 （getBoundingClientRect，页面 CSS px），Input.dispatchMouseEvent
@@ -54,7 +52,7 @@ JSON 格式（DLL 侧读取的就是这一份）：
   wheel         滚轮格数：正=向上，负=向下，0=不滚；有 selector 时滚在元素上
                 （CDP deltaY = -100 * 格数，与 DLL 一致）
   remark        备注，随便写（原 note 键已更名）；DLL 用 JsonSkip 跳过，只给人和编辑器看
-  view_size     编辑器额外写的 [w,h]（保存时的 view 客户区），DLL 不认这个键，只用来提醒坐标基准变了
+  view_size     编辑器额外写的 [w,h]（保存时的 view 客户区），DLL 不认这个键，只用来提醒 view 尺寸变了坐标可能偏
 
                 注意：events 为空时 DLL 拒收（count>0 才算解析成功），会打
                 script: parse failed <path> (no events / bad json)。
@@ -103,6 +101,14 @@ MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
 WH_MOUSE_LL = 14
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020    # 鼠标事件穿透（点下去仍落在目标窗口上）
+WS_EX_TOOLWINDOW = 0x00000080     # 不进任务栏 / 不进 Alt+Tab
+WS_EX_NOACTIVATE = 0x08000000     # 不抢焦点
+HWND_TOPMOST = -1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
 
 MAIN_CLASS = "FLUTTER_RUNNER_WIN32_WINDOW"
 VIEW_CLASS = "FLUTTERVIEW"
@@ -160,6 +166,15 @@ user32.TranslateMessage.argtypes = (ctypes.POINTER(wintypes.MSG),)
 user32.DispatchMessageW.argtypes = (ctypes.POINTER(wintypes.MSG),)
 user32.PostThreadMessageW.argtypes = (wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+user32.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
+user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+user32.GetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int)
+user32.GetWindowLongPtrW.restype = ctypes.c_longlong
+user32.SetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_longlong)
+user32.SetWindowLongPtrW.restype = ctypes.c_longlong
+user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wintypes.UINT)
+user32.SetWindowPos.restype = wintypes.BOOL
 
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
@@ -622,13 +637,134 @@ class ClickPicker:
         return user32.CallNextHookEx(None, n_code, w_param, l_param)
 
 
+# --- 拾取遮罩 --------------------------------------------------------------
+def fmt_coord(v) -> str:
+    v = round(float(v), 1)
+    return str(int(v)) if v.is_integer() else str(v)
+
+
+class PickOverlay(tk.Toplevel):
+    """拾取期间盖在目标 view 上的透明遮罩：十字线 + 实时鼠标坐标。
+
+    底色用 -transparentcolor 抠成全透明，所以目标界面照常可见；
+    再加 WS_EX_TRANSPARENT 让鼠标事件穿透，点下去仍然落在目标窗口上
+    （点击本身由 ClickPicker 的低级钩子吞掉）。
+    """
+
+    BG = "black"          # 透明色：画布底色，绘制元素别用纯黑
+    IN = "#00E5FF"        # 指针在 view 内：青色
+    OUT = "#FF8A80"       # 指针在 view 外：红色（这时的点击不会被拾取）
+
+    def __init__(self, master, view: int, scale: float):
+        super().__init__(master)
+        self.view = view
+        self.scale = scale
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.attributes("-transparentcolor", self.BG)
+        self.attributes("-alpha", 0.92)
+        self.canvas = tk.Canvas(self, background=self.BG, highlightthickness=0,
+                                borderwidth=0)
+        self.canvas.pack(fill="both", expand=True)
+        self._border = self.canvas.create_rectangle(0, 0, 0, 0, outline=self.IN, width=2)
+        self._vline = self.canvas.create_line(0, 0, 0, 0, fill=self.IN)
+        self._hline = self.canvas.create_line(0, 0, 0, 0, fill=self.IN)
+        self._ring = self.canvas.create_rectangle(0, 0, 0, 0, outline=self.OUT, width=2)
+        self._tag_bg = self.canvas.create_rectangle(0, 0, 0, 0, fill="#101820",
+                                                    outline=self.IN)
+        self._tag = self.canvas.create_text(0, 0, anchor="nw", fill="#FFFFFF",
+                                            font=("Consolas", 11, "bold"), text="")
+        self._tip = self.canvas.create_text(0, 0, anchor="n", fill="#FFD54F",
+                                            font=("Microsoft YaHei UI", 10, "bold"),
+                                            text="点一下左键拾取该点（关掉本窗口=取消）")
+        self._place()
+        self._click_through()
+        self.refresh()
+
+    def _place(self) -> None:
+        """贴到 view 客户区（每次刷新都重贴，目标窗口挪动也能跟上）。"""
+        rect = wintypes.RECT()
+        user32.GetClientRect(self.view, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        origin = wintypes.POINT(rect.left, rect.top)
+        user32.ClientToScreen(self.view, ctypes.byref(origin))
+        self.geometry("%dx%d+%d+%d" % (w, h, origin.x, origin.y))
+        self.canvas.configure(width=w, height=h)
+        self.canvas.coords(self._border, 1, 1, w - 2, h - 2)
+        self.canvas.coords(self._tip, w // 2, 6)
+
+    def _click_through(self) -> None:
+        self.update_idletasks()
+        self.update()                      # 先把窗口真正映射出来，样式才不会被 Tk 覆盖
+        hwnd = self.winfo_id()
+        if not hwnd:
+            return
+        style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
+                                 style | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
+                                 | WS_EX_NOACTIVATE)
+        # 置顶但不抢焦点（Tk 的 -topmost 会激活窗口，这里补一次）
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+
+    def refresh(self) -> None:
+        """按当前鼠标位置重画（调用方按 ~30ms 轮询）。"""
+        if not user32.IsWindow(self.view):
+            return
+        self._place()
+        rect = wintypes.RECT()
+        user32.GetClientRect(self.view, ctypes.byref(rect))
+        w, h = rect.right, rect.bottom
+        screen = wintypes.POINT()
+        if not user32.GetCursorPos(ctypes.byref(screen)):
+            return
+        cur = wintypes.POINT(screen.x, screen.y)
+        user32.ScreenToClient(self.view, ctypes.byref(cur))
+        px, py = cur.x, cur.y
+        inside = 0 <= px < w and 0 <= py < h
+        color = self.IN if inside else self.OUT
+        lx, ly = round(px / self.scale, 1), round(py / self.scale, 1)
+
+        self.canvas.coords(self._vline, px, 0, px, h)
+        self.canvas.coords(self._hline, 0, py, w, py)
+        self.canvas.coords(self._ring, px - 5, py - 5, px + 5, py + 5)
+        for item in (self._vline, self._hline):
+            self.canvas.itemconfigure(item, fill=color)
+        for item in (self._ring, self._border):
+            self.canvas.itemconfigure(item, outline=color)
+        self.canvas.itemconfigure(self._tag_bg, outline=color)
+
+        text = "逻辑 (%s, %s)   物理 (%d, %d)" % (fmt_coord(lx), fmt_coord(ly), px, py)
+        if not inside:
+            text = "窗口外（点了不算）  " + text
+        self.canvas.itemconfigure(self._tag, text=text)
+        x, y = px + 14, py + 14
+        self.canvas.coords(self._tag, x, y)
+        box = self.canvas.bbox(self._tag)
+        if box:
+            x0, y0, x1, y1 = box
+            # 贴边就往回挪，别让坐标牌跑出遮罩
+            dx = min(0, (w - 4) - x1)
+            dy = min(0, (h - 4) - y1)
+            if dx or dy:
+                self.canvas.coords(self._tag, x + dx, y + dy)
+                box = self.canvas.bbox(self._tag)
+                x0, y0, x1, y1 = box
+            self.canvas.coords(self._tag_bg, x0 - 4, y0 - 3, x1 + 4, y1 + 3)
+
+    def close(self) -> None:
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+
 # --- 事件编辑对话框 -------------------------------------------------------
 class EventDialog(tk.Toplevel):
-    FIELDS = ("x", "y", "ox", "oy", "click", "delay_ms", "wheel", "selector",
-              "remark")
+    FIELDS = ("x", "y", "click", "delay_ms", "wheel", "selector", "remark")
 
     def __init__(self, master, event: dict, on_pick, on_cancel=None,
-                 base: tuple[float, float] = (0.0, 0.0),
                  on_test_selector=None):
         super().__init__(master)
         self.title("事件")
@@ -636,16 +772,11 @@ class EventDialog(tk.Toplevel):
         self.result = None
         self._on_pick = on_pick
         self._on_cancel = on_cancel
-        self._base = base
         self._on_test_selector = on_test_selector
 
-        # X/Y = 第一坐标（基准，各行相同，改了整条链平移）；
-        # DX/DY = 本行相对第一坐标的偏移（每一行都可改，包括第一行）。
-        # 本行执行点 = (x + ox, y + oy)。
+        # X/Y 就是本行的执行坐标（每行独立，改一行不影响其他行）。
         self.x_var = tk.StringVar(value=self._fmt(event.get("x", 0)))
         self.y_var = tk.StringVar(value=self._fmt(event.get("y", 0)))
-        self.dx_var = tk.StringVar(value=self._fmt(event.get("ox", 0)))
-        self.dy_var = tk.StringVar(value=self._fmt(event.get("oy", 0)))
         self.click_var = tk.StringVar(value=CLICK_LABELS.get(event.get("click", "left"), "左键单击"))
         self.delay_var = tk.StringVar(value=str(event.get("delay_ms", 0)))
         self.wheel_var = tk.StringVar(value=str(event.get("wheel", 0)))
@@ -658,47 +789,39 @@ class EventDialog(tk.Toplevel):
         grid = [
             (0, "X（第一坐标，逻辑 px）", ttk.Entry(body, textvariable=self.x_var, width=12)),
             (1, "Y（第一坐标，逻辑 px）", ttk.Entry(body, textvariable=self.y_var, width=12)),
-            (2, "偏移 DX（本行，相对第一坐标）", ttk.Entry(body, textvariable=self.dx_var, width=12)),
-            (3, "偏移 DY（本行，相对第一坐标）", ttk.Entry(body, textvariable=self.dy_var, width=12)),
-            (4, "点击事件", ttk.Combobox(body, textvariable=self.click_var, width=12,
+            (2, "点击事件", ttk.Combobox(body, textvariable=self.click_var, width=12,
                                          state="readonly", values=list(CLICK_LABELS.values()))),
-            (5, "间隔时间 ms（点完后等）", ttk.Entry(body, textvariable=self.delay_var, width=12)),
-            (6, "滚轮格数（负=向下）", ttk.Entry(body, textvariable=self.wheel_var, width=12)),
-            (7, "CSS 选择器（可选，CDP 点击）", ttk.Entry(body, textvariable=self.sel_var, width=32)),
-            (8, "备注（DLL 不看）", ttk.Entry(body, textvariable=self.note_var, width=32)),
+            (3, "间隔时间 ms（点完后等）", ttk.Entry(body, textvariable=self.delay_var, width=12)),
+            (4, "滚轮格数（负=向下）", ttk.Entry(body, textvariable=self.wheel_var, width=12)),
+            (5, "CSS 选择器（可选，CDP 点击）", ttk.Entry(body, textvariable=self.sel_var, width=32)),
+            (6, "备注", ttk.Entry(body, textvariable=self.note_var, width=32)),
         ]
         for row, label, widget in grid:
             ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 8))
             widget.grid(row=row, column=1, sticky="w", pady=3)
 
-        # 拾取坐标 = 取第一坐标（基准）；拾取偏移 = 取本行落点换算成偏移
-        self.pick_xy_btn = ttk.Button(body, text="拾取坐标\n（第一坐标）", width=10,
+        # 拾取坐标 = 直接把点到的落点写进本行 X/Y
+        self.pick_xy_btn = ttk.Button(body, text="拾取坐标", width=10,
                                       command=self._pick_xy)
         self.pick_xy_btn.grid(row=0, column=2, rowspan=2, sticky="ns", padx=(8, 0))
-        self.pick_off_btn = ttk.Button(body, text="拾取偏移\n（本行点击点）", width=10,
-                                       command=self._pick_off)
-        self.pick_off_btn.grid(row=2, column=2, rowspan=2, sticky="ns", padx=(8, 0))
 
         # 有选择器就能现场验证（连 DLL 同一个 CDP 端口查一次元素矩形）
         if self._on_test_selector is not None:
             self.test_btn = ttk.Button(body, text="测试选择器", width=10,
                                        command=self._test_selector)
-            self.test_btn.grid(row=7, column=2, sticky="ns", padx=(8, 0))
+            self.test_btn.grid(row=5, column=2, sticky="ns", padx=(8, 0))
 
-        # 实时显示本行真正的执行点，基准/偏移没配对一眼就能看出来
+        # 本行执行点 = 本行 x/y（偏移已去掉，改一行只影响这一行）
         self.exec_var = tk.StringVar(value="")
         ttk.Label(body, textvariable=self.exec_var, foreground="#B06",
                   font=("Microsoft YaHei UI", 9, "bold")).grid(
-            row=9, column=0, columnspan=3, sticky="w")
-        for v in (self.x_var, self.y_var, self.dx_var, self.dy_var):
+            row=7, column=0, columnspan=3, sticky="w")
+        for v in (self.x_var, self.y_var):
             v.trace_add("write", lambda *_: self._update_exec())
         self._update_exec()
 
-        ttk.Label(body, text="本行执行点 = 第一坐标 + 偏移；填了选择器则按元素点击（坐标作后备）",
-                  foreground="#777").grid(row=10, column=0, columnspan=3, sticky="w")
-
         buttons = ttk.Frame(body)
-        buttons.grid(row=11, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        buttons.grid(row=8, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="确定", command=self._ok).pack(side="left", padx=4)
         ttk.Button(buttons, text="取消", command=self.destroy).pack(side="left")
 
@@ -712,12 +835,12 @@ class EventDialog(tk.Toplevel):
         return str(int(v)) if v.is_integer() else str(v)
 
     def _update_exec(self):
-        """实时显示 第一坐标+偏移 的结果，执行点一眼可查。"""
+        """实时显示本行执行点（就是本行的 x/y，改哪行只影响哪行）。"""
         try:
-            ex = float(self.x_var.get()) + float(self.dx_var.get())
-            ey = float(self.y_var.get()) + float(self.dy_var.get())
+            ex = float(self.x_var.get())
+            ey = float(self.y_var.get())
         except ValueError:
-            self.exec_var.set("本行执行点 = 第一坐标 + 偏移 = （有字段不是数字）")
+            self.exec_var.set("本行执行点 = （有字段不是数字）")
             return
         self.exec_var.set("本行执行点（脚本真正点这里）= (%s, %s)"
                           % (self._fmt(ex), self._fmt(ey)))
@@ -728,14 +851,6 @@ class EventDialog(tk.Toplevel):
                 return
             self.x_var.set(self._fmt(lx))
             self.y_var.set(self._fmt(ly))
-        self._on_pick(fill)
-
-    def _pick_off(self):
-        def fill(lx, ly):
-            if not self.winfo_exists():
-                return
-            self.dx_var.set(self._fmt(lx - self._base[0]))
-            self.dy_var.set(self._fmt(ly - self._base[1]))
         self._on_pick(fill)
 
     def destroy(self):
@@ -766,8 +881,6 @@ class EventDialog(tk.Toplevel):
             event = {
                 "x": float(self.x_var.get()),
                 "y": float(self.y_var.get()),
-                "ox": float(self.dx_var.get()),
-                "oy": float(self.dy_var.get()),
                 "click": LABEL_CLICKS.get(self.click_var.get(), "left"),
                 "delay_ms": int(float(self.delay_var.get() or 0)),
                 "wheel": int(float(self.wheel_var.get() or 0)),
@@ -775,9 +888,9 @@ class EventDialog(tk.Toplevel):
                 "remark": self.note_var.get().strip(),
             }
         except ValueError:
-            messagebox.showerror("格式错误", "坐标/偏移/间隔/滚轮必须是数字", parent=self)
+            messagebox.showerror("格式错误", "坐标/间隔/滚轮必须是数字", parent=self)
             return
-        for key in ("x", "y", "ox", "oy"):
+        for key in ("x", "y"):
             if float(event[key]).is_integer():
                 event[key] = int(event[key])
         self.result = event
@@ -786,9 +899,9 @@ class EventDialog(tk.Toplevel):
 
 # --- 主窗口 ---------------------------------------------------------------
 DEFAULT_EVENTS = [
-    {"x": 27, "y": 113, "ox": 0, "oy": 0, "click": "left", "delay_ms": 600,
+    {"x": 27, "y": 113, "click": "left", "delay_ms": 600,
      "wheel": 0, "selector": "", "remark": ""},
-    {"x": 27, "y": 113, "ox": 1546, "oy": -26, "click": "left", "delay_ms": 0,
+    {"x": 1573, "y": 87, "click": "left", "delay_ms": 0,
      "wheel": 0, "selector": "", "remark": ""},
 ]
 
@@ -797,7 +910,6 @@ class App:
     COLUMNS = (
         ("idx", "序号", 50, "center"),
         ("pos", "坐标", 120, "center"),
-        ("off", "偏移", 110, "center"),
         ("click", "点击", 90, "center"),
         ("delay", "间隔ms", 80, "center"),
         ("wheel", "滚轮", 70, "center"),
@@ -825,6 +937,8 @@ class App:
         self.pick_queue: queue.Queue | None = None
         self.picker: ClickPicker | None = None
         self.pick_cb = None
+        self.overlay: PickOverlay | None = None    # 拾取期间盖在目标窗口上的透明遮罩
+        self._cursor_job = None
 
         self.msg_queue: queue.Queue = queue.Queue()
         self.stop_evt = threading.Event()
@@ -969,27 +1083,16 @@ class App:
     def render_table(self) -> None:
         self.tree.delete(*self.tree.get_children())
         for i, ev in enumerate(self.events, 1):
-            off = "%s, %s" % (self._num(ev.get("ox", 0)), self._num(ev.get("oy", 0)))
             sel = str(ev.get("selector") or "").strip()
             self.tree.insert("", "end", iid=str(i - 1), values=(
                 i,
-                "%s, %s" % (self._exec(ev, "x", "ox"), self._exec(ev, "y", "oy")),
-                off,
+                "%s, %s" % (self._num(ev.get("x", 0)), self._num(ev.get("y", 0))),
                 CLICK_LABELS.get(ev.get("click", "left"), "左键单击"),
                 ev.get("delay_ms", 0),
                 ev.get("wheel", 0),
                 sel if len(sel) <= 24 else sel[:23] + "…",
                 ev.get("remark", "") or "",
             ))
-
-    @staticmethod
-    def _exec(ev, key, off_key):
-        # 执行坐标 = 第一坐标 + 偏移（与 DLL 的 x+ox 折算一致）
-        try:
-            v = float(ev.get(key, 0) or 0) + float(ev.get(off_key, 0) or 0)
-        except (TypeError, ValueError):
-            return "?"
-        return App._num(round(v, 1))
 
     @staticmethod
     def _num(value) -> str:
@@ -1009,38 +1112,29 @@ class App:
         self.tree.selection_set(str(len(self.events) - 1))
         self.tree.see(str(len(self.events) - 1))
 
-    def _base(self) -> tuple[float, float]:
-        """第一坐标（第一行）的绝对值，没有行时为 (0, 0)。"""
+    def _last_xy(self) -> tuple[float, float]:
+        """最后一行的坐标，新加行拿来当默认值；没有行时为 (0, 0)。"""
         if not self.events:
             return (0.0, 0.0)
-        return (float(self.events[0].get("x", 0) or 0),
-                float(self.events[0].get("y", 0) or 0))
+        ev = self.events[-1]
+        return (float(ev.get("x", 0) or 0), float(ev.get("y", 0) or 0))
 
     def _normalize_events(self) -> None:
-        """统一成新格式：x/y = 第一坐标（各行相同），ox/oy = 偏移，note→remark。"""
-        if not self.events:
-            return
-        bx = float(self.events[0].get("x", 0) or 0)
-        by = float(self.events[0].get("y", 0) or 0)
-        for i, ev in enumerate(self.events):
+        """统一成新格式：x/y 就是本行执行坐标（老脚本的 ox/oy 折算进来后删掉），note→remark。"""
+        for ev in self.events:
             if "remark" not in ev:
                 ev["remark"] = str(ev.pop("note", "") or "")
-            if "ox" not in ev or "oy" not in ev:
-                if i == 0:
-                    ev["ox"] = 0
-                    ev["oy"] = 0
-                # 老格式：x/y 是绝对执行坐标，换算成相对基准的偏移
-                ev["ox"] = self._shift(ev.get("x", 0), -bx)
-                ev["oy"] = self._shift(ev.get("y", 0), -by)
-            ev["x"] = self._shift(bx, 0)
-            ev["y"] = self._shift(by, 0)
+            # 老格式：x/y 是基准、ox/oy 是本行偏移 —— 折算成绝对坐标后删掉偏移
+            ox = ev.pop("ox", 0) or 0
+            oy = ev.pop("oy", 0) or 0
+            ev["x"] = self._shift(ev.get("x", 0), ox)
+            ev["y"] = self._shift(ev.get("y", 0), oy)
 
     def add_manual(self) -> None:
-        bx, by = self._base()
-        ev = {"x": bx, "y": by, "ox": 0, "oy": 0, "click": "left",
+        bx, by = self._last_xy()
+        ev = {"x": bx, "y": by, "click": "left",
               "delay_ms": 0, "wheel": 0, "selector": "", "remark": ""}
         dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
-                             base=self._base(),
                              on_test_selector=self.test_selector)
         self.root.wait_window(dialog)
         if dialog.result:
@@ -1052,20 +1146,12 @@ class App:
             self._status("先选中一行")
             return
         ev = dict(self.events[idx])
-        old_base = self._base()
         dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
-                             base=old_base, on_test_selector=self.test_selector)
+                             on_test_selector=self.test_selector)
         self.root.wait_window(dialog)
         if dialog.result:
+            # 只替换这一行，其余行原样不动
             self.events[idx] = dialog.result
-            # 对话框里改了第一坐标 = 整条链平移：各行 x/y 统一成新基准
-            if (float(dialog.result["x"]), float(dialog.result["y"])) != old_base:
-                for other in self.events:
-                    other["x"] = dialog.result["x"]
-                    other["y"] = dialog.result["y"]
-                self._status("第一坐标已更新为 (%s,%s)，整条链随之平移"
-                             % (self._num(dialog.result["x"]),
-                                self._num(dialog.result["y"])))
             self.dirty = True
             self.render_table()
             self.tree.selection_set(str(idx))
@@ -1107,8 +1193,49 @@ class App:
         self.pick_queue = queue.Queue()
         self.picker = ClickPicker(self.target.view, self.target.scale, self.pick_queue)
         self.picker.start()
-        self._status("拾取中：请在 TT语音 界面上点一下目标位置…")
+        self._show_overlay()
+        self._status("拾取中：目标窗口已盖上透明遮罩，点一下要拾的位置…")
         self.root.after(80, self._poll_pick)
+
+    # -- 拾取遮罩 ----------------------------------------------------------
+    def _show_overlay(self) -> None:
+        """在目标窗口上盖一层透明遮罩，实时显示鼠标当前位置。"""
+        self._hide_overlay()
+        if not self.target.ok:
+            return
+        try:
+            self.overlay = PickOverlay(self.root, self.target.view, self.target.scale)
+        except Exception as exc:          # 遮罩只是辅助，失败不能挡住拾取
+            self.overlay = None
+            self._status("遮罩创建失败（照常拾取）：%s" % exc)
+            return
+        # 遮罩窗口会顺手抢走前台，这里把它还给目标窗口
+        if self.target.main:
+            user32.SetForegroundWindow(self.target.main)
+        self._poll_cursor()
+
+    def _poll_cursor(self) -> None:
+        """~30ms 刷一次十字线/坐标，跟鼠标手感接近。"""
+        if self.overlay is None:
+            return
+        try:
+            self.overlay.refresh()
+        except tk.TclError:
+            self._hide_overlay()
+            return
+        if self.overlay is not None:
+            self._cursor_job = self.root.after(30, self._poll_cursor)
+
+    def _hide_overlay(self) -> None:
+        if self._cursor_job is not None:
+            try:
+                self.root.after_cancel(self._cursor_job)
+            except tk.TclError:
+                pass
+            self._cursor_job = None
+        if self.overlay is not None:
+            self.overlay.close()
+            self.overlay = None
 
     def _poll_pick(self) -> None:
         if self.pick_queue is None:
@@ -1135,6 +1262,7 @@ class App:
             cb(lx, ly)
 
     def _end_pick(self) -> None:
+        self._hide_overlay()
         if self.picker is not None:
             self.picker.stop()
         self.picker = None
@@ -1188,29 +1316,23 @@ class App:
 
     def _collect(self) -> dict:
         w, h = self.target.w, self.target.h
-        bx = float(self.events[0].get("x", 0) or 0) if self.events else 0.0
-        by = float(self.events[0].get("y", 0) or 0) if self.events else 0.0
         events = []
-        for i, ev in enumerate(self.events):
+        for ev in self.events:
             item = dict(ev)
             item.pop("text", None)  # 粘贴功能已移除，老脚本里的 text 一并清掉
             # 门控已整体移除，老脚本里的这两个键一并清掉（DLL 当未知键跳过）
             item.pop("wait_px", None)
             item.pop("wait_max_ms", None)
+            # 偏移已废弃：老脚本残留的 ox/oy 折算进 x/y 后删掉，
+            # 之后每行只写自己的绝对坐标（DLL 缺 ox/oy 时按 0 执行 x/y）
+            ox = item.pop("ox", 0) or 0
+            oy = item.pop("oy", 0) or 0
+            item["x"] = self._shift(item.get("x", 0), ox)
+            item["y"] = self._shift(item.get("y", 0), oy)
             # 老脚本没有 remark 键，保存时补齐，DLL 会 JsonSkip 掉
             item["remark"] = str(item.get("remark") or "").strip()
             # selector 同理补齐（空 = 本行走坐标点击），DLL 认这个键
             item["selector"] = str(item.get("selector") or "").strip()
-            # x/y 每行统一写第一坐标；ox/oy 缺失时（老格式：x/y 是绝对执行坐
-            # 标）按与基准的差值补齐。DLL 执行 (x+ox, y+oy)。
-            if i == 0:
-                item.setdefault("ox", 0)
-                item.setdefault("oy", 0)
-            elif "ox" not in item or "oy" not in item:
-                item["ox"] = self._shift(item.get("x", 0), -bx)
-                item["oy"] = self._shift(item.get("y", 0), -by)
-            item["x"] = self._shift(bx, 0)
-            item["y"] = self._shift(by, 0)
             events.append(item)
         data = {
             "version": 1,
@@ -1575,9 +1697,9 @@ class App:
             client.close()
 
     def _run_event(self, ev, view, scale, skip_delay) -> None:
-        # DLL：解析完把偏移折算进 x/y，执行点 = (x+ox, y+oy)。这里同样折算。
-        lx = float(ev.get("x", 0) or 0) + float(ev.get("ox", 0) or 0)
-        ly = float(ev.get("y", 0) or 0) + float(ev.get("oy", 0) or 0)
+        # 每行的 x/y 就是执行坐标（偏移已废弃，DLL 缺 ox/oy 时按 0 加）
+        lx = float(ev.get("x", 0) or 0)
+        ly = float(ev.get("y", 0) or 0)
         # DLL: static_cast<LONG>(lx * g_scale) —— 截断不是四舍五入，这里保持一致
         px, py = int(lx * scale), int(ly * scale)
 
@@ -1635,7 +1757,7 @@ class App:
     def _check_view_size(self, w: int, h: int) -> None:
         recorded = self.script_view_size
         if recorded and (recorded[0] != w or recorded[1] != h):
-            self.msg_queue.put("parity: 脚本是按 view %dx%d 拾的坐标，现在 %dx%d，位量会偏"
+            self.msg_queue.put("parity: 脚本是按 view %dx%d 拾的坐标，现在 %dx%d，位置会偏"
                                % (recorded[0], recorded[1], w, h))
 
     # -- 日志窗格 / 跟随 DLL ------------------------------------------------
