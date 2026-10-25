@@ -4,7 +4,7 @@
   1. 拾取坐标——点一下目标位置即记录（这次点击会被吞掉，不会触发应用），
      坐标按 FLUTTERVIEW 相对逻辑 px（96 dpi）保存；拾取期间目标窗口会盖上
      一层透明遮罩：十字线跟随鼠标、实时显示当前位置的逻辑/物理坐标，鼠标
-     移出窗口时变红并提示「点了不算」；
+     移出窗口时变红并提示「点了不算」；遮罩上右键 = 取消这次拾取；
   2. 编辑事件表（坐标 / 点击类型 / 间隔 / 滚轮 / 备注）。每一行的坐标就是
      该行自己的绝对落点（逻辑 px），改哪一行只影响哪一行；
   3. 存成 JSON 供 DLL 读取执行；本窗口也能直接「试跑」验证坐标。
@@ -42,10 +42,8 @@ JSON 格式（DLL 侧读取的就是这一份）：
                 不可用或页面里没有该元素时，回退到本行坐标的 SendInput 点击
                 （x/y 都是 0 视为「没拾取过」，跳过并打日志）。端口由
                 version.dll 代理在宿主启动时布下（9223），编辑器试跑/测试
-                选择器连的是同一个端口
-  target_url    可选，脚本级。宿主里开了多个 WebView 页面时按 URL 子串挑目
-                标页（大小写不敏感）；空 = 唯一页直接用，多页取最后一条
-                （新页追加在列表尾部）
+                选择器连的是同一个端口。多页面时由 CDP 自动挑页（新页追加在
+                列表尾部，取最后一条）
   hotkey        F1..F24 / 单个字母或数字；空 = 不注册（避免抢应用自己的键）
   loop          整份脚本重复执行的轮数
   delay_ms      本行执行完之后的等待（下一行开始前）
@@ -592,6 +590,7 @@ class ClickPicker:
         self._tid = None
         self._stop = threading.Event()
         self._swallow_up = False
+        self._swallow_rup = False
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -633,6 +632,15 @@ class ClickPicker:
                     return 1
             elif w_param == WM_LBUTTONUP and self._swallow_up:
                 self._swallow_up = False
+                return 1
+            elif w_param == WM_RBUTTONDOWN:
+                # 右键 = 取消这次拾取；同样吞掉，免得应用弹出右键菜单
+                self._swallow_rup = True
+                self.out.put(("cancel",))
+                self.stop()
+                return 1
+            elif w_param == WM_RBUTTONUP and self._swallow_rup:
+                self._swallow_rup = False
                 return 1
         return user32.CallNextHookEx(None, n_code, w_param, l_param)
 
@@ -676,7 +684,7 @@ class PickOverlay(tk.Toplevel):
                                             font=("Consolas", 11, "bold"), text="")
         self._tip = self.canvas.create_text(0, 0, anchor="n", fill="#FFD54F",
                                             font=("Microsoft YaHei UI", 10, "bold"),
-                                            text="点一下左键拾取该点（关掉本窗口=取消）")
+                                            text="左键拾取　右键取消")
         self._place()
         self._click_through()
         self.refresh()
@@ -765,9 +773,9 @@ class EventDialog(tk.Toplevel):
     FIELDS = ("x", "y", "click", "delay_ms", "wheel", "selector", "remark")
 
     def __init__(self, master, event: dict, on_pick, on_cancel=None,
-                 on_test_selector=None):
+                 on_test_selector=None, title: str = "事件"):
         super().__init__(master)
-        self.title("事件")
+        self.title(title)
         self.resizable(False, False)
         self.result = None
         self._on_pick = on_pick
@@ -783,67 +791,100 @@ class EventDialog(tk.Toplevel):
         self.sel_var = tk.StringVar(value=str(event.get("selector") or "").strip())
         self.note_var = tk.StringVar(value=event.get("remark", "") or "")
 
-        body = ttk.Frame(self, padding=10)
+        body = ttk.Frame(self, padding=(12, 10))
         body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
 
-        grid = [
-            (0, "X（第一坐标，逻辑 px）", ttk.Entry(body, textvariable=self.x_var, width=12)),
-            (1, "Y（第一坐标，逻辑 px）", ttk.Entry(body, textvariable=self.y_var, width=12)),
-            (2, "点击事件", ttk.Combobox(body, textvariable=self.click_var, width=12,
-                                         state="readonly", values=list(CLICK_LABELS.values()))),
-            (3, "间隔时间 ms（点完后等）", ttk.Entry(body, textvariable=self.delay_var, width=12)),
-            (4, "滚轮格数（负=向下）", ttk.Entry(body, textvariable=self.wheel_var, width=12)),
-            (5, "CSS 选择器（可选，CDP 点击）", ttk.Entry(body, textvariable=self.sel_var, width=32)),
-            (6, "备注", ttk.Entry(body, textvariable=self.note_var, width=32)),
-        ]
-        for row, label, widget in grid:
-            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 8))
-            widget.grid(row=row, column=1, sticky="w", pady=3)
+        vcmd = (self.register(self._num_ok), "%P")
+        label_w = 9
 
-        # 拾取坐标 = 直接把点到的落点写进本行 X/Y
-        self.pick_xy_btn = ttk.Button(body, text="拾取坐标", width=10,
-                                      command=self._pick_xy)
-        self.pick_xy_btn.grid(row=0, column=2, rowspan=2, sticky="ns", padx=(8, 0))
+        def add_row(parent, row, label, var=None, width=10, suffix="", combo_values=None):
+            """一行 = 标签 + 输入控件 + 灰色单位/提示，用 pack 保证提示紧跟输入框。"""
+            line = ttk.Frame(parent)
+            line.grid(row=row, column=0, columnspan=2, sticky="ew", pady=3)
+            ttk.Label(line, text=label, width=label_w, anchor="w").pack(side="left")
+            if combo_values is not None:
+                widget = ttk.Combobox(line, textvariable=var, width=width,
+                                      state="readonly", values=combo_values)
+            else:
+                widget = ttk.Entry(line, textvariable=var, width=width,
+                                   validate="key", validatecommand=vcmd)
+            widget.pack(side="left")
+            if suffix:
+                ttk.Label(line, text=suffix, foreground="#777").pack(side="left", padx=(8, 0))
+            return widget
 
-        # 有选择器就能现场验证（连 DLL 同一个 CDP 端口查一次元素矩形）
+        # 坐标：X/Y 两行 + 右侧一个跨两行的拾取按钮
+        pos = ttk.LabelFrame(body, text="坐标（FLUTTERVIEW 逻辑 px，96 dpi）", padding=(10, 4))
+        pos.grid(row=0, column=0, sticky="ew")
+        pos.columnconfigure(0, weight=1)
+        self.x_entry = add_row(pos, 0, "X", self.x_var)
+        self.y_entry = add_row(pos, 1, "Y", self.y_var)
+        self.pick_xy_btn = ttk.Button(pos, text="拾取坐标", width=12, command=self._pick_xy)
+        self.pick_xy_btn.grid(row=0, column=2, rowspan=2, sticky="nsew",
+                              padx=(10, 0), pady=3)
+
+        # 动作
+        act = ttk.LabelFrame(body, text="动作", padding=(10, 4))
+        act.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        act.columnconfigure(0, weight=1)
+        add_row(act, 0, "点击事件", self.click_var,
+                combo_values=list(CLICK_LABELS.values()))
+        add_row(act, 1, "间隔时间", self.delay_var, suffix="ms（点完后等）")
+        add_row(act, 2, "滚轮格数", self.wheel_var, suffix="格（负 = 向下）")
+
+        # CSS 选择器
+        sel = ttk.LabelFrame(body, text="CSS 选择器（可选，走 CDP 点击；空 = 按坐标点）",
+                             padding=(10, 4))
+        sel.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        sel.columnconfigure(0, weight=1)
+        self.sel_entry = ttk.Entry(sel, textvariable=self.sel_var)
+        self.sel_entry.grid(row=0, column=0, sticky="ew", pady=3)
         if self._on_test_selector is not None:
-            self.test_btn = ttk.Button(body, text="测试选择器", width=10,
+            self.test_btn = ttk.Button(sel, text="测试选择器", width=12,
                                        command=self._test_selector)
-            self.test_btn.grid(row=5, column=2, sticky="ns", padx=(8, 0))
+            self.test_btn.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=3)
 
-        # 本行执行点 = 本行 x/y（偏移已去掉，改一行只影响这一行）
-        self.exec_var = tk.StringVar(value="")
-        ttk.Label(body, textvariable=self.exec_var, foreground="#B06",
-                  font=("Microsoft YaHei UI", 9, "bold")).grid(
-            row=7, column=0, columnspan=3, sticky="w")
-        for v in (self.x_var, self.y_var):
-            v.trace_add("write", lambda *_: self._update_exec())
-        self._update_exec()
+        # 备注
+        note = ttk.LabelFrame(body, text="备注（只给人看，DLL 不读）", padding=(10, 4))
+        note.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        note.columnconfigure(0, weight=1)
+        ttk.Entry(note, textvariable=self.note_var).grid(row=0, column=0, sticky="ew", pady=3)
 
-        buttons = ttk.Frame(body)
-        buttons.grid(row=8, column=0, columnspan=3, sticky="e", pady=(10, 0))
-        ttk.Button(buttons, text="确定", command=self._ok).pack(side="left", padx=4)
-        ttk.Button(buttons, text="取消", command=self.destroy).pack(side="left")
+        # 底部按钮：确定在右，Enter/Esc 也能用
+        foot = ttk.Frame(body)
+        foot.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        foot.columnconfigure(0, weight=1)
+        ttk.Label(foot, text="Enter 确定　Esc 取消", foreground="#888").grid(
+            row=0, column=0, sticky="w")
+        ttk.Button(foot, text="确定", width=10, command=self._ok).grid(
+            row=0, column=1, padx=(0, 6))
+        ttk.Button(foot, text="取消", width=10, command=self.destroy).grid(row=0, column=2)
 
+        self.resizable(True, False)
         self.transient(master)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.x_entry.focus_set()
+        self.x_entry.selection_range(0, "end")
+
+    @staticmethod
+    def _num_ok(text: str) -> bool:
+        """输入框校验：只放行能拼成数字的中间态（空 / - / . / -1.5）。"""
+        if text in ("", "-", ".", "-."):
+            return True
+        try:
+            float(text)
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _fmt(v: float) -> str:
         v = round(float(v), 1)
         return str(int(v)) if v.is_integer() else str(v)
-
-    def _update_exec(self):
-        """实时显示本行执行点（就是本行的 x/y，改哪行只影响哪行）。"""
-        try:
-            ex = float(self.x_var.get())
-            ey = float(self.y_var.get())
-        except ValueError:
-            self.exec_var.set("本行执行点 = （有字段不是数字）")
-            return
-        self.exec_var.set("本行执行点（脚本真正点这里）= (%s, %s)"
-                          % (self._fmt(ex), self._fmt(ey)))
 
     def _pick_xy(self):
         def fill(lx, ly):
@@ -908,13 +949,13 @@ DEFAULT_EVENTS = [
 
 class App:
     COLUMNS = (
-        ("idx", "序号", 50, "center"),
-        ("pos", "坐标", 120, "center"),
+        ("idx", "序号", 44, "center"),
+        ("pos", "坐标（逻辑 px）", 150, "center"),
         ("click", "点击", 90, "center"),
-        ("delay", "间隔ms", 80, "center"),
-        ("wheel", "滚轮", 70, "center"),
-        ("sel", "选择器", 120, "w"),
-        ("note", "备注", 130, "w"),
+        ("delay", "间隔 ms", 78, "center"),
+        ("wheel", "滚轮", 60, "center"),
+        ("sel", "选择器", 200, "w"),
+        ("note", "备注", 140, "w"),
     )
 
     def __init__(self, root: tk.Tk):
@@ -950,7 +991,6 @@ class App:
         self.name_var = tk.StringVar(value="活动")
         self.hotkey_var = tk.StringVar(value="")
         self.loop_var = tk.StringVar(value="1")
-        self.target_var = tk.StringVar(value="")     # target_url：多个页面时选页
         self.status_var = tk.StringVar(value="")
 
         # 一次试跑共用一条 CDP 连接；失败一次后本轮不再重试（与 DLL 一致）
@@ -974,91 +1014,175 @@ class App:
             return 1.0
 
     # -- UI ----------------------------------------------------------------
+    def _init_style(self) -> None:
+        """行高/表头跟着 DPI 放大，否则 125%/150% 屏幕上表格文字会挤在一起。"""
+        style = ttk.Style(self.root)
+        base = "Microsoft YaHei UI"
+        style.configure("Treeview", font=(base, 9), rowheight=int(24 * self.scale))
+        style.configure("Treeview.Heading", font=(base, 9, "bold"))
+        self.tree_tag_odd = "odd"
+        self.tree_tag_even = "even"
+
     def _build(self) -> None:
+        self._init_style()
+
         outer = ttk.Frame(self.root, padding=8)
         outer.pack(fill="both", expand=True)
 
-        top = ttk.LabelFrame(outer, text="脚本", padding=6)
+        # --- 顶部：脚本文件 + 属性（两栏，挤不下就靠窗口最小宽度兜住）------
+        top = self.top = ttk.Frame(outer)
         top.pack(fill="x")
+        top.columnconfigure(1, weight=1)
 
-        ttk.Label(top, text="文件").pack(side="left")
-        self.script_combo = ttk.Combobox(top, width=16, state="readonly")
-        self.script_combo.pack(side="left", padx=4)
+        files = ttk.LabelFrame(top, text="脚本", padding=(8, 4))
+        files.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(files, text="文件").pack(side="left")
+        self.script_combo = ttk.Combobox(files, width=16, state="readonly")
+        self.script_combo.pack(side="left", padx=(4, 6))
         self.script_combo.bind("<<ComboboxSelected>>", self._on_script_selected)
-        ttk.Button(top, text="刷新", width=6, command=self.refresh_script_list).pack(side="left")
-        ttk.Button(top, text="新建", width=6, command=self.new_script).pack(side="left", padx=(4, 0))
-        ttk.Button(top, text="保存", width=6, command=self.save_script).pack(side="left", padx=(4, 0))
-        ttk.Button(top, text="另存为", width=8, command=self.save_script_as).pack(side="left", padx=(4, 0))
-        ttk.Button(top, text="删除", width=6, command=self.delete_script).pack(side="left", padx=(4, 0))
+        ttk.Button(files, text="刷新", width=6, command=self.refresh_script_list).pack(side="left")
+        ttk.Button(files, text="新建", width=6, command=self.new_script).pack(side="left", padx=(4, 0))
+        ttk.Button(files, text="保存", width=6, command=self.save_script).pack(side="left", padx=(4, 0))
+        ttk.Button(files, text="另存为", width=8, command=self.save_script_as).pack(side="left", padx=(4, 0))
+        ttk.Button(files, text="删除", width=6, command=self.delete_script).pack(side="left", padx=(4, 0))
 
-        meta = ttk.Frame(outer, padding=(0, 6))
-        meta.pack(fill="x")
-        ttk.Label(meta, text="名称").pack(side="left")
-        ttk.Entry(meta, textvariable=self.name_var, width=16).pack(side="left", padx=(4, 12))
-        ttk.Label(meta, text="启动热键").pack(side="left")
-        ttk.Entry(meta, textvariable=self.hotkey_var, width=8).pack(side="left", padx=(4, 12))
-        ttk.Label(meta, text="循环次数").pack(side="left")
-        ttk.Entry(meta, textvariable=self.loop_var, width=6).pack(side="left", padx=(4, 12))
-        ttk.Label(meta, text="目标页URL").pack(side="left")
-        ttk.Entry(meta, textvariable=self.target_var, width=24).pack(side="left", padx=(4, 12))
-        ttk.Label(meta, text="（热键：空 = 不注册；目标页 = URL 子串，空 = 自动选）",
-                  foreground="#777").pack(side="left")
+        meta = ttk.LabelFrame(top, text="属性", padding=(8, 4))
+        meta.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        tools = ttk.Frame(outer)
-        tools.pack(fill="x", pady=(0, 6))
-        ttk.Button(tools, text="添加事件", command=self.add_manual).pack(side="left")
-        ttk.Button(tools, text="修改", command=self.edit_selected).pack(side="left", padx=(4, 0))
-        ttk.Button(tools, text="删除行", command=self.delete_selected).pack(side="left", padx=(4, 0))
-        ttk.Button(tools, text="上移", width=6, command=lambda: self.move_row(-1)).pack(side="left", padx=(4, 0))
-        ttk.Button(tools, text="下移", width=6, command=lambda: self.move_row(1)).pack(side="left", padx=(4, 0))
+        # 名称 / 启动热键 / 循环次数 一行放完：三项都固定宽度，
+        # 多余空间给最右侧空列（窗口变窄时先压它，输入框不会被裁）
+        meta_row1 = ttk.Frame(meta)
+        meta_row1.pack(fill="x")
+        meta_row1.columnconfigure(7, weight=1)
+        ttk.Label(meta_row1, text="名称").grid(row=0, column=0, sticky="w")
+        ttk.Entry(meta_row1, textvariable=self.name_var, width=14).grid(
+            row=0, column=1, sticky="ew", padx=(4, 12))
+        ttk.Label(meta_row1, text="启动热键").grid(row=0, column=2, sticky="w")
+        ttk.Entry(meta_row1, textvariable=self.hotkey_var, width=6).grid(
+            row=0, column=3, sticky="w", padx=(4, 12))
+        ttk.Label(meta_row1, text="循环次数").grid(row=0, column=4, sticky="w")
+        ttk.Entry(meta_row1, textvariable=self.loop_var, width=4,
+                  validate="key",
+                  validatecommand=(self.root.register(lambda s: s.isdigit() or s == ""), "%P")
+                  ).grid(row=0, column=5, sticky="w", padx=(4, 0))
+        ttk.Label(meta_row1, text="空 = 不注册", foreground="#777").grid(
+            row=0, column=6, sticky="w", padx=(10, 0))
 
-        # 先占住底部条，再放会 expand 的表格；否则表格会把底部挤掉。
+
+        # --- 底部操作条（先占住，免得被会 expand 的窗格挤掉）---------------
         bottom = self.bottom = ttk.Frame(outer, padding=(0, 6))
         bottom.pack(side="bottom", fill="x")
-        self.run_btn = ttk.Button(bottom, text="试跑", command=self.do_run)
+        self.run_btn = ttk.Button(bottom, text="试跑", width=6, command=self.do_run)
         self.run_btn.pack(side="left")
-        ttk.Button(bottom, text="跑选中行", command=self.do_run_selected).pack(
+        ttk.Button(bottom, text="跑选中行", width=9, command=self.do_run_selected).pack(
             side="left", padx=(4, 0))
-        self.stop_btn = ttk.Button(bottom, text="停止", command=self.do_stop, state="disabled")
-        self.stop_btn.pack(side="left", padx=(4, 12))
-        ttk.Button(bottom, text="刷新目标", width=10,
+        self.stop_btn = ttk.Button(bottom, text="停止", width=6, command=self.do_stop,
+                                   state="disabled")
+        self.stop_btn.pack(side="left", padx=(4, 10))
+        ttk.Separator(bottom, orient="vertical").pack(side="left", fill="y", padx=(0, 10))
+        ttk.Button(bottom, text="刷新目标", width=9,
                    command=lambda: self.refresh_target()).pack(side="left")
         ttk.Checkbutton(bottom, text="跟随 DLL 日志", variable=self.follow_var,
-                        command=self._on_follow_toggle).pack(side="left", padx=(12, 0))
+                        command=self._on_follow_toggle).pack(side="left", padx=(10, 0))
         ttk.Button(bottom, text="清日志", width=7, command=self._clear_log).pack(
             side="left", padx=(4, 0))
-        ttk.Label(bottom, textvariable=self.status_var, foreground="#555").pack(
-            side="left", padx=12, fill="x", expand=True)
+        ttk.Label(bottom, textvariable=self.status_var, foreground="#555",
+                  anchor="e").pack(side="right", padx=(12, 0))
 
-        # 执行日志：跑脚本时逐行输出 DLL 同字样的痕迹，[DLL] 前缀的是
-        # DLL 自己写的行，两边可以直接逐行比对。
-        logf = self.logf = ttk.LabelFrame(outer, text="执行日志（字样与 DLL 一致，[DLL] 是从 %TEMP% 拉的）",
-                                          padding=4)
-        logf.pack(side="bottom", fill="x")
-        self.log_box = tk.Text(logf, height=9, wrap="none", state="disabled",
-                                font=("Consolas", 9), relief="flat",
-                                background="#1E1F26", foreground="#E3E7EE")
-        log_scroll = ttk.Scrollbar(logf, orient="vertical", command=self.log_box.yview)
-        self.log_box.configure(yscrollcommand=log_scroll.set)
-        self.log_box.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="right", fill="y")
-        self.log_box.tag_config("warn", foreground="#FFB454")
-        self.log_box.tag_config("dll", foreground="#8FD3A0")
+        # --- 中间：可拖拽分隔的「事件表 / 执行日志」------------------------
+        paned = self.paned = ttk.Panedwindow(outer, orient="vertical")
+        paned.pack(fill="both", expand=True)
 
-        table = self.table_frame = ttk.Frame(outer)
+        table_box = self.table_frame = ttk.LabelFrame(paned, text="事件表", padding=(6, 4))
+        paned.add(table_box, weight=4)
+        tools = ttk.Frame(table_box)
+        tools.pack(fill="x", pady=(0, 4))
+        ttk.Button(tools, text="添加事件", command=self.add_manual).pack(side="left")
+        ttk.Button(tools, text="修改", width=6, command=self.edit_selected).pack(side="left", padx=(4, 0))
+        ttk.Button(tools, text="删除行", width=7, command=self.delete_selected).pack(side="left", padx=(4, 0))
+        ttk.Button(tools, text="上移", width=6, command=lambda: self.move_row(-1)).pack(side="left", padx=(4, 0))
+        ttk.Button(tools, text="下移", width=6, command=lambda: self.move_row(1)).pack(side="left", padx=(4, 0))
+        self.count_var = tk.StringVar(value="")
+        self.count_lbl = ttk.Label(tools, textvariable=self.count_var, foreground="#555")
+        self.count_lbl.pack(side="right")
+
+        table = ttk.Frame(table_box)
         table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=[c[0] for c in self.COLUMNS], show="headings",
                                  selectmode="browse")
         for key, title, width, anchor in self.COLUMNS:
             self.tree.heading(key, text=title)
-            self.tree.column(key, width=int(width * self.scale), anchor=anchor,
-                             stretch=(key == "note"))
-        scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+            self.tree.column(key, width=int(width * self.scale), minwidth=int(40 * self.scale),
+                             anchor=anchor, stretch=(key == "note"))
+        yscroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        xscroll = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        self.tree.tag_configure(self.tree_tag_odd, background="#F6F7F9")
+        self.tree.tag_configure(self.tree_tag_even, background="#FFFFFF")
         self.tree.bind("<Double-1>", lambda _e: self.edit_selected())
         self.tree.bind("<Delete>", lambda _e: self.delete_selected())
+        self.tree.bind("<Return>", lambda _e: self.edit_selected())
+
+        # 执行日志：跑脚本时逐行输出 DLL 同字样的痕迹，[DLL] 前缀的是
+        # DLL 自己写的行，两边可以直接逐行比对。
+        logf = self.logf = ttk.LabelFrame(
+            paned, text="执行日志（字样与 DLL 一致，[DLL] 是从 %TEMP% 拉的）", padding=(6, 4))
+        paned.add(logf, weight=1)
+        log_box_wrap = ttk.Frame(logf)
+        log_box_wrap.pack(fill="both", expand=True)
+        self.log_box = tk.Text(log_box_wrap, height=6, wrap="none", state="disabled",
+                               font=("Consolas", 9), relief="flat",
+                               background="#1E1F26", foreground="#E3E7EE")
+        log_scroll = ttk.Scrollbar(log_box_wrap, orient="vertical", command=self.log_box.yview)
+        log_xscroll = ttk.Scrollbar(log_box_wrap, orient="horizontal", command=self.log_box.xview)
+        self.log_box.configure(yscrollcommand=log_scroll.set, xscrollcommand=log_xscroll.set)
+        self.log_box.grid(row=0, column=0, sticky="nsew")
+        log_scroll.grid(row=0, column=1, sticky="ns")
+        log_xscroll.grid(row=1, column=0, sticky="ew")
+        log_box_wrap.rowconfigure(0, weight=1)
+        log_box_wrap.columnconfigure(0, weight=1)
+        self.log_box.tag_config("warn", foreground="#FFB454")
+        self.log_box.tag_config("dll", foreground="#8FD3A0")
+
+        # 表格占大头，日志留 5 行左右；之后用户可以自己拖分隔条
+        self.root.after_idle(self._place_sash)
+
+        self.root.bind("<Control-s>", lambda _e: self.save_script())
+        self.root.bind("<Control-n>", lambda _e: self.new_script())
+        self.root.bind("<F5>", lambda _e: self.do_run())
+        for var in (self.name_var, self.hotkey_var, self.loop_var):
+            var.trace_add("write", lambda *_: self._mark_dirty())
+        self._update_title()
+        self.root.after_idle(self._fit_minsize)
+
+    def _fit_minsize(self) -> None:
+        """最小宽度按顶部两栏的实际需要算——窗口太窄会把属性栏裁掉。"""
+        self.root.update_idletasks()
+        need = self.top.winfo_reqwidth() + 32
+        # 小屏幕上别把最小宽度顶到屏幕外，超了就按屏幕宽度封顶
+        avail = self.root.winfo_screenwidth() - 40
+        self.root.minsize(max(int(820 * self.scale), min(need, avail)),
+                          int(600 * self.scale))
+
+    def _mark_dirty(self) -> None:
+        self.dirty = True
+        self._update_title()
+
+    def _place_sash(self, tries: int = 0) -> None:
+        """等窗格真正布局好再分配高度（太早调用量到 0，日志会被压没）。"""
+        h = self.paned.winfo_height()
+        if h < 240 and tries < 20:
+            self.root.after(60, lambda: self._place_sash(tries + 1))
+            return
+        try:
+            self.paned.sashpos(0, max(120, int(h * 0.64)))
+        except tk.TclError:
+            pass
 
     # -- 目标窗口 ----------------------------------------------------------
     def refresh_target(self, quiet: bool = False) -> bool:
@@ -1084,7 +1208,9 @@ class App:
         self.tree.delete(*self.tree.get_children())
         for i, ev in enumerate(self.events, 1):
             sel = str(ev.get("selector") or "").strip()
-            self.tree.insert("", "end", iid=str(i - 1), values=(
+            self.tree.insert("", "end", iid=str(i - 1),
+                             tags=(self.tree_tag_odd if i % 2 else self.tree_tag_even,),
+                             values=(
                 i,
                 "%s, %s" % (self._num(ev.get("x", 0)), self._num(ev.get("y", 0))),
                 CLICK_LABELS.get(ev.get("click", "left"), "左键单击"),
@@ -1093,6 +1219,17 @@ class App:
                 sel if len(sel) <= 24 else sel[:23] + "…",
                 ev.get("remark", "") or "",
             ))
+        over = len(self.events) > MAX_EVENTS
+        self.count_var.set("共 %d 行%s" % (len(self.events),
+                                          "（超过 DLL 上限 %d，只有前 %d 行会跑）"
+                                          % (MAX_EVENTS, MAX_EVENTS) if over else ""))
+        self.count_lbl.configure(foreground="#C0392B" if over else "#555")
+        self._update_title()
+
+    def _update_title(self) -> None:
+        """标题带脚本名 + 未保存标记，切窗口时一眼看出改没改。"""
+        name = self.current_name or self.name_var.get().strip() or "未命名"
+        self.root.title("脚本编辑器 — %s%s" % (name, " *" if self.dirty else ""))
 
     @staticmethod
     def _num(value) -> str:
@@ -1135,7 +1272,7 @@ class App:
         ev = {"x": bx, "y": by, "click": "left",
               "delay_ms": 0, "wheel": 0, "selector": "", "remark": ""}
         dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
-                             on_test_selector=self.test_selector)
+                             on_test_selector=self.test_selector, title="新增事件")
         self.root.wait_window(dialog)
         if dialog.result:
             self._add_event(dialog.result)
@@ -1147,7 +1284,8 @@ class App:
             return
         ev = dict(self.events[idx])
         dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
-                             on_test_selector=self.test_selector)
+                             on_test_selector=self.test_selector,
+                             title="修改第 %d 行" % (idx + 1))
         self.root.wait_window(dialog)
         if dialog.result:
             # 只替换这一行，其余行原样不动
@@ -1194,7 +1332,7 @@ class App:
         self.picker = ClickPicker(self.target.view, self.target.scale, self.pick_queue)
         self.picker.start()
         self._show_overlay()
-        self._status("拾取中：目标窗口已盖上透明遮罩，点一下要拾的位置…")
+        self._status("拾取中：左键点要拾的位置，右键取消（遮罩上会显示当前坐标）")
         self.root.after(80, self._poll_pick)
 
     # -- 拾取遮罩 ----------------------------------------------------------
@@ -1254,6 +1392,11 @@ class App:
             self._end_pick()
             return
 
+        if kind == "cancel":      # 遮罩上右键 = 放弃这次拾取
+            self._status("已取消拾取（右键）")
+            self._end_pick()
+            return
+
         px, py, lx, ly = rest
         self._status("拾取到 物理(%s,%s) → 逻辑(%s,%s)" % (px, py, lx, ly))
         cb = self.pick_cb
@@ -1304,7 +1447,6 @@ class App:
         self.name_var.set(data.get("name", name))
         self.hotkey_var.set(data.get("hotkey", ""))
         self.loop_var.set(str(data.get("loop", 1)))
-        self.target_var.set(str(data.get("target_url") or ""))
         self.events = [dict(e) for e in data.get("events", [])]
         self._normalize_events()
         size = data.get("view_size") or []
@@ -1312,7 +1454,8 @@ class App:
         self.dirty = False
         self.script_combo.set(name)
         self.render_table()
-        self._status("已载入 %s（%d 行）" % (path, len(self.events)))
+        self._status("已载入 %s（%d 行）" % (name, len(self.events)))
+        self._log("file: %s" % path)
 
     def _collect(self) -> dict:
         w, h = self.target.w, self.target.h
@@ -1341,10 +1484,6 @@ class App:
             "loop": min(MAX_LOOP, max(1, self._int(self.loop_var.get(), 1))),
             "events": events,
         }
-        # target_url：多个页面时按 URL 子串挑目标页（空 = 自动挑，不写进 JSON）
-        target = self.target_var.get().strip()
-        if target:
-            data["target_url"] = target
         if w > 0 and h > 0:
             # DLL 不认这个键（JsonSkip 会跳过），只给编辑器做坐标基准提醒
             data["view_size"] = [w, h]
@@ -1365,7 +1504,6 @@ class App:
         self.name_var.set("新脚本")
         self.hotkey_var.set("")
         self.loop_var.set("1")
-        self.target_var.set("")
         self.events = []
         self.dirty = True
         self.render_table()
@@ -1407,7 +1545,9 @@ class App:
         self._write_active(name)
         if self.target.ok:
             self.script_view_size = (self.target.w, self.target.h)
-        self._status("已保存 %s" % path)
+        self._update_title()
+        self._status("已保存 %s" % name)
+        self._log("file: 已保存 %s" % path)
         self._warn_dll_limits()
         self._log_dll_view()
 
@@ -1552,10 +1692,10 @@ class App:
         loop = min(MAX_LOOP, max(1, loop))
         self.stop_evt = threading.Event()
         self.running = True
-        # 一次试跑共用一条 CDP 连接；target_url 在 Tk 线程里读，线程里只用副本
+        # 一次试跑共用一条 CDP 连接（目标页由 CDP 自动挑）
         self._cdp = CdpClient()
         self._cdp_failed = False
-        self._cdp_target = self.target_var.get().strip()
+        self._cdp_target = ""
         self.run_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         threading.Thread(target=self._job_thread,
@@ -1680,7 +1820,7 @@ class App:
         """事件对话框里的「测试选择器」：连 DLL 同一端口，只查询不点击。"""
         client = CdpClient()
         try:
-            client.connect(self.target_var.get().strip())
+            client.connect("")
             rc = cdp_query_selector(client, selector)
             if rc.get("found"):
                 messagebox.showinfo(
