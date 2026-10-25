@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-PlusPlugin 插件：编译 + 回填项目 + 安装到运行时（在虚拟机上编译）
+PlusPlugin 插件：本地编译 + 安装到运行时主机
 
 用法：
   python build_plugin.py                 # 默认编 script 插件
@@ -9,20 +9,18 @@ PlusPlugin 插件：编译 + 回填项目 + 安装到运行时（在虚拟机上
   python build_plugin.py script console  # 依次编多个
 
 流程（每个插件）：
-  1) 清空并重建虚拟机 C:\native（只做一次，逐个上传并集源码）
-  2) 上传插件源码目录 + 依赖（sdk/；script 的引擎已并入自身目录，不再需要 proxy/）
-  3) 远程跑插件目录下的 build_plugin.bat
-  4) 把产物回填到项目 plugin\<名称>\
-  5) 安装到 %APPDATA%\TTVoice\plugins\<名称>\
+  1) 本地跑 plugin\<名称>\build_plugin.bat（bat 自带 vswhere→vcvars64），
+     产物 plugin\<名称>\<名称>.dll 直接落在源码目录
+  2) 上传 dll + plugin.json 到运行时主机 %APPDATA%\TTVoice\plugins\<名称>\
      应用在跑时走框架热重载（enabled=false 卸载 → 覆盖 → enabled=true 加载）；
      全新插件目录不会被运行中的框架发现，装完需重启一次 pplugin。
 
-说明：只负责「编译 + 回填 + 装插件」；version.dll 框架本身由 deploy.py 负责。
-依赖：pip install paramiko
+说明：只负责「编译 + 装插件」；version.dll 框架本体由 build.py 编译、deploy.py 部署。
+前置：本机装有 Visual Studio Build Tools（MSVC x64 组件）。
+依赖：pip install paramiko（连接运行时主机用）
 """
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -30,28 +28,26 @@ import time
 import paramiko
 
 # ===================== 配置区（按需修改） =====================
-VM_HOST = "172.20.106.42"
-VM_USER = "111"
-VM_PASSWORD = os.getenv("VM_PASSWORD", "111")
+HOST = "192.168.167.1"                      # 运行时主机（跑 TTVoice.exe 的机器）
+USER = "111"
+PASSWORD = os.getenv("VM_PASSWORD", "111")  # 密钥认证失败时兜底；优先走下面的 KEY_FILE
+KEY_FILE = os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519")
 
-REPO_ROOT = r"D:\PyProjects\PlusPlugin"
-VM_ROOT = "C:/native"
-RUNTIME_PLUGINS = os.path.join(os.environ.get("APPDATA", ""), "TTVoice", "plugins")
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+REMOTE_TTVOICE = "C:/Users/111/AppData/Roaming/TTVoice"  # 远端 %APPDATA%\TTVoice 兜底值（正常会自动探测）
 
-# 每个插件：源码相对目录、产物名、安装目录名、额外的依赖子目录
+# 每个插件：源码相对目录、产物名、安装目录名、要清理的旧产物
 PLUGINS = {
     "script": {
         "dir": "plugin/script",
         "dll": "script.dll",
         "install": "script",
-        "deps": ("sdk",),           # 引擎 script_engine.inc 已移入 plugin/script/
         "stale": (),
     },
     "console": {
         "dir": "plugin/console",
         "dll": "console.dll",
         "install": "console",
-        "deps": ("sdk",),
         "stale": ("log_console.dll",),
     },
 }
@@ -63,15 +59,8 @@ def log(msg):
     print(f"[*] {msg}")
 
 
-def ssh_connect():
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    log(f"连接虚拟机 {VM_USER}@{VM_HOST} ...")
-    client.connect(VM_HOST, username=VM_USER, password=VM_PASSWORD, timeout=30)
-    return client
-
-
 def decode_console(raw):
+    """cl.exe / cmd 在中文 Windows 输出 CP936；优先按 CP936 解码，诊断不乱码。"""
     for enc in ("cp936", "utf-8"):
         try:
             return raw.decode(enc)
@@ -81,6 +70,7 @@ def decode_console(raw):
 
 
 def safe_print(text):
+    """本地控制台编码不了某些字符时降级打印，别让流程崩掉。"""
     enc = sys.stdout.encoding or "utf-8"
     try:
         print(text)
@@ -88,17 +78,41 @@ def safe_print(text):
         print(text.encode(enc, "replace").decode(enc, "replace"))
 
 
-def run_remote(client, cmd):
-    log(f"远程执行: {cmd}")
-    _, stdout, stderr = client.exec_command(cmd)
-    out = decode_console(stdout.read())
-    err = decode_console(stderr.read())
-    rc = stdout.channel.recv_exit_status()
+def run_bat(bat):
+    """本地跑 bat（vswhere→vcvars64 自包含），转发输出并返回退出码。"""
+    log(f"本地编译: {bat}")
+    proc = subprocess.run([os.environ.get("ComSpec", "cmd.exe"), "/c", bat],
+                          cwd=os.path.dirname(bat), capture_output=True)
+    out = decode_console(proc.stdout)
+    err = decode_console(proc.stderr)
     if out.strip():
         safe_print(out)
     if err.strip():
         safe_print("[stderr] " + err)
-    return rc
+    return proc.returncode
+
+
+def ssh_connect():
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    key = KEY_FILE if os.path.isfile(KEY_FILE) else None
+    log(f"连接运行时主机 {USER}@{HOST} ...（{'密钥' if key else '密码'}认证）")
+    client.connect(HOST, username=USER, password=PASSWORD, key_filename=key, timeout=30)
+    return client
+
+
+def exec_out(client, cmd):
+    _, stdout, _ = client.exec_command(cmd)
+    return decode_console(stdout.read())
+
+
+def remote_ttvoice_dir(client):
+    r"""探测远端 %APPDATA%\TTVoice（sftp 用正斜杠）；探测失败退回配置值。"""
+    appdata = exec_out(client, "cmd /c echo %APPDATA%").strip().strip('"')
+    if not appdata or "%" in appdata:
+        log(f"[WARN] 探测远端 APPDATA 失败，使用配置值 {REMOTE_TTVOICE}")
+        return REMOTE_TTVOICE
+    return appdata.replace("\\", "/") + "/TTVoice"
 
 
 def sftp_makedirs(sftp, path):
@@ -111,109 +125,101 @@ def sftp_makedirs(sftp, path):
         try:
             sftp.mkdir(cur)
         except IOError:
-            pass
+            pass  # already exists
 
 
-def sftp_upload(sftp, local_dir, remote_dir):
-    sftp_makedirs(sftp, remote_dir)
-    for name in os.listdir(local_dir):
-        lpath = os.path.join(local_dir, name)
-        rpath = f"{remote_dir}/{name}"
-        if os.path.isdir(lpath):
-            sftp_makedirs(sftp, rpath)
-            sftp_upload(sftp, lpath, rpath)
-        else:
-            sftp.put(lpath, rpath)
-            log(f"上传 {lpath} -> {rpath}")
+def app_running(client):
+    return "TTVoice.exe" in exec_out(
+        client, 'tasklist /fi "imagename eq TTVoice.exe" /fo csv /nh')
 
 
-def app_running():
-    out = subprocess.run(["tasklist", "/fi", "imagename eq TTVoice.exe", "/fo", "csv", "/nh"],
-                         capture_output=True, text=True).stdout
-    return "TTVoice.exe" in out
-
-
-def scanned_this_run(name):
+def scanned_this_run(sftp, runtime_dir, name):
     """当前进程认不认识这个插件目录。
 
     框架只在 Start() 里 ScanPlugins 一次，之后只热重载已扫描到的槽位；日志里
     最后一次 "attached exe=" 之后有没有该目录的 "plugin: found ..." 就是答案。
     """
-    path = os.path.join(os.environ.get("APPDATA", ""), "TTVoice",
-                        "proxy.log")
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()[-400000:]
-    except OSError:
+        st = sftp.stat(f"{runtime_dir}/proxy.log")
+        with sftp.open(f"{runtime_dir}/proxy.log", "rb") as fh:
+            if st.st_size > 400000:
+                fh.seek(-400000, 2)
+            text = fh.read().decode("utf-8", errors="replace")
+    except IOError:
         return False
     start = text.rfind("attached exe=")
     if start < 0:
         return False
     run = text[start:]
-    return "plugin: found" in run and f"\\plugins\\{name}" in run
+    return "plugin: found" in run and rf"\plugins\{name}" in run
 
 
-def set_enabled(path, enabled):
+def set_enabled(sftp, path, enabled):
     data = {}
     try:
-        with open(path, "r", encoding="utf-8-sig") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
+        with sftp.open(path, "rb") as fh:
+            data = json.loads(fh.read().decode("utf-8-sig", "replace"))
+    except (IOError, ValueError):
         data = {"schema": 1, "enabled": bool(enabled)}
     data["enabled"] = bool(enabled)
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    payload = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    with sftp.open(path, "wb") as fh:
+        fh.write(payload)
 
 
-def wait_unlocked(path, timeout=6.0):
-    """已映射的 dll 不能写打开；框架卸载后会释放。"""
+def wait_unlocked(sftp, path, timeout=6.0):
+    """已映射的 dll 不能写打开；框架卸载后会释放（远端走 sftp 同样成立）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with open(path, "r+b"):
+            with sftp.open(path, "r+b"):
                 return True
-        except OSError:
+        except IOError:
             time.sleep(0.2)
-    return not os.path.exists(path)
+    try:
+        sftp.stat(path)
+        return False
+    except IOError:
+        return True  # 文件已不存在，视为可用
 
 
-def install(spec):
-    """装到 %APPDATA%\\TTVoice\\plugins\\<name>\\，应用在跑时用 enabled 开关热重载。"""
+def install(client, sftp, runtime_dir, spec):
+    """上传到运行时主机 plugins\\<name>\\，应用在跑时用 enabled 开关热重载。"""
     src_dir = os.path.join(REPO_ROOT, *spec["dir"].split("/"))
-    dst_dir = os.path.join(RUNTIME_PLUGINS, spec["install"])
-    dst_dll = os.path.join(dst_dir, spec["dll"])
-    dst_json = os.path.join(dst_dir, "plugin.json")
+    dst_dir = f"{runtime_dir}/plugins/{spec['install']}"
+    dst_dll = f"{dst_dir}/{spec['dll']}"
+    dst_json = f"{dst_dir}/plugin.json"
 
-    os.makedirs(dst_dir, exist_ok=True)
-    hot = app_running()
+    sftp_makedirs(sftp, dst_dir)
+    hot = app_running(client)
     # The framework scans plugins\ only once, in Start(). A directory that
     # appeared after that is unknown to the running process, so there is nothing
     # to hot reload: the app has to be restarted before the plugin exists at all.
-    scanned = hot and scanned_this_run(spec["install"])
+    scanned = hot and scanned_this_run(sftp, runtime_dir, spec["install"])
 
     if scanned:
         log("pplugin 正在运行且已扫描到该插件：先写 enabled=false 让框架卸载旧版本")
-        set_enabled(dst_json, False)
+        set_enabled(sftp, dst_json, False)
         for stale in spec["stale"]:
-            wait_unlocked(os.path.join(dst_dir, stale), timeout=3.0)
-        if not wait_unlocked(dst_dll):
-            log(f"[WARN] {dst_dll} 仍被占用，请关闭 pplugin 后重跑")
+            wait_unlocked(sftp, f"{dst_dir}/{stale}", timeout=3.0)
+        if not wait_unlocked(sftp, dst_dll):
+            log(f"[WARN] 远端 {dst_dll} 仍被占用，请关闭 pplugin 后重跑")
             raise SystemExit(1)
 
     try:
-        shutil.copy2(os.path.join(src_dir, spec["dll"]), dst_dll)
-        shutil.copy2(os.path.join(src_dir, "plugin.json"), dst_json)
+        sftp.put(os.path.join(src_dir, spec["dll"]), dst_dll)
+        # 源 plugin.json 里 enabled=true，覆盖回去即触发框架重新加载
+        sftp.put(os.path.join(src_dir, "plugin.json"), dst_json)
         for stale in spec["stale"]:
-            p = os.path.join(dst_dir, stale)
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                    log(f"删除旧产物 {p}")
-                except OSError:
-                    log(f"[WARN] 旧产物 {p} 占用中")
-    except PermissionError:
-        log(f"[WARN] {dst_dll} 被占用，请先关闭 TTVoice.exe 再重跑")
+            p = f"{dst_dir}/{stale}"
+            try:
+                sftp.remove(p)
+                log(f"删除旧产物 {p}")
+            except IOError:
+                pass  # 不存在
+    except IOError as e:
+        log(f"[WARN] 上传失败（文件可能被占用）：{e}")
+        log("请先关闭远端 TTVoice.exe 后重跑")
         raise SystemExit(1)
 
     log(f"安装 {dst_dll}")
@@ -225,28 +231,21 @@ def install(spec):
         log("[!] 该插件目录不在当前进程的扫描结果里：重启一次 pplugin 才会加载")
 
 
-def build_one(client, sftp, name, spec):
+def build_one(client, sftp, runtime_dir, name, spec):
     log(f"=== 插件 {name}（{spec['dir']}）===")
-    rc = run_remote(client, rf"cmd /c C:\native\{spec['dir'].replace('/', chr(92))}\build_plugin.bat")
-    if rc != 0:
+    src_dir = os.path.join(REPO_ROOT, *spec["dir"].split("/"))
+    bat = os.path.join(src_dir, "build_plugin.bat")
+    if not os.path.isfile(bat):
+        log(f"[{name}] 未找到 {bat}")
+        return False
+    if run_bat(bat) != 0:
         log(f"[{name}] 编译失败。")
         return False
-
-    vm_dll = f"{VM_ROOT}/{spec['dir']}/{spec['dll']}"
-    try:
-        sftp.stat(vm_dll)
-    except IOError:
-        log(f"[{name}] 未找到产物 {vm_dll}")
+    dll = os.path.join(src_dir, spec["dll"])
+    if not os.path.isfile(dll):
+        log(f"[{name}] 未找到产物 {dll}")
         return False
-
-    dst_dir = os.path.join(REPO_ROOT, *spec["dir"].split("/"))
-    os.makedirs(dst_dir, exist_ok=True)
-    dst = os.path.join(dst_dir, spec["dll"])
-    tmp = dst + ".new"
-    log(f"下载 {spec['dll']} 到项目 {dst}")
-    sftp.get(vm_dll, tmp)
-    os.replace(tmp, dst)
-    install(spec)
+    install(client, sftp, runtime_dir, spec)
     return True
 
 
@@ -258,33 +257,14 @@ def main():
             raise SystemExit(2)
 
     client = ssh_connect()
-    run_remote(client, r"cmd /c rmdir /s /q C:\native")
-    run_remote(client, r"cmd /c mkdir C:\native")
-
-    log("上传源码到虚拟机 ...")
     sftp = client.open_sftp()
-    synced = set()
-    for name in names:
-        spec = PLUGINS[name]
-        dirs = (spec["dir"],) + tuple(spec["deps"])
-        for sub in dirs:
-            if sub in synced:
-                continue
-            local = os.path.join(REPO_ROOT, *sub.split("/"))
-            if not os.path.isdir(local):
-                log(f"[WARN] 本地缺少 {local}，跳过")
-                continue
-            sftp_upload(sftp, local, f"{VM_ROOT}/{sub}")
-            synced.add(sub)
+    runtime_dir = remote_ttvoice_dir(client)
+    log(f"运行时目录: {runtime_dir}")
 
-    failed = []
-    for name in names:
-        if not build_one(client, sftp, name, PLUGINS[name]):
-            failed.append(name)
+    failed = [n for n in names if not build_one(client, sftp, runtime_dir, n, PLUGINS[n])]
 
     sftp.close()
     client.close()
-
     if failed:
         log(f"失败插件：{', '.join(failed)}")
         raise SystemExit(1)

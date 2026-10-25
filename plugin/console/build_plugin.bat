@@ -1,7 +1,8 @@
 @echo off
 rem ===========================================================================
-rem build_plugin.bat - builds the console plugin and installs it.
-rem Output is console.dll, installed into plugins\console.
+rem build_plugin.bat - builds the console plugin (run locally by build_plugin.py)
+rem Output is console.dll; install into plugins\console is done by build_plugin.py
+rem (it has to do the enabled=false / enabled=true dance for hot reload).
 rem ===========================================================================
 setlocal
 cd /d "%~dp0"
@@ -35,11 +36,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "DEST=%APPDATA%\TTVoice\plugins\console"
-if not exist "%DEST%" mkdir "%DEST%"
-copy /y console.dll "%DEST%\" >nul
-copy /y plugin.json "%DEST%\" >nul
-
 echo.
-echo [OK] installed: %DEST%
-dir /b "%DEST%"
+echo [OK] built: %CD%\console.dll
+dir /b console.dll

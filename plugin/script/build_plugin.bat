@@ -1,6 +1,6 @@
 @echo off
 rem ===========================================================================
-rem build_plugin.bat - builds the script plugin (runs on the VM, see build_plugin.py)
+rem build_plugin.bat - builds the script plugin (run locally by build_plugin.py)
 rem Output is script.dll; install into plugins\script is done by build_plugin.py
 rem (it has to do the enabled=false / enabled=true dance for hot reload).
 rem ===========================================================================
