@@ -17,6 +17,9 @@ venv/
 *.exe
 stubs.obj
 
+# Linux cross-compile scratch (build_linux.sh: stubs.nasm / stubs.obj)
+build/
+
 # Secrets (if any)
 .env
 
