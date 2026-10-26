@@ -39,7 +39,7 @@ JSON 格式（DLL 侧读取的就是这一份）：
                 （getBoundingClientRect，页面 CSS px），Input.dispatchMouseEvent
                 在元素中心派发鼠标事件——事件走浏览器真实输入管线
                 （isTrusted=true），不需要目标窗口在前台、不怕被遮挡。CDP
-                不可用或页面里没有该元素时，回退到本行坐标的 SendInput 点击
+                不可用或页面里没有该元素时，回退到本行坐标的后台消息点击
                 （x/y 都是 0 视为「没拾取过」，跳过并打日志）。勾了「后台消息」
                 后，选择器行也往 view 投鼠标消息：拿选择器解析出的位置换算成
                 view 坐标，PostMessage(WM_MOUSEMOVE/DOWN/UP)（不置前、不动光标，
@@ -68,8 +68,8 @@ JSON 格式（DLL 侧读取的就是这一份）：
 与 DLL 的关系（很重要）：
   DLL（script_engine.inc）是最终交付的执行器；本编辑器是它的开发/调试镜像，
   所以「试跑」的每一步都与 DLL 逐字对齐：同一套消息序列、同一套坐标换算、
-  同一套真实输入注入（H5 弹层不理会 PostMessage 的合成消息，只用 SendInput；
-  点击点被其他窗口挡住时跳过并打日志）
+  （坐标行 / 滚轮的兜底走「后台消息」PostMessage，不置前、不动光标、不看遮挡；
+  DLL 侧若仍用 SendInput 真实输入，属两边已知的输入方式差异）
   （int(逻辑px * DPI/96) 截断）、同一批日志字样（可与插件面板日志/%TEMP%
   日志逐行比对）。执行日志窗格可以勾「跟随 DLL 日志」把 DLL 自己写的行拉
   进来，两边放在一个窗里看。保存后还会打印「DLL 下次会加载哪份脚本」。
@@ -298,71 +298,11 @@ def find_target() -> Target:
 
 
 # --- 点击/滚轮 ------------------------------------------------------------
-# 下面三个函数是 script_engine.inc SimulateClickKindAt / SimulateWheelAt /
-# PasteTextToApp 的等价物：消息顺序、wParam、时间间隔都要一致。
-MOUSEEVENTF_LEFTDOWN = 0x0002
-MOUSEEVENTF_LEFTUP = 0x0004
-MOUSEEVENTF_RIGHTDOWN = 0x0008
-MOUSEEVENTF_RIGHTUP = 0x0010
-MOUSEEVENTF_WHEEL = 0x0800
-
-
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
-                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
-
-
-class _INPUTU(ctypes.Union):
-    _fields_ = [("mi", MOUSEINPUT)]
-
-
-class INPUT(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTU)]
-
-
-user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
-user32.SendInput.restype = wintypes.UINT
-user32.SetCursorPos.argtypes = (wintypes.INT, wintypes.INT)
+# 统一走「后台消息」：PostMessage 往 view 投鼠标消息，不置前、不动光标、
+# 不看遮挡（见 post_click_message / post_wheel_message）。
+# 不再保留 SendInput 的 OS 真实输入：那种方式会把目标置前台、移动系统光标、
+# 窗口被遮挡时点不到——也就是要去掉的「前台鼠标」。
 user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
-user32.WindowFromPoint.argtypes = (wintypes.POINT,)
-user32.WindowFromPoint.restype = wintypes.HWND
-user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
-user32.GetAncestor.restype = wintypes.HWND
-
-
-def send_mouse(flags: int, wheel: int = 0) -> None:
-    inp = INPUT()
-    inp.type = 0                       # INPUT_MOUSE
-    inp.mi.dwFlags = flags
-    inp.mi.mouseData = wheel & 0xFFFFFFFF
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-
-
-def post_click(view: int, px: int, py: int, kind: str) -> tuple[bool, str]:
-    """真实点击（与 DLL 相同）：TT语音的 H5 弹层不理会 PostMessage 的合成
-    消息，只响应 OS 生成的输入。前置应用到前台 -> 遮挡检查 -> SetCursorPos +
-    SendInput。返回 (是否发送, 信息)。"""
-    main = user32.GetAncestor(view, 2)   # GA_ROOT
-    pt = wintypes.POINT(px, py)
-    user32.ClientToScreen(view, ctypes.byref(pt))
-    user32.SetForegroundWindow(main)
-    time.sleep(0.2)
-    hit = user32.WindowFromPoint(pt)
-    if hit != view:
-        return False, get_class(hit) if hit else "?"
-    user32.SetCursorPos(pt.x, pt.y)
-    time.sleep(0.05)                     # 等悬停帧落下再按键
-    down = MOUSEEVENTF_RIGHTDOWN if kind == "right" else MOUSEEVENTF_LEFTDOWN
-    up = MOUSEEVENTF_RIGHTUP if kind == "right" else MOUSEEVENTF_LEFTUP
-    send_mouse(down)
-    send_mouse(up)
-    if kind == "double":
-        time.sleep(DBLCLK_GAP_MS / 1000.0)
-        send_mouse(down)
-        send_mouse(up)
-    return True, "%d,%d" % (px, py)
 
 
 def make_lparam(x: int, y: int) -> int:
@@ -372,8 +312,8 @@ def make_lparam(x: int, y: int) -> int:
 def post_click_message(view: int, px: int, py: int, kind: str) -> tuple[bool, str]:
     """后台消息点击：往 view 直接投鼠标消息，不置前、不动光标、不看遮挡。
 
-    H5 弹层不一定理会合成消息（所以坐标行默认还是走 SendInput 的真实输入），
-    但 WebView 里的普通页面/原生控件通常认，而且能在后台跑。
+    WebView 里的页面 / 原生控件都认这套合成消息，且能在后台跑；坐标行与无
+    CDPI 的兜底都走这里，不再用 SendInput 抢前台。
     """
     if not user32.IsWindow(view):
         return False, "view gone"
@@ -394,21 +334,19 @@ def post_click_message(view: int, px: int, py: int, kind: str) -> tuple[bool, st
     return True, "%d,%d" % (px, py)
 
 
-def post_wheel(view: int, px: int, py: int, notches: int) -> tuple[bool, str]:
-    """真实滚轮：光标移到点上下滚。返回 (是否发送, 信息)。"""
+def post_wheel_message(view: int, px: int, py: int, notches: int) -> tuple[bool, str]:
+    """后台滚轮：往 view 投 WM_MOUSEWHEEL，不置前、不动光标、不看遮挡。
+
+    坐标行 / 无 CDPI 的滚轮兜底（与 post_click_message 同一思路），不再用
+    SendInput 把窗口置前台再滚。返回 (是否发送, 信息)。"""
     if not notches:
         return True, "%d,%d" % (px, py)
-    main = user32.GetAncestor(view, 2)
-    pt = wintypes.POINT(px, py)
-    user32.ClientToScreen(view, ctypes.byref(pt))
-    user32.SetForegroundWindow(main)
-    time.sleep(0.2)
-    hit = user32.WindowFromPoint(pt)
-    if hit != view:
-        return False, get_class(hit) if hit else "?"
-    user32.SetCursorPos(pt.x, pt.y)
-    time.sleep(0.05)
-    send_mouse(MOUSEEVENTF_WHEEL, 120 * int(notches))
+    if not user32.IsWindow(view):
+        return False, "view gone"
+    lp = make_lparam(px, py)
+    delta = 120 * int(notches)          # 正 = 向上，与旧 SendInput 同值
+    wp = (delta & 0xFFFF) << 16
+    user32.PostMessageW(view, WM_MOUSEWHEEL, wp, lp)
     return True, "%d,%d" % (px, py)
 
 
@@ -2265,22 +2203,20 @@ class App:
             self.stop_evt.wait(delay / 1000.0)
 
     def _post_wheel_legacy(self, view: int, px: int, py: int, wheel: int) -> None:
-        ok, info = post_wheel(view, px, py, wheel)
+        ok, info = post_wheel_message(view, px, py, wheel)
         if ok:
-            self.msg_queue.put("script: wheel %+d at %s (real input)" % (wheel, info))
+            self.msg_queue.put("script: wheel %+d at %s (bg message)" % (wheel, info))
         else:
-            self.msg_queue.put("script: wheel skipped, covered by %s"
-                               "（把 TTVoice 窗口露出来再跑）" % info)
+            self.msg_queue.put("script: wheel skipped, %s" % info)
 
     def _post_click_legacy(self, view: int, px: int, py: int, kind: str,
                            kind_n: int) -> None:
-        ok, info = post_click(view, px, py, kind)
+        ok, info = post_click_message(view, px, py, kind)
         if ok:
-            self.msg_queue.put("script: click kind=%d %s (real input)"
+            self.msg_queue.put("script: click kind=%d %s (bg message)"
                                % (kind_n, info))
         else:
-            self.msg_queue.put("script: click skipped, covered by %s"
-                               "（把 TTVoice 窗口露出来再跑）" % info)
+            self.msg_queue.put("script: click skipped, %s" % info)
 
     def _post_click_msg(self, view: int, px: int, py: int, kind: str,
                         kind_n: int) -> None:
