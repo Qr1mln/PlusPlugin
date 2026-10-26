@@ -944,10 +944,15 @@ class EventDialog(tk.Toplevel):
         add_row(act, 1, "间隔时间", self.delay_var, suffix="ms（点完后等）")
         add_row(act, 2, "滚轮格数", self.wheel_var, suffix="格（负 = 向下）")
 
-        # 底部按钮：确定在右，Enter/Esc 也能用（坐标 / 动作 两块，备注已从弹窗去掉——
-        # 备注是给人看的、DLL 执行不读，放弹窗里是多余输入）
+        # 备注（axure 稿：坐标 / 动作 / 备注 三块，选择器与页面已从界面去掉）
+        note = ttk.LabelFrame(body, text="备注（只给人看，DLL 不读）", padding=(10, 4))
+        note.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        note.columnconfigure(0, weight=1)
+        ttk.Entry(note, textvariable=self.note_var).grid(row=0, column=0, sticky="ew", pady=3)
+
+        # 底部按钮：确定在右，Enter/Esc 也能用
         foot = ttk.Frame(body)
-        foot.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        foot.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         foot.columnconfigure(0, weight=1)
         ttk.Label(foot, text="Enter 确定　Esc 取消", foreground="#888").grid(
             row=0, column=0, sticky="w")
