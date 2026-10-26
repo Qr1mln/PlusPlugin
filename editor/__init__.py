@@ -7,6 +7,9 @@ r"""pplugin 脚本编辑器（编辑器 UI + 推送客户端）。
   target          宿主应用窗口查找（Target / find_target）
   picker          坐标拾取（全局鼠标钩子 + 半透明遮罩）
   dialogs         事件编辑对话框（EventDialog）
+  timepicker      时间选择控件（定时任务用）
+  schedule        定时任务弹窗（读写 %APPDATA%\TTVoice\schedule.json）
   app             主窗口（App）与 main() 入口
-  script_editor   启动入口（python editor/script_editor.py）
+
+启动方式：仓库根目录 `python script_editor.py`（等价 `python -m editor`）。
 """
