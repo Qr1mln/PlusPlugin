@@ -2,9 +2,9 @@
 # ============================================================================
 # build_linux.sh - cross-compile the Windows artifacts from Linux (mingw-w64)
 #
-#   ./build_linux.sh                 # version.dll + script.dll + console.dll
+#   ./build_linux.sh                 # version.dll + script-engine.dll + console.dll
 #   ./build_linux.sh proxy           # version.dll only
-#   ./build_linux.sh script console  # selected plugins
+#   ./build_linux.sh script-engine console  # selected plugins
 #
 # Toolchain (Ubuntu 24.04 / Debian 12 / Mint 22):
 #   sudo apt install -y nasm g++-mingw-w64-x86-64 llvm
@@ -133,12 +133,12 @@ build_proxy() {
 }
 
 build_script() {
-    info "building script.dll (plugin)"
+    info "building script-engine.dll (plugin)"
     "$CXX" "${COMMON[@]}" -I"$ROOT/plugin" -I"$ROOT" \
-        -o "$ROOT/plugin/script/script.dll" \
-        "$ROOT/plugin/script/script_plugin.cpp" \
-        -luser32 -lgdi32 -ld2d1 -ldwrite -lwinhttp
-    verify "$ROOT/plugin/script/script.dll" 1
+        -o "$ROOT/plugin/script-engine/script-engine.dll" \
+        "$ROOT/plugin/script-engine/script_plugin.cpp" \
+        -luser32 -lgdi32
+    verify "$ROOT/plugin/script-engine/script-engine.dll" 5
 }
 
 build_console() {
@@ -154,17 +154,17 @@ build_console() {
 # main
 # ---------------------------------------------------------------------------
 TARGETS=("$@")
-[ ${#TARGETS[@]} -eq 0 ] && TARGETS=(proxy script console)
+[ ${#TARGETS[@]} -eq 0 ] && TARGETS=(proxy script-engine console)
 
 for t in "${TARGETS[@]}"; do
     case "$t" in
-    proxy | script | console) ;;
-    all) TARGETS=(proxy script console) ; break ;;
+    proxy | script-engine | console) ;;
+    all) TARGETS=(proxy script-engine console) ; break ;;
     -h | --help)
         sed -n '3,8p' "${BASH_SOURCE[0]}"
         exit 0
         ;;
-    *) die "unknown target '$t' (proxy | script | console | all)" ;;
+    *) die "unknown target '$t' (proxy | script-engine | console | all)" ;;
     esac
 done
 
@@ -183,7 +183,7 @@ for t in "${TARGETS[@]}"; do
         fi
         build_proxy
         ;;
-    script) build_script ;;
+    script-engine) build_script ;;
     console) build_console ;;
     esac
 done

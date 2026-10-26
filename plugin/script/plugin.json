@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "name": "script",
-  "version": "0.4.0",
-  "enabled": true,
-  "priority": 10,
-  "dll": "script.dll"
-}

@@ -8,8 +8,8 @@ Requires VS 2022 Build Tools with the x64 C++ toolset and MASM (`ml64`).
 
 ```bat
 python build.py                       :: version.dll -> proxy\version.dll
-python build_plugin.py script         :: compile + install to %APPDATA%\TTVoice\plugins\script
-python build_plugin.py script console
+python build_plugin.py script-engine  :: compile + install to %APPDATA%\TTVoice\plugins\script-engine
+python build_plugin.py script-engine console
 ```
 
 ### Linux (mingw-w64 cross-compile)
@@ -18,9 +18,9 @@ Requires `nasm` and `g++-mingw-w64-x86-64` (plus `llvm` for export verification)
 ```bash
 sudo apt install -y nasm g++-mingw-w64-x86-64 llvm
 
-./build_linux.sh                  # version.dll + script.dll + console.dll
+./build_linux.sh                  # version.dll + script-engine.dll + console.dll
 ./build_linux.sh proxy            # proxy only
-./build_linux.sh script console   # selected plugins
+./build_linux.sh script-engine console   # selected plugins
 ```
 
 `build_linux.sh` regenerates `proxy/stubs.nasm` from `proxy/proxy_exports.h`

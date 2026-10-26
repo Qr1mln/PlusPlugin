@@ -67,10 +67,10 @@ script: cdp unavailable (no page target on 127.0.0.1:9223) - selector rows fall 
 | 文件 | 内容 |
 |---|---|
 | `proxy/dllmain.cpp` | `EnableWebView2Cdp()`：DllMain 里追加调试端口参数（kernel32-only，无 loader-lock 风险）；PayloadThread 打一行 `webview2 cdp args: …` |
-| `plugin/script/script_engine.inc` | CDP 节（连接/选页/evaluate/dispatch）+ `RunEventActions`（wheel→paste→click 的 CDP/坐标统一分派）+ selector/target_url 解析 |
-| `plugin/script/script_plugin.cpp` | ActEvent 改调 `RunEventActions`；RunNow 里 `CdpRunBegin`（每轮一次重连机会）；shutdown 时 `CdpShutdown`；版本 0.4.0 |
+| `plugin/script-engine/script_engine.inc` | CDP 节（连接/选页/evaluate/dispatch）+ `RunEventActions`（wheel→paste→click 的 CDP/坐标统一分派）+ selector/target_url 解析 |
+| `plugin/script-engine/script_plugin.cpp` | ActEvent 改调 `RunEventActions`；RunNow 里 `CdpRunBegin`（每轮一次重连机会）；shutdown 时 `CdpShutdown`；版本 0.4.0 |
 | `script_editor.py` | `CdpClient`（纯标准库 WS 客户端）+ 事件对话框 selector 字段/「测试选择器」按钮 + 脚本级 目标页URL 输入 + 试跑镜像 |
-| `plugin/script/test_cdp.cpp` | C++ 侧验证工具（见下） |
+| `plugin/script-engine/test_cdp.cpp` | C++ 侧验证工具（见下） |
 
 ## 怎么验证（本机即可复跑）
 
@@ -81,7 +81,7 @@ msedge --headless=new --remote-debugging-port=9223 ^
        file:///D:/PyProjects/PlusPlugin/.cdp_test/cdp_test.html
 
 :: 2. C++ 侧（引擎本体）：VS x64 环境里
-cd plugin\script && cl /nologo /MT /W4 /utf-8 test_cdp.cpp /link winhttp.lib user32.lib
+cd plugin\script-engine && cl /nologo /MT /W4 /utf-8 test_cdp.cpp /link winhttp.lib user32.lib
 test_cdp.exe            :: 期望最后一行 MAIN: CDP_TEST_OK
 ```
 

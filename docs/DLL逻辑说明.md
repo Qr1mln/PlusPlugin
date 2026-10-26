@@ -438,17 +438,17 @@ version.dll（代理）
 
 ## 14. `script` 插件（点击脚本执行器）
 
-`version.dll` 里的脚本引擎焊在叠加层上：要 sideload 代理、要 `InstallHooks` 成功、要人点胶囊。`script` 插件是同一套执行语义的**插件形态**——同一个 JSON、同一批输入动作、同一个门控算法，装进 `plugins\script\` 由框架热加载，不渲染、不装 hook、不建线程（§3.1 契约）。
+`version.dll` 里的脚本引擎焊在叠加层上：要 sideload 代理、要 `InstallHooks` 成功、要人点胶囊。`script` 插件是同一套执行语义的**插件形态**——同一个 JSON、同一批输入动作、同一个门控算法，装进 `plugins\script-engine\` 由框架热加载，不渲染、不装 hook、不建线程（§3.1 契约）。
 
 ### 14.1 文件
 
 | 文件 | 职责 |
 |---|---|
-| [`plugin/script/script_plugin.cpp`](file:///D:/AIProjects/PlusPlugin/plugin/script/script_plugin.cpp) | 插件本体：`GetDesc`/init/tick/shutdown、`script_engine.inc` 需要的同名 shim（`LogFromOverlay`/`SetScriptStatus`/`g_hwnd`/`g_viewHwnd`/`g_scale`/`g_gatePollMs`）、`CaptureView`/`CountCreamBand`、**分步执行器**、热键轮询、`run.txt` 触发 |
-| [`plugin/script/plugin.json`](file:///D:/AIProjects/PlusPlugin/plugin/script/plugin.json) | 清单：`name=script`、`dll=script.dll`、`priority=10`、`enabled=true` |
-| [`plugin/script/build_plugin.bat`](file:///D:/AIProjects/PlusPlugin/plugin/script/build_plugin.bat) | VM 侧编译（`cl /LD /MT /O2 /EHsc /W4 /utf-8`） |
+| [`plugin/script-engine/script_plugin.cpp`](file:///D:/AIProjects/PlusPlugin/plugin/script-engine/script_plugin.cpp) | 插件本体：`GetDesc`/init/tick/shutdown、`script_engine.inc` 需要的同名 shim（`LogFromOverlay`/`SetScriptStatus`/`g_hwnd`/`g_viewHwnd`/`g_scale`/`g_gatePollMs`）、`CaptureView`/`CountCreamBand`、**分步执行器**、热键轮询、`run.txt` 触发 |
+| [`plugin/script-engine/plugin.json`](file:///D:/AIProjects/PlusPlugin/plugin/script-engine/plugin.json) | 清单：`name=script`、`dll=script-engine.dll`、`priority=10`、`enabled=true` |
+| [`plugin/script-engine/build_plugin.bat`](file:///D:/AIProjects/PlusPlugin/plugin/script-engine/build_plugin.bat) | VM 侧编译（`cl /LD /MT /O2 /EHsc /W4 /utf-8`） |
 | [`build_plugin.py`](file:///D:/AIProjects/PlusPlugin/build_plugin.py) | 通用插件流水线：建 `C:\native` → 上传 → 编译 → 回填项目 → 装到 `%APPDATA%\TTVoice\plugins\<name>\` |
-| 产物 `plugin/script/script.dll` | x64 单文件 |
+| 产物 `plugin/script-engine/script-engine.dll` | x64 单文件 |
 
 引擎仍是**同一份源码**：`script_plugin.cpp` 直接 `#include "../../proxy/script_engine.inc"`（`overlay.inc` 在 include 之前提供的东西，这里由插件的 shim 提供同名同义的一份）。所以 §8 的 JSON 契约、§10 的 parity 常量表对它逐条成立，改引擎两边同步生效。引擎里「起线程跑整份脚本」和「`RegisterHotKey` 热键线程」这两半被**刻意不使用**（编译器会给 C4505，文件里已用 pragma 局部关掉）。
 
@@ -458,7 +458,7 @@ version.dll（代理）
 PayloadThread（框架）                 PluginControlThread（框架，每 16ms）
   plugins::Start()                      tick()
     └─ ScanPlugins()                      ├─ 每 1s：ScriptReload(false)（stat 一次，静默）
-         └─ LoadPlugin("script")          ├─ 每 tick：轮询 hotkey（GetAsyncKeyState 边沿）
+         └─ LoadPlugin("script-engine")          ├─ 每 tick：轮询 hotkey（GetAsyncKeyState 边沿）
               ├─ LoadLibraryExW           └─ 每 300ms：看 scripts\run.txt
               ├─ GetDesc()
               └─ init(host)              RunPendingTasks()
@@ -496,10 +496,10 @@ PayloadThread（框架）                 PluginControlThread（框架，每 16m
 ### 14.5 构建 / 安装
 
 ```bat
-:: 编译 + 回填项目 + 装到 %APPDATA%\TTVoice\plugins\script\（应用在跑会走热重载）
-python build_plugin.py script
+:: 编译 + 回填项目 + 装到 %APPDATA%\TTVoice\plugins\script-engine\（应用在跑会走热重载）
+python build_plugin.py script-engine
 python build_plugin.py console          :: 同一脚本也支持 console
-python build_plugin.py script console   :: 依次编
+python build_plugin.py script-engine console   :: 依次编
 ```
 
 **全新插件目录不会被运行中的框架发现**（`ScanPlugins` 只在 `Start()` 跑一次，之后只有热重载已扫描到的槽位），所以第一次装上 `script` 后需要重启一次 pplugin；之后改代码重编，`build_plugin.py` 会用 `enabled=false → 覆盖 → enabled=true` 让框架自动加载新版本。
