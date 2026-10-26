@@ -968,6 +968,15 @@ class EventDialog(tk.Toplevel):
         self.x_entry.focus_set()
         self.x_entry.selection_range(0, "end")
 
+        # 备注要求：弹窗居中显示在父窗口正中
+        self.update_idletasks()
+        mw = self.master.winfo_width() or self.master.winfo_screenwidth()
+        mh = self.master.winfo_height() or self.master.winfo_screenheight()
+        mx = self.master.winfo_rootx()
+        my = self.master.winfo_rooty()
+        self.geometry("+%d+%d" % (mx + (mw - self.winfo_width()) // 2,
+                                  my + (mh - self.winfo_height()) // 2))
+
     @staticmethod
     def _num_ok(text: str) -> bool:
         """输入框校验：只放行能拼成数字的中间态（空 / - / . / -1.5）。"""
