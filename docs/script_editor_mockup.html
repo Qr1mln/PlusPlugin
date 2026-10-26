@@ -1,0 +1,217 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>脚本编辑器 · 原型（1024×700）</title>
+<style>
+  :root{
+    --win-bg:#f0f0f0;
+    --line:#c8c8c8;
+    --line-soft:#e4e4e4;
+    --btn-face:#f0f0f0;
+    --btn-edge:#adadad;
+    --btn-edge-hi:#8a8a8a;
+    --text:#111;
+    --text-dim:#5a5a5a;
+    --sel:#0078d7;
+    --sel-text:#fff;
+    --log-bg:#141414;
+    --log-text:#d0d0d0;
+    --font:"Microsoft YaHei","Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:#8b8b8b;font-family:var(--font);}
+  .stage{
+    width:1024px;height:700px;position:relative;margin:16px auto;
+    background:var(--win-bg);font-size:12px;color:var(--text);
+    border:1px solid #6c6c6c;
+  }
+
+  /* ---------- 分区标题 ---------- */
+  .section-title{position:absolute;font-size:12px;color:var(--text);}
+  #t-script{left:14px;top:8px;}
+  #t-props{left:520px;top:8px;}
+  #t-events{left:14px;top:66px;}
+  #t-log{left:14px;top:499px;}
+
+  /* ---------- 控件基元 ---------- */
+  .btn{
+    position:absolute;height:24px;line-height:22px;text-align:center;
+    background:var(--btn-face);border:1px solid var(--btn-edge);border-radius:2px;
+    color:var(--text);white-space:nowrap;padding:0 8px;cursor:default;
+  }
+  .btn:hover{border-color:var(--btn-edge-hi);background:#e9e9e9;}
+  .btn.sm{height:22px;line-height:20px;font-size:12px;}
+
+  .combo,.entry{
+    position:absolute;height:24px;line-height:22px;background:#fff;
+    border:1px solid #7a7a7a;padding:0 6px;white-space:nowrap;overflow:hidden;
+  }
+  .combo::after{
+    content:"";position:absolute;right:0;top:0;width:18px;height:22px;
+    border-left:1px solid #d0d0d0;
+    background:
+      linear-gradient(45deg,transparent 46%,#333 46%,#333 54%,transparent 54%) 6px 9px/6px 6px no-repeat,
+      linear-gradient(-45deg,transparent 46%,#333 46%,#333 54%,transparent 54%) 10px 9px/6px 6px no-repeat;
+  }
+  .label{position:absolute;line-height:24px;color:var(--text);white-space:nowrap;}
+  .hint{position:absolute;line-height:24px;color:var(--text-dim);white-space:nowrap;}
+
+  /* ---------- 事件表 ---------- */
+  .table{
+    position:absolute;left:8px;top:104px;width:1006px;
+    border:1px solid var(--line);background:#fff;
+  }
+  .thead{display:flex;height:22px;background:var(--win-bg);
+         border-bottom:1px solid var(--line);font-weight:700;text-align:center;}
+  .thead>div{border-right:1px solid var(--line-soft);line-height:21px;}
+  .thead>div:last-child{border-right:none;}
+  .tbody{position:relative;height:366px;overflow:hidden;}
+  .row{display:flex;height:22px;line-height:21px;border-bottom:1px solid #eee;}
+  .row>div{border-right:1px solid var(--line-soft);padding:0 6px;overflow:hidden;
+           white-space:nowrap;}
+  .row>div:last-child{border-right:none;}
+  .row.selected{background:var(--sel);color:var(--sel-text);}
+  .row.selected>div{border-right-color:rgba(255,255,255,.25);}
+  .c-no{width:40px;text-align:center;padding:0!important;}
+  .c-xy{width:177px;}
+  .c-click{width:130px;text-align:left;}
+  .c-gap{width:80px;}
+  .c-wheel{width:75px;}
+  .c-sel{width:210px;}
+  .c-page{width:150px;}
+  .c-note{flex:1;}
+  .hscroll{
+    position:absolute;left:8px;top:492px;width:1006px;height:17px;
+    background:var(--win-bg);border:1px solid var(--line);border-radius:2px;
+  }
+  .hscroll .thumb{position:absolute;left:0;top:0;width:960px;height:15px;
+    background:#f0f0f0;border:1px solid #c0c0c0;border-radius:2px;}
+
+  /* ---------- 日志 ---------- */
+  .logbox{
+    position:absolute;left:8px;top:518px;width:1006px;height:144px;
+    background:var(--log-bg);color:var(--log-text);overflow:hidden;
+    font-family:Consolas,"Courier New",monospace;font-size:12px;line-height:19px;
+    padding:2px 0 0 0;
+  }
+  .logbox .ln{white-space:pre;padding:0 4px;}
+  .logbox .ts{color:#b9b9b9;}
+  .logbox .warn{color:#e8c07a;}
+
+  /* ---------- 底部工具条 ---------- */
+  .bottombar{position:absolute;left:0;top:668px;width:1024px;height:32px;
+             background:var(--win-bg);border-top:1px solid #d8d8d8;}
+  .sep{position:absolute;top:4px;width:1px;height:24px;background:#d0d0d0;}
+
+  .chk{position:absolute;top:4px;line-height:20px;white-space:nowrap;}
+  .chk .box{
+    display:inline-block;width:13px;height:13px;border:1px solid #8a8a8a;
+    background:#fff;vertical-align:-2px;margin-right:6px;position:relative;
+  }
+  .chk.on .box::after{
+    content:"";position:absolute;left:2px;top:4px;width:8px;height:4px;
+    border-left:2px solid #1a1a1a;border-bottom:2px solid #1a1a1a;
+    transform:rotate(-45deg);
+  }
+  .status{position:absolute;right:12px;top:4px;line-height:20px;color:var(--text);}
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <!-- 分区标题 -->
+  <div class="section-title" id="t-script">脚本</div>
+  <div class="section-title" id="t-props">属性</div>
+  <div class="section-title" id="t-events">事件表</div>
+
+  <!-- 脚本工具行 -->
+  <div class="label" style="left:14px;top:28px;">文件</div>
+  <div class="combo" style="left:62px;top:28px;width:144px;">完成一次任意房间内上下</div>
+  <div class="btn"    style="left:212px;top:28px;width:40px;">刷新</div>
+  <div class="btn"    style="left:256px;top:28px;width:40px;">新建</div>
+  <div class="btn"    style="left:300px;top:28px;width:40px;">保存</div>
+  <div class="btn"    style="left:344px;top:28px;width:52px;">另存为</div>
+  <div class="btn"    style="left:400px;top:28px;width:40px;">删除</div>
+
+  <!-- 属性行 -->
+  <div class="label" style="left:522px;top:28px;">名称</div>
+  <div class="entry" style="left:560px;top:28px;width:126px;">完成一次任意房间内上</div>
+  <div class="label" style="left:700px;top:28px;">启动热键</div>
+  <div class="entry" style="left:766px;top:28px;width:36px;">F2</div>
+  <div class="label" style="left:812px;top:28px;">循环次数</div>
+  <div class="entry" style="left:872px;top:28px;width:30px;">1</div>
+  <div class="hint"  style="left:912px;top:28px;">空 = 不注册</div>
+
+  <!-- 事件表工具行 -->
+  <div class="btn sm" style="left:14px;top:86px;width:56px;">添加事件</div>
+  <div class="btn sm" style="left:78px;top:86px;width:38px;">修改</div>
+  <div class="btn sm" style="left:124px;top:86px;width:50px;">删除行</div>
+  <div class="btn sm" style="left:182px;top:86px;width:38px;">上移</div>
+  <div class="btn sm" style="left:228px;top:86px;width:38px;">下移</div>
+  <div class="label" style="right:12px;top:84px;color:var(--text-dim);">共 3 行</div>
+
+  <!-- 事件表 -->
+  <div class="table">
+    <div class="thead">
+      <div class="c-no">序号</div>
+      <div class="c-xy">坐标（逻辑 px）</div>
+      <div class="c-click">点击</div>
+      <div class="c-gap">间隔 ms</div>
+      <div class="c-wheel">滚轮</div>
+      <div class="c-sel">选择器</div>
+      <div class="c-page">页面</div>
+      <div class="c-note">备注</div>
+    </div>
+    <div class="tbody">
+      <div class="row">
+        <div class="c-no">1</div><div class="c-xy">30, 1079.3</div>
+        <div class="c-click">左键单击</div><div class="c-gap">1500</div>
+        <div class="c-wheel">0</div><div class="c-sel"></div>
+        <div class="c-page">默认</div><div class="c-note"></div>
+      </div>
+      <div class="row selected">
+        <div class="c-no">2</div><div class="c-xy">503.3, 1148.7</div>
+        <div class="c-click">左键单击</div><div class="c-gap">2000</div>
+        <div class="c-wheel">0</div><div class="c-sel"></div>
+        <div class="c-page">默认</div><div class="c-note"></div>
+      </div>
+      <div class="row">
+        <div class="c-no">3</div><div class="c-xy">568.7, 100.7</div>
+        <div class="c-click">左键单击</div><div class="c-gap">0</div>
+        <div class="c-wheel">0</div><div class="c-sel"></div>
+        <div class="c-page">默认</div><div class="c-note"></div>
+      </div>
+    </div>
+  </div>
+  <div class="hscroll"><div class="thumb"></div></div>
+
+  <!-- 日志 -->
+  <div class="section-title" id="t-log">执行日志（字样与 DLL 一致，[DLL] 是从 %TEMP% 拉的）</div>
+  <div class="logbox">
+    <div class="ln"><span class="ts">09:05:23.969</span>  file: C:\Users\111\AppData\Roaming\TTVoice\scripts\cdp_probe.json</div>
+    <div class="ln"><span class="ts">09:05:23.971</span>  dll view: script: loaded C:\Users\111\AppData\Roaming\TTVoice\scripts\新脚本.json name="新脚本" events=1 loop=1</div>
+    <div class="ln"><span class="ts">09:05:23.978</span>  dll view: 脚本按按钮，叠加层不会有常量提示行。</div>
+    <div class="ln"><span class="ts">09:05:23.978</span>  <span class="warn">警告: DLL 加载的不是当前脚本 [cdp_probe] — 检查 active.txt</span></div>
+    <div class="ln"><span class="ts">09:05:26.155</span>  file: C:\Users\111\AppData\Roaming\TTVoice\scripts\完成一次任意房间内上麦.json</div>
+  </div>
+
+  <!-- 底部工具条 -->
+  <div class="bottombar">
+    <div class="btn sm" style="left:14px;top:4px;width:44px;">试跑</div>
+    <div class="btn sm" style="left:64px;top:4px;width:62px;">跑选中行</div>
+    <div class="btn sm" style="left:132px;top:4px;width:38px;">停止</div>
+    <div class="sep"      style="left:182px;"></div>
+    <div class="btn sm" style="left:192px;top:4px;width:60px;">刷新目标</div>
+    <div class="btn sm" style="left:258px;top:4px;width:62px;">页面结构</div>
+    <div class="sep"      style="left:330px;"></div>
+    <div class="chk"      style="left:342px;"><span class="box"></span>跟随 DLL 日志</div>
+    <div class="chk on"   style="left:452px;"><span class="box"></span>后台消息</div>
+    <div class="sep"      style="left:540px;"></div>
+    <div class="btn sm" style="left:552px;top:4px;width:52px;">清日志</div>
+    <div class="status">拾取到 物理(1901,803) → 逻辑(1267.3,535.3)</div>
+  </div>
+
+</div>
+</body>
+</html>
