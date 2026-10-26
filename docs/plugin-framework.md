@@ -53,7 +53,10 @@
 
 | 路径 | 职责 |
 |---|---|
-| `dllmain.cpp` | 代理载荷：转发 17 个导出 → 起 PayloadThread；`DllMain` 内解析真身 + 起早期 D3D11 hook 线程。M1 完成后只保留"代理 + 引导 + 启动框架"。 |
+| `dllmain.cpp` | 代理载荷入口（103 行）：X-macro 定义 `g_pfn_*`、`ResolveRealDll()`、`ResolveMissCount()`、`DllMain`（只做解析真身 + 置 WebView2 CDP 变量 + 起 `PayloadThread`）。 |
+| `proxy/log.h` `.cpp` | 日志：`Log()` 单行追加到 `proxy.log`（DLL 同目录，`%TEMP%` 兜底），互斥锁 + 单次写入避免多线程串行；`g_logFanout` 供框架挂插件日志扇出。 |
+| `proxy/config.h` `.cpp` | `target.ini`：路径用 `<filesystem>`，读取用 Win32 `GetPrivateProfileStringW`（`[host]` 段），并对旧的无段格式保留一个行扫描兜底；缺文件时按新格式种默认值。 |
+| `proxy/bootstrap.h` `.cpp` | 引导：`EnableWebView2Cdp()`（DllMain 里调）、`PayloadThread`（等 dxgi/Flutter 窗口 → `plugins::SetHostContext` + `plugins::Start`）。framework/*.inc 在这个 TU 里包含。 |
 | `stubs.asm` | 17 个 stub：`jmp qword ptr [g_pfn_X]`（AheadLib 风格，因 MSVC `.def` 转发不可用）。 |
 | `exports.def` / `proxy_exports.h` | 导出 17 个 stub 名（`LIBRARY version`）/ X-macro 列表（定义与解析指针共用）。 |
 | `sdk/pplugin.h` | **ABI 契约**：插件与框架的共同语言，纯 ASCII、POD、`extern "C"`。 |

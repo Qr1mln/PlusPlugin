@@ -21,7 +21,7 @@
 // Keep this file pure ASCII.
 // ============================================================================
 
-#include "../sdk/pplugin.h"
+#include "../../sdk/pplugin.h"
 
 #include <d2d1.h>
 #include <d2d1helper.h>
@@ -794,13 +794,14 @@ bool CreatePanel() {
     g_winH = static_cast<int>(kTotalH * g_scale + 0.5f);   // title bar + log body
 
     // Anchor to the owner's client origin (screen px), then the panel is free
-    // to be dragged anywhere on the desktop.
+    // to be dragged anywhere on the desktop. Default corner: bottom right.
     RECT prc = {};
     POINT origin = {0, 0};
     GetClientRect(main, &prc);
     ClientToScreen(main, &origin);
-    int x = origin.x + prc.right - g_winW - static_cast<int>(kMargin * g_scale + 0.5f);
-    int y = origin.y + static_cast<int>(kMargin * g_scale + 0.5f);
+    const int margin = static_cast<int>(kMargin * g_scale + 0.5f);
+    int x = origin.x + prc.right - g_winW - margin;
+    int y = origin.y + prc.bottom - g_winH - margin;
 
     g_panel = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kPanelClass, L"",

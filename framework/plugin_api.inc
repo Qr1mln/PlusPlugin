@@ -321,10 +321,51 @@ static HWND __cdecl HostMainWindow() {
     return g_mainHwnd;
 }
 
+// Flutter 的真实输入目标是 runner 顶层窗口下的 FLUTTERVIEW 子窗口。把鼠标消息投给
+// 顶层窗口不会有任何人处理（Flutter 的输入全在 view 里），所以 viewWindow() 必须
+// 交出子窗口，否则插件 PostMessage 出去的点击「发送成功但毫无反应」。
+struct ViewFindCtx {
+    HWND first;     // 第一个类名匹配的（兜底）
+    HWND visible;   // 其中可见的那个（优先：隐藏的 view 收不到输入）
+};
+
+static BOOL CALLBACK FindViewProc(HWND child, LPARAM lp) {
+    wchar_t cls[64] = {};
+    if (GetClassNameW(child, cls, 63) <= 0 || lstrcmpiW(cls, L"FLUTTERVIEW") != 0) {
+        return TRUE;
+    }
+    ViewFindCtx* ctx = reinterpret_cast<ViewFindCtx*>(lp);
+    if (ctx->first == nullptr) {
+        ctx->first = child;
+    }
+    if (IsWindowVisible(child) != FALSE) {
+        ctx->visible = child;
+        return FALSE;   // 找到可见的，停止枚举
+    }
+    return TRUE;
+}
+
+// 子窗口在整个进程生命周期内稳定，找到后缓存；窗口重建时（IsWindow 失败）重新找。
+static HWND ResolveViewWindow(HWND main) {
+    static HWND cached = nullptr;
+    if (cached != nullptr && IsWindow(cached) != FALSE) {
+        return cached;
+    }
+    if (main == nullptr) {
+        return nullptr;
+    }
+    ViewFindCtx ctx{nullptr, nullptr};
+    EnumChildWindows(main, &FindViewProc, reinterpret_cast<LPARAM>(&ctx));
+    cached = (ctx.visible != nullptr) ? ctx.visible : ctx.first;
+    if (cached != nullptr) {
+        Log("host view=0x%p (FLUTTERVIEW)", reinterpret_cast<void*>(cached));
+    }
+    return cached;
+}
+
 static HWND __cdecl HostViewWindow() {
-    // M1 records the real child window from the present hook. Until then the
-    // top level window is the only handle the framework can vouch for.
-    return g_mainHwnd;
+    HWND view = ResolveViewWindow(g_mainHwnd);
+    return (view != nullptr) ? view : g_mainHwnd;   // UI 未就绪时退回主窗口
 }
 
 static float __cdecl HostScale() {
