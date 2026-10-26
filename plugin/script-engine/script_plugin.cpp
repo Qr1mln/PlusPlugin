@@ -1,146 +1,90 @@
 // ============================================================================
-// script_plugin.cpp - script_editor.py 使用的脚本事件执行库
+// script_plugin.cpp - 插件入口（pplugin 契约的唯一对外部分）
 //
-// 同时作为 pplugin 插件存在，但只保留最小插件入口：GetDesc + 空的
-// init/tick/shutdown（只校验 abi，不注册任何 Host 能力）。这样框架能按
-// plugin.json 的 enabled 正常加载/卸载它，不再报 "has no GetDesc"。
+// 其余实现见同目录：
+//   engine.h / engine.cpp   命令队列、执行线程、日志线程、事件执行
+//   tcp_server.cpp          TCP 服务（127.0.0.1:47800）与协议解析
+//   input_win32.cpp         PP_* 输入原语与键名解析
 //
-// 真正的事件执行仍由 script_editor.py 用 ctypes 直接调用 PP_* 导出完成。
-//
-// 导出（C 链接，__cdecl）：
-//   int  PP_Mouse(HWND view, int x, int y, int button, int action)
-//   int  PP_Delay(int ms)
-//   int  PP_FindImage(HWND view, const char* image, double threshold, int timeout_ms)
-//   int  PP_Version(void)
-//   const Desc* GetDesc(void)          // 插件入口（框架用）
-//
-//   button : 0=左键 1=右键 2=中键
-//   action : 0=移动 1=按下 2=抬起 3=单击（按下+抬起）
-//   x, y   : 相对 view 客户区的物理像素
-//
-// 找图暂时是占位实现：返回 PP_ERR_NOT_IMPLEMENTED (-4)，编辑器记日志后跳过。
+// 契约要点：init 里起线程（被明确放行的例外）、shutdown 里 join；
+// 执行权在宿主进程内，鼠标/键盘消息直接投给宿主自己的 FLUTTERVIEW 窗口。
 // ============================================================================
+#include "engine.h"
 
-#include <windows.h>
+#include <cstdio>
 
-#include "../../sdk/pplugin.h"
-
-#define PP_OK                  0
-#define PP_ERR_PARAM          -1
-#define PP_ERR_STATE          -2
-#define PP_ERR_NOT_IMPLEMENTED -4
+#include "schedule.h"
 
 namespace {
 
-// 按键编号 -> 鼠标按下消息
-UINT DownMessage(int button) {
-    if (button == 1) return WM_RBUTTONDOWN;
-    if (button == 2) return WM_MBUTTONDOWN;
-    return WM_LBUTTONDOWN;
-}
+const char* kCrashLogPath = "C:\\Users\\111\\AppData\\Roaming\\TTVoice\\script_crash.log";
 
-// 按键编号 -> 鼠标抬起消息
-UINT UpMessage(int button) {
-    if (button == 1) return WM_RBUTTONUP;
-    if (button == 2) return WM_MBUTTONUP;
-    return WM_LBUTTONUP;
-}
-
-// 按键编号 -> 鼠标移动时携带的按键标志
-WPARAM DownFlag(int button) {
-    if (button == 1) return MK_RBUTTON;
-    if (button == 2) return MK_MBUTTON;
-    return MK_LBUTTON;
-}
-
-}  // namespace
-
-// 鼠标事件：往目标窗口投后台鼠标消息（不置前、不动光标）。
-extern "C" __declspec(dllexport) int __cdecl PP_Mouse(HWND view, int x, int y,
-                                                       int button, int action) {
-    if (view == nullptr || !IsWindow(view)) return PP_ERR_PARAM;
-    if (button < 0 || button > 2) return PP_ERR_PARAM;
-    if (action < 0 || action > 3) return PP_ERR_PARAM;
-
-    const LPARAM point = MAKELPARAM(x, y);
-    const WPARAM flag = DownFlag(button);
-
-    switch (action) {
-    case 0:  // 移动
-        PostMessageW(view, WM_MOUSEMOVE, 0, point);
-        break;
-    case 1:  // 按下：先移到位再按下
-        PostMessageW(view, WM_MOUSEMOVE, flag, point);
-        PostMessageW(view, DownMessage(button), flag, point);
-        break;
-    case 2:  // 抬起
-        PostMessageW(view, UpMessage(button), 0, point);
-        break;
-    case 3:  // 单击：移动 -> 按下 -> 抬起
-        PostMessageW(view, WM_MOUSEMOVE, flag, point);
-        PostMessageW(view, DownMessage(button), flag, point);
-        PostMessageW(view, UpMessage(button), 0, point);
-        break;
-    default:
-        return PP_ERR_PARAM;
+// 执行期崩溃捕获：把异常码/地址落盘，避免宿主进程直接崩，便于定位。
+void DbgCrash(const char* where, unsigned code, void* addr) {
+    char buf[256];
+    const int n = snprintf(buf, sizeof buf, "[script-engine] %s 捕获异常: code=0x%08X addr=%p\n",
+                           where, code, addr);
+    HANDLE f = CreateFileA(kCrashLogPath, GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE) {
+        SetFilePointer(f, 0, nullptr, FILE_END);
+        DWORD written = 0;
+        WriteFile(f, buf, static_cast<DWORD>(n), &written, nullptr);
+        CloseHandle(f);
     }
-    return PP_OK;
 }
 
-// 延迟事件：阻塞等待指定毫秒。
-extern "C" __declspec(dllexport) int __cdecl PP_Delay(int ms) {
-    if (ms < 0) return PP_ERR_PARAM;
-    if (ms > 0) Sleep(static_cast<DWORD>(ms));
-    return PP_OK;
+// 全局未处理异常过滤器：记录崩溃地址后只结束当前（出错的）线程，宿主进程得以存活。
+LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
+    const unsigned code = (ep != nullptr) ? ep->ExceptionRecord->ExceptionCode : 0;
+    void* addr = (ep != nullptr) ? ep->ExceptionRecord->ExceptionAddress : nullptr;
+    DbgCrash("Unhandled", code, addr);
+    ExitThread(static_cast<DWORD>(-1));
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
-// 找图事件：占位，匹配算法尚未实现。
-extern "C" __declspec(dllexport) int __cdecl PP_FindImage(HWND view, const char* image,
-                                                          double threshold, int timeout_ms) {
-    (void)view;
-    (void)image;
-    (void)threshold;
-    (void)timeout_ms;
-    return PP_ERR_NOT_IMPLEMENTED;  // 占位：匹配算法实现前一律返回未实现
-}
-
-// 库版本：供编辑器确认导出集合匹配。
-extern "C" __declspec(dllexport) int __cdecl PP_Version(void) {
-    return 2;
-}
-
-// ---------------------------------------------------------------------------
-// 最小插件入口：只让框架认可本 DLL，不预订任何能力。
-// 卸载时框架先 drain inflight 再调 shutdown，这里没有任何资源要放。
-// ---------------------------------------------------------------------------
-static int __cdecl OnPluginInit(const Host* host) {
+int __cdecl OnPluginInit(const Host* host) {
     if (host == nullptr || host->abi != P_ABI) return ERR_PARAM;
+    SetUnhandledExceptionFilter(CrashFilter);
+    if (!se::Start(host)) {
+        if (host->log != nullptr) host->log("script-engine: 引擎线程启动失败");
+        return ERR_STATE;
+    }
+    tcp::Start();
+    sched::Start();
+    if (host->log != nullptr) {
+        host->log("script-engine: 进程内引擎已启动（TCP 127.0.0.1:47800）");
+    }
     return P_OK;
 }
 
-static int __cdecl OnPluginTick(void) {
+int __cdecl OnPluginTick(void) {
     return 0;
 }
 
-static int __cdecl OnPluginShutdown(void) {
+int __cdecl OnPluginShutdown(void) {
+    sched::Stop();   // 先停调度，避免它在引擎收尾时再压命令
+    tcp::Stop();
+    se::Shutdown();
     return P_OK;
 }
 
-static const Desc kDesc = {
+const Desc kDesc = {
     P_ABI,
     sizeof(Desc),
     "script-engine",
-    "0.1.0",
+    "0.3.0",
     &OnPluginInit,
     &OnPluginTick,
     &OnPluginShutdown
 };
 
+}  // namespace
+
 extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
     return &kDesc;
 }
 
-// 纯执行库：DllMain 保持空实现，不在这里做任何工作。
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     (void)module;
     (void)reason;

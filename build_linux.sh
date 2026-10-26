@@ -125,19 +125,19 @@ verify() {
 build_proxy() {
     info "building version.dll (proxy)"
     "$NASM" -f win64 "$BUILD/stubs.nasm" -o "$BUILD/stubs.obj"
-    "$CXX" "${COMMON[@]}" -I"$ROOT" \
+    "$CXX" "${COMMON[@]}" -std=c++17 -I"$ROOT" \
         -o "$ROOT/proxy/version.dll" \
-        "$ROOT/proxy/dllmain.cpp" "$BUILD/stubs.obj" "$ROOT/proxy/exports.def" \
+        "$ROOT"/proxy/*.cpp "$BUILD/stubs.obj" "$ROOT/proxy/exports.def" \
         -luser32
     verify "$ROOT/proxy/version.dll" "$STUB_COUNT"
 }
 
 build_script() {
     info "building script-engine.dll (plugin)"
-    "$CXX" "${COMMON[@]}" -I"$ROOT/plugin" -I"$ROOT" \
+    "$CXX" "${COMMON[@]}" -std=c++17 -I"$ROOT/plugin" -I"$ROOT" \
         -o "$ROOT/plugin/script-engine/script-engine.dll" \
-        "$ROOT/plugin/script-engine/script_plugin.cpp" \
-        -luser32 -lgdi32
+        "$ROOT"/plugin/script-engine/*.cpp \
+        -luser32 -lgdi32 -lws2_32
     verify "$ROOT/plugin/script-engine/script-engine.dll" 5
 }
 
