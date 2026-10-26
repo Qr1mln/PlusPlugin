@@ -884,6 +884,9 @@ class EventDialog(tk.Toplevel):
         self.title(title)
         self.pages: list[dict] = list(pages or [])
         self._page0 = str(event.get("page") or "")     # 本行已存的页面
+        # axure 稿里对话框只有 坐标/动作/备注，选择器与页面不再出现在界面上；
+        # 编辑老行时把原值原样带回去，避免静默丢掉脚本里已有的字段。
+        self._orig_selector = str(event.get("selector") or "").strip()
         self.resizable(False, False)
         self.result = None
         self._on_pick = on_pick
@@ -896,7 +899,6 @@ class EventDialog(tk.Toplevel):
         self.click_var = tk.StringVar(value=CLICK_LABELS.get(event.get("click", "left"), "左键单击"))
         self.delay_var = tk.StringVar(value=str(event.get("delay_ms", 0)))
         self.wheel_var = tk.StringVar(value=str(event.get("wheel", 0)))
-        self.sel_var = tk.StringVar(value=str(event.get("selector") or "").strip())
         self.note_var = tk.StringVar(value=event.get("remark", "") or "")
 
         body = ttk.Frame(self, padding=(12, 10))
@@ -941,43 +943,15 @@ class EventDialog(tk.Toplevel):
         add_row(act, 1, "间隔时间", self.delay_var, suffix="ms（点完后等）")
         add_row(act, 2, "滚轮格数", self.wheel_var, suffix="格（负 = 向下）")
 
-        # CSS 选择器
-        sel = ttk.LabelFrame(body, text="CSS 选择器（可选，走 CDP 点击；空 = 按坐标点）",
-                             padding=(10, 4))
-        sel.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        sel.columnconfigure(0, weight=1)
-        self.sel_entry = ttk.Entry(sel, textvariable=self.sel_var)
-        self.sel_entry.grid(row=0, column=0, sticky="ew", pady=3)
-        if self._on_test_selector is not None:
-            self.test_btn = ttk.Button(sel, text="测试选择器", width=12,
-                                       command=self._test_selector)
-            self.test_btn.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=3)
-
-        # 本行走哪张页（写进这一行的 page 字段）：宿主常开多张页（活动页 +
-        # 内部隐藏页），自动挑页会挑错，所以按行显式指定
-        if self.pages:
-            page_row = ttk.Frame(sel)
-            page_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-            page_row.columnconfigure(1, weight=1)
-            ttk.Label(page_row, text="页面", width=6).grid(row=0, column=0, sticky="w")
-            self.page_var = tk.StringVar()
-            self.page_combo = ttk.Combobox(
-                page_row, textvariable=self.page_var, state="readonly",
-                values=[page_label(p) for p in self.pages])
-            self.page_combo.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-            self.page_combo.current(self._start_page_index())
-            ttk.Label(sel, text="这一行的选择器按这张页面解析（空 = 跟随脚本默认页）",
-                      foreground="#777").grid(row=2, column=0, columnspan=2, sticky="w")
-
-        # 备注
+        # 备注（axure 稿：坐标 / 动作 / 备注 三块，选择器与页面已从界面去掉）
         note = ttk.LabelFrame(body, text="备注（只给人看，DLL 不读）", padding=(10, 4))
-        note.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        note.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         note.columnconfigure(0, weight=1)
         ttk.Entry(note, textvariable=self.note_var).grid(row=0, column=0, sticky="ew", pady=3)
 
         # 底部按钮：确定在右，Enter/Esc 也能用
         foot = ttk.Frame(body)
-        foot.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        foot.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         foot.columnconfigure(0, weight=1)
         ttk.Label(foot, text="Enter 确定　Esc 取消", foreground="#888").grid(
             row=0, column=0, sticky="w")
@@ -1032,36 +1006,6 @@ class EventDialog(tk.Toplevel):
         except tk.TclError:
             pass
 
-    def _test_selector(self):
-        """现场验证选择器（连 DLL 同一个 CDP 端口，只查询不点击）。"""
-        sel = self.sel_var.get().strip()
-        if not sel:
-            messagebox.showinfo("测试选择器", "先填一个 CSS 选择器", parent=self)
-            return
-        if self._on_test_selector is not None:
-            self._on_test_selector(sel, self.current_page(), self)
-
-    def _start_page_index(self) -> int:
-        """本行存过页面就选中它，否则用默认（跳过内部隐藏页）。"""
-        if self._page0:
-            for i, page in enumerate(self.pages):
-                url = page.get("url") or ""
-                if url == self._page0 or self._page0 in url:
-                    return i
-        return default_page_index(self.pages)
-
-    def current_page(self) -> str:
-        """下拉里选中的页面 URL（去当 CDP 选页子串），没选到就是空 = 自动。"""
-        idx = -1
-        if self.pages and getattr(self, "page_combo", None) is not None:
-            try:
-                idx = self.page_combo.current()
-            except tk.TclError:
-                idx = -1
-        if 0 <= idx < len(self.pages):
-            return self.pages[idx].get("url") or ""
-        return ""
-
     def _ok(self):
         try:
             event = {
@@ -1070,8 +1014,8 @@ class EventDialog(tk.Toplevel):
                 "click": LABEL_CLICKS.get(self.click_var.get(), "left"),
                 "delay_ms": int(float(self.delay_var.get() or 0)),
                 "wheel": int(float(self.wheel_var.get() or 0)),
-                "selector": self.sel_var.get().strip(),
-                "page": self.current_page(),
+                "selector": self._orig_selector,
+                "page": self._page0,
                 "remark": self.note_var.get().strip(),
             }
         except ValueError:
