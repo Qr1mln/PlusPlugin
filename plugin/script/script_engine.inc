@@ -45,6 +45,7 @@ struct ScriptEvent {
     int     wheel = 0;       // notches, negative scrolls down
     wchar_t text[kScriptText] = {};
     char    selector[128] = {};   // CSS selector: click the element over CDP
+    char    remark[256] = {};     // 备注：只在事件日志里打印（script: event i/n: 备注），不参与执行
 };
 
 struct Script {
@@ -328,6 +329,8 @@ static bool JsonParseEvent(JsonScan* s, ScriptEvent* ev) {
             else JsonSkip(s);
         } else if (_stricmp(key, "selector") == 0) {
             if (!JsonString(s, ev->selector, sizeof(ev->selector))) JsonSkip(s);
+        } else if (_stricmp(key, "remark") == 0) {
+            if (!JsonString(s, ev->remark, sizeof(ev->remark))) JsonSkip(s);
         } else {
             JsonSkip(s);
         }
@@ -1423,6 +1426,14 @@ static DWORD WINAPI ScriptRunThread(LPVOID) {
     for (int round = 1; round <= local.loop; ++round) {
         for (int i = 0; i < local.count; ++i) {
             const ScriptEvent& ev = local.events[i];
+            char evbuf[384] = {};
+            if (ev.remark[0]) {
+                sprintf_s(evbuf, "script: event %d/%d: %s",
+                          i + 1, local.count, ev.remark);
+            } else {
+                sprintf_s(evbuf, "script: event %d/%d", i + 1, local.count);
+            }
+            LogFromOverlay(evbuf);
             RunEventActions(ev, local.targetUrl);
 
             if (round == local.loop && i == local.count - 1) continue;

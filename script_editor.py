@@ -56,7 +56,8 @@ JSON 格式（DLL 侧读取的就是这一份）：
   delay_ms      本行执行完之后的等待（下一行开始前）
   wheel         滚轮格数：正=向上，负=向下，0=不滚；有 selector 时滚在元素上
                 （CDP deltaY = -100 * 格数，与 DLL 一致）
-  remark        备注，随便写（原 note 键已更名）；DLL 用 JsonSkip 跳过，只给人和编辑器看
+  remark        备注，随便写（原 note 键已更名）；DLL 在每个事件日志行里打印
+                （script: event i/n: 备注），不参与执行，只给人/编辑器看
   view_size     编辑器额外写的 [w,h]（保存时的 view 客户区），DLL 不认这个键，只用来提醒 view 尺寸变了坐标可能偏
 
                 注意：events 为空时 DLL 拒收（count>0 才算解析成功），会打
@@ -1996,7 +1997,11 @@ class App:
                         aborted = True
                         break
                     if loop > 1 or len(events) > 1:
-                        self.msg_queue.put("—— 第 %d 行 ——" % (first_index + offset))
+                        remark = str(ev.get("remark") or "").strip()
+                        line = "—— 第 %d 行 ——" % (first_index + offset)
+                        if remark:
+                            line += "  %s" % remark
+                        self.msg_queue.put(line)
                     last = (round_index == loop and offset == len(events) - 1)
                     self._run_event(ev, view, scale, last)
                 if aborted:
