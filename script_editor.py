@@ -1256,13 +1256,11 @@ DEFAULT_EVENTS = [
 class App:
     COLUMNS = (
         ("idx", "序号", 44, "center"),
-        ("pos", "坐标（逻辑 px）", 150, "center"),
-        ("click", "点击", 90, "center"),
-        ("delay", "间隔 ms", 78, "center"),
-        ("wheel", "滚轮", 60, "center"),
-        ("sel", "选择器", 200, "w"),
-        ("page", "页面", 140, "w"),
-        ("note", "备注", 140, "w"),
+        ("pos", "坐标", 96, "center"),
+        ("click", "行为", 104, "center"),
+        ("delay", "间隔(ms)", 126, "center"),
+        ("wheel", "滚轮", 122, "center"),
+        ("note", "备注", 234, "w"),
     )
 
     def __init__(self, root: tk.Tk):
@@ -1271,8 +1269,8 @@ class App:
         # Tk 的字体按 DPI 放大（150% 屏 scaling=2.0），几何/列宽也要同步放大，
         # 否则文字放大了而窗口没放大，布局会挤成一团。
         self.scale = self._ui_scale()
-        self.root.geometry("%dx%d" % (int(1000 * self.scale), int(800 * self.scale)))
-        self.root.minsize(int(820 * self.scale), int(600 * self.scale))
+        self.root.geometry("%dx%d" % (int(748 * self.scale), int(725 * self.scale)))
+        self.root.minsize(int(700 * self.scale), int(640 * self.scale))
 
         self.scripts_dir = os.path.join(os.environ.get("APPDATA", ""), "TTVoice", "scripts")
         os.makedirs(self.scripts_dir, exist_ok=True)
@@ -1342,66 +1340,35 @@ class App:
         outer = ttk.Frame(self.root, padding=8)
         outer.pack(fill="both", expand=True)
 
-        # --- 顶部：脚本文件 + 属性（两栏，挤不下就靠窗口最小宽度兜住）------
+        # --- 顶部：脚本列表 + 操作（Axure 稿：脚本列表下拉 + 刷新/新建/保存/删除）----
         top = self.top = ttk.Frame(outer)
         top.pack(fill="x")
-        top.columnconfigure(1, weight=1)
+        top.columnconfigure(0, weight=1)
 
-        files = ttk.LabelFrame(top, text="脚本", padding=(8, 4))
+        files = ttk.LabelFrame(top, text="脚本列表", padding=(8, 4))
         files.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(files, text="文件").pack(side="left")
         self.script_combo = ttk.Combobox(files, width=16, state="readonly")
         self.script_combo.pack(side="left", padx=(4, 6))
         self.script_combo.bind("<<ComboboxSelected>>", self._on_script_selected)
         ttk.Button(files, text="刷新", width=6, command=self.refresh_script_list).pack(side="left")
         ttk.Button(files, text="新建", width=6, command=self.new_script).pack(side="left", padx=(4, 0))
         ttk.Button(files, text="保存", width=6, command=self.save_script).pack(side="left", padx=(4, 0))
-        ttk.Button(files, text="另存为", width=8, command=self.save_script_as).pack(side="left", padx=(4, 0))
         ttk.Button(files, text="删除", width=6, command=self.delete_script).pack(side="left", padx=(4, 0))
 
-        meta = ttk.LabelFrame(top, text="属性", padding=(8, 4))
-        meta.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        # 名称 / 启动热键 / 循环次数 一行放完：三项都固定宽度，
-        # 多余空间给最右侧空列（窗口变窄时先压它，输入框不会被裁）
-        meta_row1 = ttk.Frame(meta)
-        meta_row1.pack(fill="x")
-        meta_row1.columnconfigure(7, weight=1)
-        ttk.Label(meta_row1, text="名称").grid(row=0, column=0, sticky="w")
-        ttk.Entry(meta_row1, textvariable=self.name_var, width=14).grid(
-            row=0, column=1, sticky="ew", padx=(4, 12))
-        ttk.Label(meta_row1, text="启动热键").grid(row=0, column=2, sticky="w")
-        ttk.Entry(meta_row1, textvariable=self.hotkey_var, width=6).grid(
-            row=0, column=3, sticky="w", padx=(4, 12))
-        ttk.Label(meta_row1, text="循环次数").grid(row=0, column=4, sticky="w")
-        ttk.Entry(meta_row1, textvariable=self.loop_var, width=4,
-                  validate="key",
-                  validatecommand=(self.root.register(lambda s: s.isdigit() or s == ""), "%P")
-                  ).grid(row=0, column=5, sticky="w", padx=(4, 0))
-        ttk.Label(meta_row1, text="空 = 不注册", foreground="#777").grid(
-            row=0, column=6, sticky="w", padx=(10, 0))
-
-
-        # --- 底部操作条（先占住，免得被会 expand 的窗格挤掉）---------------
+        # --- 底部操作条（Axure 稿：试跑/选中试跑/停止 | 清日志/刷新应用）----
         bottom = self.bottom = ttk.Frame(outer, padding=(0, 6))
         bottom.pack(side="bottom", fill="x")
         self.run_btn = ttk.Button(bottom, text="试跑", width=6, command=self.do_run)
         self.run_btn.pack(side="left")
-        ttk.Button(bottom, text="跑选中行", width=9, command=self.do_run_selected).pack(
+        ttk.Button(bottom, text="选中试跑", width=9, command=self.do_run_selected).pack(
             side="left", padx=(4, 0))
         self.stop_btn = ttk.Button(bottom, text="停止", width=6, command=self.do_stop,
                                    state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 10))
         ttk.Separator(bottom, orient="vertical").pack(side="left", fill="y", padx=(0, 10))
-        ttk.Button(bottom, text="刷新目标", width=9,
-                   command=lambda: self.refresh_target()).pack(side="left")
-        ttk.Button(bottom, text="页面结构", width=9, command=self.show_dom).pack(
-            side="left", padx=(4, 0))
-        ttk.Checkbutton(bottom, text="跟随 DLL 日志", variable=self.follow_var,
-                        command=self._on_follow_toggle).pack(side="left", padx=(10, 0))
-        ttk.Checkbutton(bottom, text="后台消息", variable=self.bg_msg_var).pack(
-            side="left", padx=(10, 0))
-        ttk.Button(bottom, text="清日志", width=7, command=self._clear_log).pack(
+        ttk.Button(bottom, text="清日志", width=7, command=self._clear_log).pack(side="left")
+        ttk.Button(bottom, text="刷新应用", width=9, command=self.refresh_target).pack(
             side="left", padx=(4, 0))
         ttk.Label(bottom, textvariable=self.status_var, foreground="#555",
                   anchor="e").pack(side="right", padx=(12, 0))
@@ -1448,13 +1415,13 @@ class App:
         # 执行日志：跑脚本时逐行输出 DLL 同字样的痕迹，[DLL] 前缀的是
         # DLL 自己写的行，两边可以直接逐行比对。
         logf = self.logf = ttk.LabelFrame(
-            paned, text="执行日志（字样与 DLL 一致，[DLL] 是从 %TEMP% 拉的）", padding=(6, 4))
+            paned, text="脚本日志", padding=(6, 4))
         paned.add(logf, weight=1)
         log_box_wrap = ttk.Frame(logf)
         log_box_wrap.pack(fill="both", expand=True)
         self.log_box = tk.Text(log_box_wrap, height=6, wrap="none", state="disabled",
                                font=("Consolas", 9), relief="flat",
-                               background="#1E1F26", foreground="#E3E7EE")
+                               background="#141414", foreground="#B3A981")
         log_scroll = ttk.Scrollbar(log_box_wrap, orient="vertical", command=self.log_box.yview)
         log_xscroll = ttk.Scrollbar(log_box_wrap, orient="horizontal", command=self.log_box.xview)
         self.log_box.configure(yscrollcommand=log_scroll.set, xscrollcommand=log_xscroll.set)
@@ -1549,8 +1516,6 @@ class App:
                 CLICK_LABELS.get(ev.get("click", "left"), "左键单击"),
                 ev.get("delay_ms", 0),
                 ev.get("wheel", 0),
-                sel if len(sel) <= 24 else sel[:23] + "…",
-                self._page_short(str(ev.get("page") or "")),
                 ev.get("remark", "") or "",
             ))
         over = len(self.events) > MAX_EVENTS
