@@ -945,7 +945,7 @@ class EventDialog(tk.Toplevel):
         add_row(act, 2, "滚轮格数", self.wheel_var, suffix="格（负 = 向下）")
 
         # 备注（axure 稿：坐标 / 动作 / 备注 三块，选择器与页面已从界面去掉）
-        note = ttk.LabelFrame(body, text="备注（只给人看，DLL 不读）", padding=(10, 4))
+        note = ttk.LabelFrame(body, text="备注", padding=(10, 4))
         note.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         note.columnconfigure(0, weight=1)
         ttk.Entry(note, textvariable=self.note_var).grid(row=0, column=0, sticky="ew", pady=3)
