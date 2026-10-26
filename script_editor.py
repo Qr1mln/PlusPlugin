@@ -40,10 +40,17 @@ JSON 格式（DLL 侧读取的就是这一份）：
                 在元素中心派发鼠标事件——事件走浏览器真实输入管线
                 （isTrusted=true），不需要目标窗口在前台、不怕被遮挡。CDP
                 不可用或页面里没有该元素时，回退到本行坐标的 SendInput 点击
-                （x/y 都是 0 视为「没拾取过」，跳过并打日志）。端口由
+                （x/y 都是 0 视为「没拾取过」，跳过并打日志）。勾了「后台消息」
+                后，选择器行也往 view 投鼠标消息：拿选择器解析出的位置换算成
+                view 坐标，PostMessage(WM_MOUSEMOVE/DOWN/UP)（不置前、不动光标，
+                某些页面只认落在窗口上的消息，CDP 派发过去 DOM 会触发 click 但
+                业务不响应）。换算只差一个 WebView 面板偏移，用「既有选择器又有
+                坐标」的行标定一次即可。端口由
                 version.dll 代理在宿主启动时布下（9223），编辑器试跑/测试
-                选择器连的是同一个端口。多页面时由 CDP 自动挑页（新页追加在
-                列表尾部，取最后一条）
+                选择器连的是同一个端口
+  page          可选，本行要走的 WebView 页面（URL 子串，来自 /json/list）。
+                编辑器试跑按它换页重连；空 = 用脚本默认页（最后一张「正经
+                页」，跳过 file:// / deviceid 那类内部隐藏页）
   hotkey        F1..F24 / 单个字母或数字；空 = 不注册（避免抢应用自己的键）
   loop          整份脚本重复执行的轮数
   delay_ms      本行执行完之后的等待（下一行开始前）
@@ -357,6 +364,35 @@ def post_click(view: int, px: int, py: int, kind: str) -> tuple[bool, str]:
     return True, "%d,%d" % (px, py)
 
 
+def make_lparam(x: int, y: int) -> int:
+    return ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+
+
+def post_click_message(view: int, px: int, py: int, kind: str) -> tuple[bool, str]:
+    """后台消息点击：往 view 直接投鼠标消息，不置前、不动光标、不看遮挡。
+
+    H5 弹层不一定理会合成消息（所以坐标行默认还是走 SendInput 的真实输入），
+    但 WebView 里的普通页面/原生控件通常认，而且能在后台跑。
+    """
+    if not user32.IsWindow(view):
+        return False, "view gone"
+    lp = make_lparam(px, py)
+    user32.PostMessageW(view, WM_MOUSEMOVE, 0, lp)
+    time.sleep(0.03)                      # 先移动，让 hover 状态落下
+    if kind == "right":
+        down, up, mk = WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON
+    else:
+        down, up, mk = WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON
+    user32.PostMessageW(view, WM_MOUSEMOVE, mk, lp)
+    user32.PostMessageW(view, down, mk, lp)
+    user32.PostMessageW(view, up, 0, lp)
+    if kind == "double":
+        time.sleep(DBLCLK_GAP_MS / 1000.0)
+        user32.PostMessageW(view, WM_LBUTTONDBLCLK, MK_LBUTTON, lp)
+        user32.PostMessageW(view, WM_LBUTTONUP, 0, lp)
+    return True, "%d,%d" % (px, py)
+
+
 def post_wheel(view: int, px: int, py: int, notches: int) -> tuple[bool, str]:
     """真实滚轮：光标移到点上下滚。返回 (是否发送, 信息)。"""
     if not notches:
@@ -394,6 +430,33 @@ CDP_QUERY_JS = (
     "var r=e.getBoundingClientRect();"
     "return JSON.stringify({found:1,x:r.left+r.width/2,y:r.top+r.height/2,"
     "w:r.width,h:r.height,vw:innerWidth,vh:innerHeight});})()"
+)
+
+
+# 导出页面结构：从 body 深度优先遍历，每个元素带上层级/标签/可用选择器/文本/
+# 位置，用来在编辑器里挑选择器（与 CDP_QUERY_JS 同一条 Runtime.evaluate 通道）
+CDP_DOM_JS = (
+    "(function(){var out=[],MAX=400,"
+    "NOISE={script:1,style:1,link:1,meta:1,noscript:1,template:1,head:1,title:1};"
+    "function one(e){if(e.id)return '#'+e.id;"
+    "var s=e.tagName.toLowerCase();"
+    "var c=(typeof e.className==='string'?e.className.trim():'').split(/\\s+/)"
+    ".filter(Boolean).slice(0,2);"
+    "if(c.length)s+='.'+c.join('.');return s;}"
+    "function walk(e,d){if(!e||out.length>=MAX)return;"
+    "if(e.nodeType===1){var tg=e.tagName.toLowerCase();"
+    "if(NOISE[tg])return;"                      # 噪声节点连子树一起跳过
+    "if(d>0){var r=e.getBoundingClientRect();"
+    "var t=(e.children.length?'':(e.innerText||e.textContent||''));"
+    "t=String(t).replace(/\\s+/g,' ').trim().slice(0,40);"
+    "out.push({d:d,tag:tg,id:e.id||'',"
+    "cls:(typeof e.className==='string'?e.className.trim():''),sel:one(e),"
+    "x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),"
+    "h:Math.round(r.height),tx:t});}"
+    "for(var i=0;i<e.children.length&&out.length<MAX;i++)walk(e.children[i],d+1);}}"
+    "walk(document.body,0);"
+    "return JSON.stringify({url:location.href,title:document.title,"
+    "vw:innerWidth,vh:innerHeight,n:out.length,items:out});})()"
 )
 
 
@@ -556,6 +619,37 @@ def cdp_query_selector(client: CdpClient, selector: str) -> dict:
     return json.loads(client.evaluate(CDP_QUERY_JS % json.dumps(selector)))
 
 
+# 应用自带的内部隐藏页（取 device id 用），DOM 没有可看的结构
+NOISE_PAGE_MARKS = ("deviceid",)
+
+
+def page_label(page: dict) -> str:
+    """下拉里显示的一行：标题 + 去掉 query 的 URL。"""
+    url = page.get("url") or ""
+    short = url.split("?", 1)[0]
+    if len(short) > 54:
+        short = short[:26] + "…" + short[-24:]
+    return "%s　%s" % (page.get("title") or "(无标题)", short)
+
+
+def default_page_index(pages: list[dict]) -> int:
+    """默认挑最后一个「正经页面」：内部隐藏页（file:// / deviceid）不算。"""
+    for i in range(len(pages) - 1, -1, -1):
+        url = (pages[i].get("url") or "").lower()
+        if url.startswith("file://") or any(m in url for m in NOISE_PAGE_MARKS):
+            continue
+        return i
+    return max(0, len(pages) - 1)
+
+
+def list_pages_safe() -> list[dict]:
+    """取页面列表；CDP 不通就返回空表（界面不该因为没连上而崩）。"""
+    try:
+        return CdpClient().list_pages()
+    except (OSError, CdpError, ValueError):
+        return []
+
+
 def cdp_mouse(client: CdpClient, mtype: str, x: float, y: float,
               button: str | None = None, click_count: int = 0) -> None:
     params: dict = {"type": mtype, "x": x, "y": y}
@@ -563,6 +657,18 @@ def cdp_mouse(client: CdpClient, mtype: str, x: float, y: float,
         params["button"] = button
         params["clickCount"] = click_count
     client.call("Input.dispatchMouseEvent", params)
+
+
+def cdp_hover(client: CdpClient, x: float, y: float, settle: float = 0.10) -> None:
+    """先把指针移到目标点并等 hover 落下。
+
+    不少页面的可点元素要 :hover / mouseenter 之后才渲染出来或挂上监听，
+    直接 press 就什么都不发生（表现为「点多少次都没用，鼠标移过去才灵」）。
+    """
+    cdp_mouse(client, "mouseMoved", x, y)     # 触发 hover / mouseenter
+    time.sleep(settle)                        # 等一帧渲染 + hover 过渡
+    cdp_mouse(client, "mouseMoved", x, y)     # 再动一次，让 hover 状态落地
+    time.sleep(0.03)
 
 
 def cdp_click_at(client: CdpClient, x: float, y: float, kind: int) -> None:
@@ -770,12 +876,14 @@ class PickOverlay(tk.Toplevel):
 
 # --- 事件编辑对话框 -------------------------------------------------------
 class EventDialog(tk.Toplevel):
-    FIELDS = ("x", "y", "click", "delay_ms", "wheel", "selector", "remark")
+    FIELDS = ("x", "y", "click", "delay_ms", "wheel", "selector", "page", "remark")
 
     def __init__(self, master, event: dict, on_pick, on_cancel=None,
-                 on_test_selector=None, title: str = "事件"):
+                 on_test_selector=None, title: str = "事件", pages=None):
         super().__init__(master)
         self.title(title)
+        self.pages: list[dict] = list(pages or [])
+        self._page0 = str(event.get("page") or "")     # 本行已存的页面
         self.resizable(False, False)
         self.result = None
         self._on_pick = on_pick
@@ -844,6 +952,22 @@ class EventDialog(tk.Toplevel):
             self.test_btn = ttk.Button(sel, text="测试选择器", width=12,
                                        command=self._test_selector)
             self.test_btn.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=3)
+
+        # 本行走哪张页（写进这一行的 page 字段）：宿主常开多张页（活动页 +
+        # 内部隐藏页），自动挑页会挑错，所以按行显式指定
+        if self.pages:
+            page_row = ttk.Frame(sel)
+            page_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+            page_row.columnconfigure(1, weight=1)
+            ttk.Label(page_row, text="页面", width=6).grid(row=0, column=0, sticky="w")
+            self.page_var = tk.StringVar()
+            self.page_combo = ttk.Combobox(
+                page_row, textvariable=self.page_var, state="readonly",
+                values=[page_label(p) for p in self.pages])
+            self.page_combo.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            self.page_combo.current(self._start_page_index())
+            ttk.Label(sel, text="这一行的选择器按这张页面解析（空 = 跟随脚本默认页）",
+                      foreground="#777").grid(row=2, column=0, columnspan=2, sticky="w")
 
         # 备注
         note = ttk.LabelFrame(body, text="备注（只给人看，DLL 不读）", padding=(10, 4))
@@ -915,7 +1039,28 @@ class EventDialog(tk.Toplevel):
             messagebox.showinfo("测试选择器", "先填一个 CSS 选择器", parent=self)
             return
         if self._on_test_selector is not None:
-            self._on_test_selector(sel, self)
+            self._on_test_selector(sel, self.current_page(), self)
+
+    def _start_page_index(self) -> int:
+        """本行存过页面就选中它，否则用默认（跳过内部隐藏页）。"""
+        if self._page0:
+            for i, page in enumerate(self.pages):
+                url = page.get("url") or ""
+                if url == self._page0 or self._page0 in url:
+                    return i
+        return default_page_index(self.pages)
+
+    def current_page(self) -> str:
+        """下拉里选中的页面 URL（去当 CDP 选页子串），没选到就是空 = 自动。"""
+        idx = -1
+        if self.pages and getattr(self, "page_combo", None) is not None:
+            try:
+                idx = self.page_combo.current()
+            except tk.TclError:
+                idx = -1
+        if 0 <= idx < len(self.pages):
+            return self.pages[idx].get("url") or ""
+        return ""
 
     def _ok(self):
         try:
@@ -926,6 +1071,7 @@ class EventDialog(tk.Toplevel):
                 "delay_ms": int(float(self.delay_var.get() or 0)),
                 "wheel": int(float(self.wheel_var.get() or 0)),
                 "selector": self.sel_var.get().strip(),
+                "page": self.current_page(),
                 "remark": self.note_var.get().strip(),
             }
         except ValueError:
@@ -936,6 +1082,166 @@ class EventDialog(tk.Toplevel):
                 event[key] = int(event[key])
         self.result = event
         self.destroy()
+
+
+# --- 页面结构窗口 ---------------------------------------------------------
+class DomWindow(tk.Toplevel):
+    """把 WebView 页面的 DOM 摊成一张表，方便挑选择器（CDP 读一次，离线筛选）。"""
+
+    COLUMNS = (
+        ("el", "元素（按层级缩进）", 240, "w"),
+        ("sel", "可用选择器", 250, "w"),
+        ("tx", "文本", 180, "w"),
+        ("pos", "位置 x,y　大小", 190, "center"),
+    )
+
+    def __init__(self, master, on_fill=None, on_refresh=None, pages=None):
+        super().__init__(master)
+        self.title("页面结构")
+        try:
+            s = max(1.0, float(self.winfo_fpixels("1i")) / 96.0)
+        except tk.TclError:
+            s = 1.0
+        self.geometry("%dx%d" % (int(940 * s), int(580 * s)))
+        self.minsize(int(600 * s), int(320 * s))
+        self.nodes: list[dict] = []
+        self._on_fill = on_fill
+        self._on_refresh = on_refresh
+        self.pages: list[dict] = list(pages or [])
+
+        body = ttk.Frame(self, padding=8)
+        body.pack(fill="both", expand=True)
+
+        head = ttk.Frame(body)
+        head.pack(fill="x")
+        # 宿主可能开了多个 WebView（真正的活动页 + 应用内部隐藏页），得能挑
+        self.page_var = tk.StringVar(value="")
+        self.page_combo = None
+        if self.pages:
+            ttk.Label(head, text="页面").pack(side="left")
+            self.page_combo = ttk.Combobox(head, width=40, state="readonly",
+                                           values=[page_label(p) for p in self.pages])
+            self.page_combo.pack(side="left", padx=(4, 10))
+            self.page_combo.current(default_page_index(self.pages))
+            self.page_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh())
+        ttk.Label(head, text="筛选").pack(side="left")
+        self.filter_var = tk.StringVar()
+        ttk.Entry(head, textvariable=self.filter_var, width=20).pack(side="left", padx=(4, 8))
+        self.filter_var.trace_add("write", lambda *_: self._fill_tree())
+        if self._on_refresh is not None:
+            ttk.Button(head, text="刷新", width=6, command=self._refresh).pack(side="left")
+        self.info_var = tk.StringVar(value="")
+        ttk.Label(head, textvariable=self.info_var, foreground="#555").pack(side="left", padx=(10, 0))
+
+        table = ttk.Frame(body)
+        table.pack(fill="both", expand=True, pady=(6, 0))
+        self.tree = ttk.Treeview(table, columns=[c[0] for c in self.COLUMNS],
+                                 show="headings", selectmode="browse")
+        for key, title, width, anchor in self.COLUMNS:
+            self.tree.heading(key, text=title)
+            self.tree.column(key, width=width, anchor=anchor,
+                             stretch=(key in ("el", "sel", "tx")))
+        yscroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=yscroll.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        self.tree.bind("<Double-1>", lambda _e: self.copy_selector())
+
+        foot = ttk.Frame(body)
+        foot.pack(fill="x", pady=(6, 0))
+        foot.columnconfigure(0, weight=1)
+        self.tip_var = tk.StringVar(value="双击一行 = 复制选择器到剪贴板")
+        ttk.Label(foot, textvariable=self.tip_var, foreground="#777").grid(
+            row=0, column=0, sticky="w")
+        ttk.Button(foot, text="复制选择器", width=12, command=self.copy_selector).grid(
+            row=0, column=1, padx=(6, 0))
+        if self._on_fill is not None:
+            ttk.Button(foot, text="填入选中行", width=12, command=self.fill_selected).grid(
+                row=0, column=2, padx=(6, 0))
+        ttk.Button(foot, text="关闭", width=8, command=self.destroy).grid(
+            row=0, column=3, padx=(6, 0))
+
+    # -- 页面 ---------------------------------------------------------------
+    def current_match(self) -> str:
+        """当前选中页面的完整 URL（拿去当 CDP 选页的子串）。"""
+        idx = -1
+        if self.page_combo is not None:
+            try:
+                idx = self.page_combo.current()
+            except tk.TclError:
+                idx = -1
+        if 0 <= idx < len(self.pages):
+            return self.pages[idx].get("url") or ""
+        return ""
+
+    def _refresh(self) -> None:
+        if self._on_refresh is not None:
+            self._on_refresh(self.current_match())
+
+    # -- 数据 ---------------------------------------------------------------
+    def load(self, data: dict) -> None:
+        self.nodes = list(data.get("items") or [])
+        url = data.get("url") or ""
+        self.title("页面结构 — %s" % (data.get("title") or url or "?"))
+        self.info_var.set("视口 %sx%s　节点 %d%s"
+                          % (data.get("vw", "?"), data.get("vh", "?"), data.get("n", 0),
+                             "（只取前 400 个）" if data.get("n", 0) >= 400 else ""))
+        self._fill_tree()
+
+    @staticmethod
+    def _match(node: dict, key: str) -> bool:
+        if not key:
+            return True
+        low = key.lower()
+        return (low in (node.get("tag") or "") or low in (node.get("id") or "")
+                or low in (node.get("cls") or "") or low in (node.get("tx") or "")
+                or low in (node.get("sel") or ""))
+
+    def _fill_tree(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        key = self.filter_var.get().strip()
+        shown = 0
+        for i, node in enumerate(self.nodes):
+            if not self._match(node, key):
+                continue
+            shown += 1
+            indent = "　" * max(0, int(node.get("d", 1)) - 1)
+            tag = node.get("tag") or ""
+            label = indent + tag + ("#" + node["id"] if node.get("id") else "")
+            rect = "%s,%s　%s×%s" % (node.get("x", "?"), node.get("y", "?"),
+                                     node.get("w", "?"), node.get("h", "?"))
+            self.tree.insert("", "end", iid=str(i), values=(
+                label, node.get("sel") or "", node.get("tx") or "", rect))
+        self.tip_var.set("显示 %d / %d 个节点（双击 = 复制选择器）"
+                         % (shown, len(self.nodes)))
+
+    def _selected_selector(self) -> str:
+        sel = self.tree.selection()
+        if not sel:
+            return ""
+        try:
+            return str(self.nodes[int(sel[0])].get("sel") or "")
+        except (ValueError, IndexError):
+            return ""
+
+    def copy_selector(self) -> None:
+        value = self._selected_selector()
+        if not value:
+            self.tip_var.set("先点一行，再复制")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.tip_var.set("已复制：%s" % value)
+
+    def fill_selected(self) -> None:
+        value = self._selected_selector()
+        if not value:
+            self.tip_var.set("先点一行，再填入")
+            return
+        if self._on_fill is not None:
+            self._on_fill(value, self.current_match())
 
 
 # --- 主窗口 ---------------------------------------------------------------
@@ -955,6 +1261,7 @@ class App:
         ("delay", "间隔 ms", 78, "center"),
         ("wheel", "滚轮", 60, "center"),
         ("sel", "选择器", 200, "w"),
+        ("page", "页面", 140, "w"),
         ("note", "备注", 140, "w"),
     )
 
@@ -987,6 +1294,11 @@ class App:
         self.follow_var = tk.BooleanVar(value=False)   # 只给勾选项用（Tk 线程）
         self.follow_on = False                         # 后台线程只读这个普通变量
         self.script_view_size: tuple[int, int] | None = None
+        self.pages: list[dict] = []                  # /json/list 的 WebView 页面
+        # 后台消息：选择器行用 PostMessage 往 view 投鼠标消息，不动光标不抢前台
+        self.bg_msg_var = tk.BooleanVar(value=True)       # 勾选项（Tk 线程）
+        self._bg_msg = True                               # 后台线程只读这个
+        self._page_origin: tuple[float, float] | None = None   # 页面 px → view px 偏移
 
         self.name_var = tk.StringVar(value="活动")
         self.hotkey_var = tk.StringVar(value="")
@@ -995,8 +1307,9 @@ class App:
 
         # 一次试跑共用一条 CDP 连接；失败一次后本轮不再重试（与 DLL 一致）
         self._cdp: CdpClient | None = None
+        self._cdp_page = ""                      # 当前连接对应的页面（换页要重连）
         self._cdp_failed = False
-        self._cdp_target = ""
+        self._cdp_target = ""                    # 脚本默认页（没写 page 的行用它）
 
         self._build()
         self.refresh_target(quiet=True)
@@ -1082,8 +1395,12 @@ class App:
         ttk.Separator(bottom, orient="vertical").pack(side="left", fill="y", padx=(0, 10))
         ttk.Button(bottom, text="刷新目标", width=9,
                    command=lambda: self.refresh_target()).pack(side="left")
+        ttk.Button(bottom, text="页面结构", width=9, command=self.show_dom).pack(
+            side="left", padx=(4, 0))
         ttk.Checkbutton(bottom, text="跟随 DLL 日志", variable=self.follow_var,
                         command=self._on_follow_toggle).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(bottom, text="后台消息", variable=self.bg_msg_var).pack(
+            side="left", padx=(10, 0))
         ttk.Button(bottom, text="清日志", width=7, command=self._clear_log).pack(
             side="left", padx=(4, 0))
         ttk.Label(bottom, textvariable=self.status_var, foreground="#555",
@@ -1187,6 +1504,7 @@ class App:
     # -- 目标窗口 ----------------------------------------------------------
     def refresh_target(self, quiet: bool = False) -> bool:
         self.target = find_target()
+        self._refresh_pages()
         if not quiet:
             self._status(self.target.describe())
         elif not self.target.ok:
@@ -1203,6 +1521,21 @@ class App:
             return False
         return True
 
+    # -- 页面（每行可指定走哪张 WebView）-----------------------------------
+    def _refresh_pages(self) -> None:
+        """拉一次 /json/list；页面结构与「按行选页」都用它。"""
+        self.pages = list_pages_safe()
+
+    def _page_short(self, url: str) -> str:
+        """表格里显示的页面名：能对上就显示标题，否则显示 URL 尾巴。"""
+        if not url:
+            return "默认"
+        for page in self.pages:
+            if (page.get("url") or "") == url:
+                return page.get("title") or url.split("?", 1)[0].rsplit("/", 1)[-1]
+        short = url.split("?", 1)[0]
+        return ("…" + short[-26:]) if len(short) > 28 else short
+
     # -- 表格 --------------------------------------------------------------
     def render_table(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -1217,6 +1550,7 @@ class App:
                 ev.get("delay_ms", 0),
                 ev.get("wheel", 0),
                 sel if len(sel) <= 24 else sel[:23] + "…",
+                self._page_short(str(ev.get("page") or "")),
                 ev.get("remark", "") or "",
             ))
         over = len(self.events) > MAX_EVENTS
@@ -1266,13 +1600,16 @@ class App:
             oy = ev.pop("oy", 0) or 0
             ev["x"] = self._shift(ev.get("x", 0), ox)
             ev["y"] = self._shift(ev.get("y", 0), oy)
+            # page：本行走哪张 WebView 页（空 = 跟随脚本默认页）
+            ev["page"] = str(ev.get("page") or "").strip()
 
     def add_manual(self) -> None:
         bx, by = self._last_xy()
         ev = {"x": bx, "y": by, "click": "left",
-              "delay_ms": 0, "wheel": 0, "selector": "", "remark": ""}
+              "delay_ms": 0, "wheel": 0, "selector": "", "page": "", "remark": ""}
         dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
-                             on_test_selector=self.test_selector, title="新增事件")
+                             on_test_selector=self.test_selector, title="新增事件",
+                             pages=list_pages_safe())
         self.root.wait_window(dialog)
         if dialog.result:
             self._add_event(dialog.result)
@@ -1285,7 +1622,8 @@ class App:
         ev = dict(self.events[idx])
         dialog = EventDialog(self.root, ev, self.start_pick, self._end_pick,
                              on_test_selector=self.test_selector,
-                             title="修改第 %d 行" % (idx + 1))
+                             title="修改第 %d 行" % (idx + 1),
+                             pages=list_pages_safe())
         self.root.wait_window(dialog)
         if dialog.result:
             # 只替换这一行，其余行原样不动
@@ -1476,6 +1814,11 @@ class App:
             item["remark"] = str(item.get("remark") or "").strip()
             # selector 同理补齐（空 = 本行走坐标点击），DLL 认这个键
             item["selector"] = str(item.get("selector") or "").strip()
+            # page：本行要走的 WebView 页面（URL 子串）；空 = 跟随脚本默认页，
+            # 空着就不写进 JSON，保持文件干净
+            page = str(item.pop("page", "") or "").strip()
+            if page:
+                item["page"] = page
             events.append(item)
         data = {
             "version": 1,
@@ -1692,10 +2035,17 @@ class App:
         loop = min(MAX_LOOP, max(1, loop))
         self.stop_evt = threading.Event()
         self.running = True
-        # 一次试跑共用一条 CDP 连接（目标页由 CDP 自动挑）
-        self._cdp = CdpClient()
+        # 一次试跑共用一条 CDP 连接。这里不能预先 new 一个未连接的 client：
+        # _cdp_ensure 只判断 is not None，一旦预建就会跳过真正 connect，
+        # 后面发命令直接报 not connected。
+        self._cdp = None
+        self._cdp_page = ""
         self._cdp_failed = False
-        self._cdp_target = ""
+        self._cdp_target = self._cdp_pick_target()   # 没写 page 的行用这张页
+        self._bg_msg = bool(self.bg_msg_var.get())           # Tk 变量不能在线程里读
+        self._page_origin = None                     # 页面 px → view px 的偏移，每轮重标定
+        if self._cdp_target:
+            self._log("cdp: 试跑目标页 = %s" % self._cdp_target.split("?", 1)[0])
         self.run_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         threading.Thread(target=self._job_thread,
@@ -1748,15 +2098,29 @@ class App:
                 self._cdp = None
 
     # -- CDP（选择器行）：与 DLL RunEventActions 的分支、日志逐字对齐 ------
-    def _cdp_ensure(self) -> bool:
-        """懒连接；失败一次本轮不重试（DLL CdpEnsure 同策略）。"""
-        if self._cdp is not None:
+    def _cdp_pick_target(self) -> str:
+        """脚本默认打哪张页：最后一张「正经页」（跳过内部隐藏页），
+        拿不到列表就交给 CDP 自动挑（空串）。"""
+        pages = list_pages_safe()
+        if not pages:
+            return ""
+        return pages[default_page_index(pages)].get("url") or ""
+
+    def _cdp_ensure(self, match: str = "") -> bool:
+        """懒连接；本行指定了别的页面就断开换页重连。
+
+        失败一次本轮不重试（DLL CdpEnsure 同策略）。
+        """
+        if self._cdp is not None and self._cdp_page == match:
             return True
+        if self._cdp is not None:      # 换页：先关掉旧连接
+            self._cdp.close()
+            self._cdp = None
         if self._cdp_failed:
             return False
         client = CdpClient()   # 断线重连：旧实例已被 _cdp_query 清掉
         try:
-            url = client.connect(self._cdp_target)
+            url = client.connect(match)
         except (OSError, CdpError, ValueError) as exc:
             client.close()
             self._cdp_failed = True
@@ -1764,6 +2128,13 @@ class App:
                 "script: cdp unavailable (%s) - selector rows fall back to x/y" % exc)
             return False
         self._cdp = client
+        self._cdp_page = match
+        # 让页面一直当自己是有焦点的：宿主从前台切走时，页面会进入后台节流，
+        # 派发过去的输入要等真正有输入事件才处理（表现为“点了没反应”）
+        try:
+            client.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+        except (OSError, CdpError, ValueError):
+            pass
         self.msg_queue.put('script: cdp connect ok target="%s"' % url)
         return True
 
@@ -1790,14 +2161,22 @@ class App:
         if not rc.get("found") or rc.get("w", 0) < 0.5 or rc.get("h", 0) < 0.5:
             return False
         try:
-            cdp_click_at(self._cdp, rc["x"], rc["y"], kind)
+            x, y = rc["x"], rc["y"]
+            # 先 hover 再点：Vue/React 页面里不少可点元素要 mouseenter 之后才
+            # 渲染出来或挂上监听，直接 press 会「点了没反应」
+            cdp_hover(self._cdp, x, y)
+            rc2 = self._cdp_query(selector)     # hover 后布局可能变，重新定位
+            if rc2 is not None and rc2.get("found") \
+                    and rc2.get("w", 0) >= 0.5 and rc2.get("h", 0) >= 0.5:
+                x, y = rc2["x"], rc2["y"]
+            cdp_click_at(self._cdp, x, y, kind)
         except (OSError, CdpError) as exc:
             self.msg_queue.put('script: cdp "%s" input failed (%s)'
                                % (selector[:40], exc))
             return False
         self.msg_queue.put(
             'script: cdp click kind=%d "%s" %.0f,%.0f (page px, trusted input)'
-            % (kind, selector[:40], rc["x"], rc["y"]))
+            % (kind, selector[:40], x, y))
         return True
 
     def _cdp_wheel(self, selector: str, notches: int) -> bool:
@@ -1816,11 +2195,67 @@ class App:
                            % (notches, selector[:40], rc["x"], rc["y"]))
         return True
 
-    def test_selector(self, selector: str, parent: tk.Toplevel) -> None:
+    def show_dom(self) -> None:
+        """开一个窗口把 WebView 页面的 DOM 摊成表，用来挑选择器。"""
+        try:
+            pages = CdpClient().list_pages()
+        except (OSError, CdpError, ValueError) as exc:
+            messagebox.showerror(
+                "页面结构",
+                "连不上 CDP（%s:%d）：%s\n\n确认 TT语音 已启动、version.dll 代理已布好端口"
+                % (CDP_HOST, CDP_PORT, exc), parent=self.root)
+            return
+        if not pages:
+            messagebox.showwarning("页面结构", "CDP 上还没有页面（%s:%d）"
+                                   % (CDP_HOST, CDP_PORT), parent=self.root)
+            return
+        # 宿主常开多张页（活动页 + 应用内部隐藏页），所以让用户自己挑
+        win = DomWindow(self.root, on_fill=self.set_selector_selected,
+                        on_refresh=lambda match: self._dom_fill(win, match),
+                        pages=pages)
+        self._dom_fill(win, win.current_match())
+
+    def _dom_fill(self, win: DomWindow, match: str = "") -> None:
+        """连一次 CDP 抓页面结构（连接 + 求值通常几百毫秒，直接同步做）。"""
+        if not win.winfo_exists():
+            return
+        client = CdpClient()
+        try:
+            url = client.connect(match)
+            data = json.loads(client.evaluate(CDP_DOM_JS))
+        except (OSError, CdpError, ValueError) as exc:
+            messagebox.showerror(
+                "页面结构",
+                "读不到页面（CDP %s:%d）：%s\n\n确认 TT语音 已启动、version.dll 代理已布好端口"
+                % (CDP_HOST, CDP_PORT, exc), parent=self.root)
+            return
+        finally:
+            client.close()
+        win.load(data)
+        win.lift()
+        self._log("dom: %s　%d 个节点" % (url or data.get("url", ""), data.get("n", 0)))
+        self._status("页面结构已读取：%d 个节点" % data.get("n", 0))
+
+    def set_selector_selected(self, selector: str, page: str = "") -> None:
+        """页面结构窗口里的「填入选中行」：写进当前行的 selector，顺便记下页面。"""
+        idx = self._selected_index()
+        if idx is None:
+            self._status("先在事件表里选中一行，再填选择器")
+            return
+        self.events[idx]["selector"] = selector
+        if page:
+            self.events[idx]["page"] = page
+        self.dirty = True
+        self.render_table()
+        self.tree.selection_set(str(idx))
+        self._status("第 %d 行：选择器 = %s，页面 = %s"
+                     % (idx + 1, selector, self._page_short(page) if page else "默认"))
+
+    def test_selector(self, selector: str, page: str, parent: tk.Toplevel) -> None:
         """事件对话框里的「测试选择器」：连 DLL 同一端口，只查询不点击。"""
         client = CdpClient()
         try:
-            client.connect("")
+            client.connect(page)
             rc = cdp_query_selector(client, selector)
             if rc.get("found"):
                 messagebox.showinfo(
@@ -1847,8 +2282,12 @@ class App:
         wheel = int(ev.get("wheel") or 0)
         kind = ev.get("click", "left")
         kind_n = CLICK_KINDS.get(kind, 0)
-        # 与 DLL RunEventActions 同一分支：有选择器先走 CDP，失败回退坐标
-        cdp = bool(selector) and self._cdp_ensure()
+        picked = lx != 0 or ly != 0          # 0,0 / -1,-1 都算「没拾取过」
+
+        # 与 DLL RunEventActions 同一分支：有选择器先走 CDP，失败回退坐标。
+        # 本行写了 page 就按那张页解析（换页会重连），没写就用脚本默认页。
+        page = str(ev.get("page") or "").strip() or self._cdp_target
+        cdp = bool(selector) and self._cdp_ensure(page)
 
         if wheel:
             if selector and cdp:
@@ -1857,7 +2296,33 @@ class App:
             else:
                 self._post_wheel_legacy(view, px, py, wheel)
 
-        if not selector:
+        # 「后台消息」模式：某些页面的交互元素只认落在窗口上的鼠标消息——CDP
+        # 派发过去 DOM 的 click 会触发，但业务不响应。这时把选择器解析出来的
+        # 位置换算成 view 坐标，往 view 投 WM_MOUSEMOVE/DOWN/UP（不置前、不动
+        # 光标）。页面 CSS px 与 view 逻辑 px 同单位，只差一个 WebView 面板的
+        # 偏移，用「既有选择器又有坐标」的行标定一次即可（本轮试跑内有效）。
+        if self._bg_msg and selector:
+            rc = self._cdp_query(selector) if cdp else None
+            if rc is not None and rc.get("found"):
+                if picked:
+                    self._page_origin = (lx - rc["x"], ly - rc["y"])   # 标定偏移
+                    self._post_click_msg(view, px, py, kind, kind_n)
+                elif self._page_origin is not None:
+                    ex = int((rc["x"] + self._page_origin[0]) * scale)
+                    ey = int((rc["y"] + self._page_origin[1]) * scale)
+                    self._post_click_msg(view, ex, ey, kind, kind_n)
+                else:
+                    self.msg_queue.put(
+                        'script: cdp "%s" bg message needs one picked x/y to '
+                        'calibrate, falls back to cdp click' % selector[:40])
+                    self._cdp_click(selector, kind_n)
+            elif picked:                       # 页面里没这个元素，按坐标点
+                self._post_click_msg(view, px, py, kind, kind_n)
+            else:
+                self.msg_queue.put(
+                    'script: cdp "%s" not found and no x/y fallback, skipped'
+                    % selector[:40])
+        elif not selector:
             self._post_click_legacy(view, px, py, kind, kind_n)
         elif cdp and self._cdp_click(selector, kind_n):
             pass
@@ -1893,6 +2358,15 @@ class App:
         else:
             self.msg_queue.put("script: click skipped, covered by %s"
                                "（把 TTVoice 窗口露出来再跑）" % info)
+
+    def _post_click_msg(self, view: int, px: int, py: int, kind: str,
+                        kind_n: int) -> None:
+        ok, info = post_click_message(view, px, py, kind)
+        if ok:
+            self.msg_queue.put("script: click kind=%d %s (bg message)"
+                               % (kind_n, info))
+        else:
+            self.msg_queue.put("script: click skipped, view gone")
 
     def _check_view_size(self, w: int, h: int) -> None:
         recorded = self.script_view_size
