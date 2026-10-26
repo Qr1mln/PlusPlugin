@@ -69,7 +69,7 @@ script: cdp unavailable (no page target on 127.0.0.1:9223) - selector rows fall 
 | `proxy/dllmain.cpp` | `EnableWebView2Cdp()`：DllMain 里追加调试端口参数（kernel32-only，无 loader-lock 风险）；PayloadThread 打一行 `webview2 cdp args: …` |
 | `plugin/script-engine/script_engine.inc` | CDP 节（连接/选页/evaluate/dispatch）+ `RunEventActions`（wheel→paste→click 的 CDP/坐标统一分派）+ selector/target_url 解析 |
 | `plugin/script-engine/script_plugin.cpp` | ActEvent 改调 `RunEventActions`；RunNow 里 `CdpRunBegin`（每轮一次重连机会）；shutdown 时 `CdpShutdown`；版本 0.4.0 |
-| `script_editor.py` | `CdpClient`（纯标准库 WS 客户端）+ 事件对话框 selector 字段/「测试选择器」按钮 + 脚本级 目标页URL 输入 + 试跑镜像 |
+| `../script_editor.py` | `CdpClient`（纯标准库 WS 客户端）+ 事件对话框 selector 字段/「测试选择器」按钮 + 脚本级 目标页URL 输入 + 试跑镜像 |
 | `plugin/script-engine/test_cdp.cpp` | C++ 侧验证工具（见下） |
 
 ## 怎么验证（本机即可复跑）
