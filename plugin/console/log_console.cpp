@@ -135,8 +135,8 @@ bool IsWarn(const wchar_t* s) {
 }
 
 void LogLine(const char* text) {
-    if (g_host != nullptr && g_host->log != nullptr) {
-        g_host->log(text);
+    if (g_host != nullptr && g_host->publishLog != nullptr) {
+        g_host->publishLog(text);
     }
 }
 
@@ -932,10 +932,10 @@ int __cdecl OnPluginInit(const Host* host) {
     if (host == nullptr) return ERR_PARAM;
     if (host->abi != P_ABI) return ERR_PARAM;
 
-    // addLogSink sits after query in the table. Refuse instead of reading past
+    // subscribeLog sits at the end of the table. Refuse instead of reading past
     // the end of an older framework build.
     if (host->structSize < sizeof(Host)) {
-        if (host->log != nullptr) host->log("console: framework too old");
+        if (host->publishLog != nullptr) host->publishLog("console: framework too old");
         g_host = nullptr;
         return ERR_STATE;
     }
@@ -943,7 +943,7 @@ int __cdecl OnPluginInit(const Host* host) {
     if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
             __uuidof(IDWriteFactory),
             reinterpret_cast<IUnknown**>(g_dw.GetAddressOf())))) {
-        if (host->log != nullptr) host->log("console: DWrite factory failed");
+        if (host->publishLog != nullptr) host->publishLog("console: DWrite factory failed");
         g_host = nullptr;
         return ERR_STATE;
     }
@@ -953,7 +953,7 @@ int __cdecl OnPluginInit(const Host* host) {
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL, kFontSize * g_scale, L"en-us",
             g_fmt.GetAddressOf()))) {
-        if (host->log != nullptr) host->log("console: text format failed");
+        if (host->publishLog != nullptr) host->publishLog("console: text format failed");
         g_dw.Reset();
         g_host = nullptr;
         return ERR_STATE;
@@ -967,7 +967,7 @@ int __cdecl OnPluginInit(const Host* host) {
             DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL, kFontSize * g_scale, L"en-us",
             g_titleFmt.GetAddressOf()))) {
-        if (host->log != nullptr) host->log("console: title format failed");
+        if (host->publishLog != nullptr) host->publishLog("console: title format failed");
         g_fmt.Reset();
         g_dw.Reset();
         g_host = nullptr;
@@ -977,16 +977,16 @@ int __cdecl OnPluginInit(const Host* host) {
     g_titleFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     g_titleFmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
-    const int sinkRc = host->addLogSink(&OnLogLine, nullptr);
+    const int sinkRc = host->subscribeLog(&OnLogLine, nullptr);
     if (sinkRc != P_OK) {
-        if (host->log != nullptr) host->log("console: log sink rejected");
+        if (host->publishLog != nullptr) host->publishLog("console: log sink rejected");
         g_fmt.Reset();
         g_dw.Reset();
         g_host = nullptr;
         return sinkRc;
     }
 
-    host->log("console: attached, panel is its own window");
+    host->publishLog("console: attached, panel is its own window");
     return P_OK;
 }
 

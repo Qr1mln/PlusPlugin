@@ -21,7 +21,7 @@
 
 #include "engine.h"
 
-#include "../../third_party/nlohmann/json.hpp"
+#include "../../libs/nlohmann/json.hpp"
 
 namespace sched {
 namespace {

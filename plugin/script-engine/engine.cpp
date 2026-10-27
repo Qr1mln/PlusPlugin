@@ -3,7 +3,7 @@
 //
 // 线程模型（全部 std::thread）：
 //   exec 线程   等命令队列（condition_variable）→ load/play/stop
-//   log  线程   等日志队列 → 转发 host->log 并推给 TCP 客户端
+//   log  线程   等日志队列 → 转发 host->publishLog 并推给 TCP 客户端
 //   两个线程都在 se::Shutdown 里 join，没有全局 HANDLE/CRITICAL_SECTION。
 // ============================================================================
 #include "engine.h"
@@ -19,7 +19,7 @@
 
 #include "schedule.h"
 
-#include "../../third_party/nlohmann/json.hpp"
+#include "../../libs/nlohmann/json.hpp"
 
 namespace se {
 namespace {
@@ -66,8 +66,8 @@ void LogLoop() {
             if (item.raw) {
                 tcp::Send(item.payload);
             } else {
-                if (g_host != nullptr && g_host->log != nullptr) {
-                    g_host->log(item.payload.c_str());
+                if (g_host != nullptr && g_host->publishLog != nullptr) {
+                    g_host->publishLog(item.payload.c_str());
                 }
                 tcp::Send(JsonLogFrame(item.payload));
             }

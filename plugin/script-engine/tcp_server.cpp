@@ -14,7 +14,7 @@
 #include <thread>
 #include <utility>
 
-#include "../../third_party/nlohmann/json.hpp"
+#include "../../libs/nlohmann/json.hpp"
 
 namespace tcp {
 namespace {

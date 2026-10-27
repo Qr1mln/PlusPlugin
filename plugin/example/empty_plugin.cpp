@@ -18,7 +18,7 @@ static int __cdecl OnPluginInit(const Host* host) {
     if (host == nullptr || host->abi != P_ABI) {
         return ERR_PARAM;
     }
-    host->log("empty: init");
+    host->publishLog("empty: init");
     return P_OK;
 }
 
@@ -31,8 +31,8 @@ static int __cdecl OnPluginTick(void) {
 // @brief Single cleanup point. DllMain must stay empty.
 // @return P_OK so the framework may FreeLibrary us.
 static int __cdecl OnPluginShutdown(void) {
-    if (g_host != nullptr && g_host->log != nullptr) {
-        g_host->log("empty: shutdown");
+    if (g_host != nullptr && g_host->publishLog != nullptr) {
+        g_host->publishLog("empty: shutdown");
     }
     g_host = nullptr;
     return P_OK;

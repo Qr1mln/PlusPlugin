@@ -74,7 +74,7 @@ void Shutdown();                // 停线程；调用前先 tcp::Stop()
 const Host* GetHost();          // init 之前 / shutdown 之后为 null
 bool Quitting();                // 全局退出标志
 
-// -- 日志：任意线程可调，只入队，由日志线程转发给 host->log 与客户端 --------
+// -- 日志：任意线程可调，只入队，由日志线程转发给 host->publishLog 与客户端 ----
 void Log(const char* fmt, ...);
 void SendRaw(const std::string& json_frame);   // 原样推一帧（done/stopped）
 

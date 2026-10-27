@@ -47,13 +47,13 @@ int __cdecl OnPluginInit(const Host* host) {
     if (host == nullptr || host->abi != P_ABI) return ERR_PARAM;
     SetUnhandledExceptionFilter(CrashFilter);
     if (!se::Start(host)) {
-        if (host->log != nullptr) host->log("script-engine: 引擎线程启动失败");
+        if (host->publishLog != nullptr) host->publishLog("script-engine: 引擎线程启动失败");
         return ERR_STATE;
     }
     tcp::Start();
     sched::Start();
-    if (host->log != nullptr) {
-        host->log("script-engine: 进程内引擎已启动（TCP 127.0.0.1:47800）");
+    if (host->publishLog != nullptr) {
+        host->publishLog("script-engine: 进程内引擎已启动（TCP 127.0.0.1:47800）");
     }
     return P_OK;
 }
