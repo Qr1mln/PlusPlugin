@@ -30,10 +30,7 @@ namespace plugins {
 // let a tampered ini load code from any directory.
 // ---------------------------------------------------------------------------
 static const wchar_t* const kPluginsRootFormat = L"%s\\TTVoice\\plugins";
-static const wchar_t* const kManifestNameW = L"plugin.json";
 static const wchar_t* const kControlNameW  = L"control.txt";
-static const char* const    kManifestName  = "plugin.json";
-static const wchar_t       kDisabledPrefix = L'_';
 static const int            kControlLineChars = 128;
 
 // Hot reload cadence. The quiet period is what keeps a half written dll (a
@@ -45,9 +42,6 @@ static const int kReloadRetryMs   = 2000;
 static const int kReloadMaxRetries = 3;
 
 using GetDescFn = const Desc* (__cdecl *)(void);
-
-// Manifest text reuse. Loader thread only, so a single buffer is enough.
-static char s_manifestBuf[kManifestMaxBytes];
 
 // ---------------------------------------------------------------------------
 // Path helpers.
@@ -89,94 +83,7 @@ static bool IsSafeRelativeName(const char* name) {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal flat JSON reader. plugin.json is a flat object written by us, so a
-// full parser is unnecessary and would duplicate the plugin side of the
-// codebase.
-// ---------------------------------------------------------------------------
-static const char* JsonFindValue(const char* json, const char* key) {
-    if (json == nullptr || key == nullptr) {
-        return nullptr;
-    }
-    const size_t keyLen = strlen(key);
-    const char* cursor = json;
-    while ((cursor = strchr(cursor, '"')) != nullptr) {
-        const char* name = cursor + 1;
-        const char* nameEnd = strchr(name, '"');
-        if (nameEnd == nullptr) {
-            return nullptr;
-        }
-        cursor = nameEnd + 1;
-
-        const bool sameKey = (static_cast<size_t>(nameEnd - name) == keyLen) &&
-                             (strncmp(name, key, keyLen) == 0);
-        if (!sameKey) {
-            continue;
-        }
-
-        const char* colon = strchr(nameEnd, ':');
-        if (colon == nullptr) {
-            return nullptr;
-        }
-        // A quote between this key and the colon means nameEnd closed a value,
-        // not a key: keep scanning instead of returning the wrong field.
-        const char* nextQuote = strchr(nameEnd + 1, '"');
-        if (nextQuote != nullptr && nextQuote < colon) {
-            continue;
-        }
-        ++colon;
-        while (*colon == ' ' || *colon == '\t' || *colon == '\r' || *colon == '\n') {
-            ++colon;
-        }
-        return colon;
-    }
-    return nullptr;
-}
-
-static bool JsonReadString(const char* json, const char* key, char* out, int cap) {
-    if (out == nullptr || cap <= 0) {
-        return false;
-    }
-    out[0] = 0;
-    const char* value = JsonFindValue(json, key);
-    if (value == nullptr || *value != '"') {
-        return false;
-    }
-    ++value;
-    int len = 0;
-    while (*value != 0 && *value != '"' && len < cap - 1) {
-        if (*value == '\\' && value[1] != 0) {
-            ++value;  // good enough for our own manifests
-        }
-        out[len++] = *value++;
-    }
-    out[len] = 0;
-    return len > 0;
-}
-
-static int JsonReadInt(const char* json, const char* key, int fallback) {
-    const char* value = JsonFindValue(json, key);
-    if (value == nullptr) {
-        return fallback;
-    }
-    return atoi(value);
-}
-
-static bool JsonReadBool(const char* json, const char* key, bool fallback) {
-    const char* value = JsonFindValue(json, key);
-    if (value == nullptr) {
-        return fallback;
-    }
-    if (_strnicmp(value, "true", 4) == 0) {
-        return true;
-    }
-    if (_strnicmp(value, "false", 5) == 0) {
-        return false;
-    }
-    return fallback;
-}
-
-// ---------------------------------------------------------------------------
-// Manifest.
+// File read.
 // ---------------------------------------------------------------------------
 static bool ReadTextFile(const wchar_t* path, char* out, int cap, int* outLen) {
     if (path == nullptr || out == nullptr || cap <= 0) {
@@ -197,65 +104,6 @@ static bool ReadTextFile(const wchar_t* path, char* out, int cap, int* outLen) {
         *outLen = static_cast<int>(got);
     }
     return true;
-}
-
-// Derives "name.dll" from the directory name when plugin.json is absent.
-static void DefaultDllName(PluginSlot* slot) {
-    if (slot == nullptr) {
-        return;
-    }
-    const wchar_t* base = wcsrchr(slot->dir, L'\\');
-    if (base == nullptr) {
-        return;
-    }
-    ++base;
-    wchar_t leaf[kPathChars] = {};
-    swprintf_s(leaf, L"%s.dll", base);
-    WideToUtf8(leaf, slot->dllName, kPathChars);
-
-    char narrow[kPathUtf8] = {};
-    WideToUtf8(base, narrow, kPathUtf8);
-    strcpy_s(slot->name, static_cast<size_t>(sizeof(slot->name)), narrow);
-}
-
-static void ReadPluginManifest(int index) {
-    if (index < 0 || index >= g_slotCount) {
-        return;
-    }
-    PluginSlot& slot = g_slots[index];
-    DefaultDllName(&slot);
-
-    wchar_t manifest[kPathChars] = {};
-    swprintf_s(manifest, L"%s\\%s", slot.dir, kManifestNameW);
-    if (!ReadTextFile(manifest, s_manifestBuf, kManifestMaxBytes, nullptr)) {
-        Log("plugin: %s has no %s, will use %s", slot.dirUtf8, kManifestName,
-            slot.dllName);
-        return;
-    }
-
-    char text[kTextShort] = {};
-    if (JsonReadString(s_manifestBuf, "dll", text, static_cast<int>(sizeof(text)))) {
-        strcpy_s(slot.dllName, static_cast<size_t>(sizeof(slot.dllName)), text);
-    }
-    if (JsonReadString(s_manifestBuf, "name", text, static_cast<int>(sizeof(text)))) {
-        strcpy_s(slot.name, static_cast<size_t>(sizeof(slot.name)), text);
-    }
-    if (JsonReadString(s_manifestBuf, "version", text, static_cast<int>(sizeof(text)))) {
-        strcpy_s(slot.version, static_cast<size_t>(sizeof(slot.version)), text);
-    }
-
-    slot.priority = JsonReadInt(s_manifestBuf, "priority", 0);
-    slot.autoLoad = JsonReadBool(s_manifestBuf, "enabled", true);
-    if (!slot.autoLoad) {
-        slot.state = PluginState::kDisabled;
-    }
-
-    // sha256 is parsed from M3 on; the field is tolerated now so manifests do
-    // not have to change when the trust chain lands.
-    char digest[kTextShort] = {};
-    if (!JsonReadString(s_manifestBuf, "sha256", digest, static_cast<int>(sizeof(digest)))) {
-        Log("plugin: %s has no sha256 (trust check arrives in M3)", slot.dirUtf8);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,50 +337,6 @@ static void RunPendingTasks() {
 // ---------------------------------------------------------------------------
 // Scan.
 // ---------------------------------------------------------------------------
-static int CollectDirectories(const wchar_t* root, wchar_t names[][kPathChars],
-                              int maxCount) {
-    wchar_t pattern[kPathChars] = {};
-    swprintf_s(pattern, L"%s\\*", root);
-
-    WIN32_FIND_DATAW data = {};
-    HANDLE find = FindFirstFileW(pattern, &data);
-    if (find == INVALID_HANDLE_VALUE) {
-        return 0;
-    }
-
-    int count = 0;
-    do {
-        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            continue;
-        }
-        if (data.cFileName[0] == L'.' || data.cFileName[0] == kDisabledPrefix) {
-            continue;
-        }
-        if (count >= maxCount) {
-            Log("plugin: too many directories, rest ignored");
-            break;
-        }
-        wcscpy_s(names[count], static_cast<size_t>(kPathChars), data.cFileName);
-        ++count;
-    } while (FindNextFileW(find, &data));
-
-    FindClose(find);
-
-    // Directory order is not guaranteed by FindFirstFile; sort so "NNN-" keeps
-    // meaning something and runs stay reproducible.
-    for (int i = 1; i < count; ++i) {
-        wchar_t key[kPathChars] = {};
-        wcscpy_s(key, static_cast<size_t>(kPathChars), names[i]);
-        int j = i - 1;
-        while (j >= 0 && wcscmp(names[j], key) > 0) {
-            wcscpy_s(names[j + 1], static_cast<size_t>(kPathChars), names[j]);
-            --j;
-        }
-        wcscpy_s(names[j + 1], static_cast<size_t>(kPathChars), key);
-    }
-    return count;
-}
-
 // Discovery is driven by version.ini [loaders] dlls= (bare file names, resolved
 // against ModuleDir()). No plugins folder scan and no plugin.json; the hot
 // reload watcher below still compares the dll file stamps on disk.
@@ -614,16 +418,14 @@ static void HandleControlLine(const char* line) {
 }
 
 // ---------------------------------------------------------------------------
-// Hot reload: watch plugin.json (enabled flag + write time) and the plugin dll.
+// Hot reload: watch the listed dll on disk.
 //
-// A rebuild or a manifest edit should not need a restart, but a deploy copies
-// files in chunks and mapping a half written dll is fatal. Every observed change
-// therefore has to stay quiet for kReloadSettleMs before it is acted on; until
-// then the newest stamps replace the pending ones and the timer restarts.
+// A rebuild should not need a restart, but a deploy copies the file in chunks
+// and mapping a half written dll is fatal. Every observed change therefore has
+// to stay quiet for kReloadSettleMs before it is acted on; until then the
+// newest stamp replaces the pending one and the timer restarts.
 //
 // Rules:
-//   json: enabled=false -> unload and stay kDisabled
-//   json: enabled=true  -> (re)load, so saving the json is the reload trigger
 //   dll newer + loaded  -> unload + load
 //   dll newer + unloaded-> ignored, nothing to restart
 // A failed load retries a few times, because the previous instance can still
@@ -645,10 +447,6 @@ static bool SameStamp(const FILETIME& a, DWORD as, const FILETIME& b, DWORD bs) 
            a.dwHighDateTime == b.dwHighDateTime && as == bs;
 }
 
-static void SlotManifestPath(const PluginSlot& slot, wchar_t* out, size_t cap) {
-    swprintf_s(out, cap, L"%s\\%s", slot.dir, kManifestNameW);
-}
-
 static void SlotDllPath(const PluginSlot& slot, wchar_t* out, size_t cap) {
     wchar_t leaf[kPathChars] = {};
     Utf8ToWide(slot.dllName, leaf, kPathChars);
@@ -661,71 +459,22 @@ static void SlotDllPath(const PluginSlot& slot, wchar_t* out, size_t cap) {
 // the baseline and again after a reload, because the reload may have switched
 // the manifest's dll name (that would otherwise trigger a second reload).
 static void RecordStamps(PluginSlot& slot) {
-    wchar_t jsonPath[kPathChars] = {};
     wchar_t dllPath[kPathChars] = {};
-    SlotManifestPath(slot, jsonPath, kPathChars);
     SlotDllPath(slot, dllPath, kPathChars);
-    FileStamp(jsonPath, &slot.jsonTime, &slot.jsonSize);
     FileStamp(dllPath, &slot.dllTime, &slot.dllSize);
     slot.pendAt = 0;
 }
 
-static void ReadManifestFlags(const PluginSlot& slot, bool* enabled, int* priority,
-                              char* dllName, int dllCap) {
-    wchar_t manifest[kPathChars] = {};
-    SlotManifestPath(slot, manifest, kPathChars);
-    if (!ReadTextFile(manifest, s_manifestBuf, kManifestMaxBytes, nullptr)) {
-        return;   // no manifest any more: keep the caller's current defaults
-    }
-    *enabled = JsonReadBool(s_manifestBuf, "enabled", true);
-    *priority = JsonReadInt(s_manifestBuf, "priority", *priority);
-    char text[kPathChars] = {};
-    if (JsonReadString(s_manifestBuf, "dll", text, static_cast<int>(sizeof(text)))) {
-        strncpy_s(dllName, static_cast<size_t>(dllCap), text, _TRUNCATE);
-    }
-}
-
-static void ReloadSlot(int index, bool jsonChanged) {
+static void ReloadSlot(int index) {
     PluginSlot& slot = g_slots[index];
-    const bool wasActive = (slot.state == PluginState::kActive);
-
-    if (jsonChanged) {
-        bool enabled = true;
-        int priority = slot.priority;
-        char dllName[kPathChars] = {};
-        strcpy_s(dllName, slot.dllName);
-        ReadManifestFlags(slot, &enabled, &priority, dllName,
-                          static_cast<int>(sizeof(dllName)));
-        slot.priority = priority;
-
-        if (!enabled) {
-            if (wasActive) UnloadPlugin(index);
-            if (slot.state != PluginState::kQuarantined) {
-                slot.state = PluginState::kDisabled;
-                Log("plugin: %s disabled by plugin.json", slot.dirUtf8);
-            }
-            return;
-        }
-        if (_stricmp(dllName, slot.dllName) != 0) {
-            strcpy_s(slot.dllName, dllName);
-            Log("plugin: %s manifest points at %s", slot.dirUtf8, slot.dllName);
-        }
-        if (wasActive) {
-            UnloadPlugin(index);
-        } else if (slot.state == PluginState::kRejected) {
-            slot.state = PluginState::kDisabled;   // let the load below retry it
-        }
-    } else if (!wasActive) {
+    if (slot.state != PluginState::kActive) {
         return;   // dll touched while it was not loaded: nothing to restart
-    } else {
-        UnloadPlugin(index);
     }
-
+    UnloadPlugin(index);
     if (slot.state == PluginState::kQuarantined) {
         Log("plugin: %s stays quarantined, not reloading it", slot.dirUtf8);
         return;
     }
-
     LoadPlugin(index);
     if (slot.state == PluginState::kRejected) {
         slot.wantLoad = true;
@@ -767,16 +516,10 @@ static void WatchPlugins() {
             continue;
         }
 
-        wchar_t jsonPath[kPathChars] = {};
         wchar_t dllPath[kPathChars] = {};
-        SlotManifestPath(slot, jsonPath, kPathChars);
         SlotDllPath(slot, dllPath, kPathChars);
-
-        FILETIME jt = {};
-        DWORD js = 0;
         FILETIME dt = {};
         DWORD ds = 0;
-        const bool hasJson = FileStamp(jsonPath, &jt, &js);
         const bool hasDll = FileStamp(dllPath, &dt, &ds);
 
         if (!slot.stampsValid) {
@@ -785,19 +528,15 @@ static void WatchPlugins() {
             continue;   // baseline only, never a reload on the first look
         }
 
-        const bool jsonChanged = hasJson && !SameStamp(jt, js, slot.jsonTime, slot.jsonSize);
         const bool dllChanged = hasDll && !SameStamp(dt, ds, slot.dllTime, slot.dllSize);
-        if (!jsonChanged && !dllChanged) {
+        if (!dllChanged) {
             slot.pendAt = 0;
             continue;
         }
 
         const bool stillMoving = slot.pendAt == 0 ||
-            !SameStamp(jt, js, slot.pendJsonTime, slot.pendJsonSize) ||
             !SameStamp(dt, ds, slot.pendDllTime, slot.pendDllSize);
         if (stillMoving) {
-            slot.pendJsonTime = jt;
-            slot.pendJsonSize = js;
             slot.pendDllTime = dt;
             slot.pendDllSize = ds;
             slot.pendAt = now;
@@ -808,16 +547,10 @@ static void WatchPlugins() {
         }
 
         slot.pendAt = 0;
-        slot.pendJsonTime = jt;
-        slot.pendJsonSize = js;
         slot.pendDllTime = dt;
         slot.pendDllSize = ds;
-        Log("plugin: %s changed on disk (%s%s), hot reloading", slot.dirUtf8,
-            jsonChanged ? "json" : "",
-            dllChanged ? (jsonChanged ? "+dll" : "dll") : "");
-        ReloadSlot(i, jsonChanged);
-        // The reload may have changed the dll name, so baseline against the
-        // paths the slot uses now instead of the ones we just compared.
+        Log("plugin: %s changed on disk (dll), hot reloading", slot.dirUtf8);
+        ReloadSlot(i);
         RecordStamps(slot);
     }
 }
