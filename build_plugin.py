@@ -296,16 +296,16 @@ def build_on_linux(client, spec):
         sdk_header = os.path.join(REPO_ROOT, "sdk", "pplugin.h")
         if os.path.isfile(sdk_header):
             sftp.put(sdk_header, f"{LINUX_REMOTE_ROOT}/sdk/pplugin.h")
-        # 第三方单头文件依赖（如 nlohmann/json）：源码里按 ../../third_party/... 相对包含，
+        # 第三方单头文件依赖（如 nlohmann/json）：源码里按 ../../libs/... 相对包含，
         # 远端必须保持同样的目录层级，否则编译找不到头文件。
-        third_party = os.path.join(REPO_ROOT, "third_party")
-        if os.path.isdir(third_party):
-            for base, _dirs, files in os.walk(third_party):
+        libs_dir = os.path.join(REPO_ROOT, "libs")
+        if os.path.isdir(libs_dir):
+            for base, _dirs, files in os.walk(libs_dir):
                 rel = os.path.relpath(base, REPO_ROOT).replace("\\", "/")
                 run_status(client, f"mkdir -p {LINUX_REMOTE_ROOT}/{rel}")
                 for name in files:
                     sftp.put(os.path.join(base, name), f"{LINUX_REMOTE_ROOT}/{rel}/{name}")
-            log(f"[{spec['install']}] 已上传 third_party -> {LINUX_REMOTE_ROOT}/third_party")
+            log(f"[{spec['install']}] 已上传 libs -> {LINUX_REMOTE_ROOT}/libs")
         log(f"[{spec['install']}] 已上传源文件/头文件和 sdk/pplugin.h -> {remote_dir}")
     finally:
         sftp.close()

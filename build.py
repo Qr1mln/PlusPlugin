@@ -34,6 +34,7 @@ PROXY_DIR = os.path.join(REPO_ROOT, "proxy")
 REMOTE_ROOT = "/home/n111/plusplugin-build"
 REMOTE_PROXY = f"{REMOTE_ROOT}/proxy"
 PRODUCT = os.path.join(PROXY_DIR, "version.dll")
+FRAMEWORK_DLL = os.path.join(REPO_ROOT, "framework", "framework.dll")
 # =============================================================
 
 
@@ -109,7 +110,8 @@ def build(client):
     sftp = client.open_sftp()
     try:
         for f in ("dllmain.cpp", "proxy_exports.h", "exports.def", "log.h", "log.cpp",
-                  "config.h", "config.cpp", "bootstrap.h", "bootstrap.cpp"):
+                  "config.h", "config.cpp", "bootstrap.h", "bootstrap.cpp",
+                  "plugin_api.inc", "plugin_loader.inc"):
             sftp.put(os.path.join(PROXY_DIR, f), f"{REMOTE_PROXY}/{f}")
         for base, remote in (("framework", f"{REMOTE_ROOT}/framework"),
                              ("sdk", f"{REMOTE_ROOT}/sdk")):
@@ -128,7 +130,8 @@ def build(client):
     cmd = (
         f"cd {REMOTE_PROXY} && for f in *.cpp *.S; do [ -e \"$f\" ] && sed -i 's/\\r$//' \"$f\"; done && "
         f"x86_64-w64-mingw32-as -o stubs.o stubs.S && "
-        f"x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static -static-libgcc -static-libstdc++ "
+        f"x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static "
+        f"-static-libgcc -static-libstdc++ "
         f"-I{REMOTE_ROOT} -o version.dll *.cpp stubs.o exports.def -luser32"
     )
     status, out = run_status(client, cmd)
@@ -147,10 +150,70 @@ def build(client):
     return True
 
 
+def build_framework(client):
+    """编译 framework.dll：CivetWeb 用 gcc 单独编 .c，再与 framework.cpp 链接。
+
+    与 version.dll 同机交叉编译；framework.dll 是 version.dll 经 [loaders]
+    直接 LoadLibrary 的独立 DLL（不是 pplugin 插件），所以这里单独编一遍。
+    """
+    log("=== framework.dll（CivetWeb + 裸 TCP/WS 服务端）===")
+    remote_fw = f"{REMOTE_ROOT}/framework"
+    client.exec_command(
+        f"mkdir -p {remote_fw} {REMOTE_ROOT}/sdk "
+        f"{REMOTE_ROOT}/libs/civetweb {REMOTE_ROOT}/libs/nlohmann")
+    sftp = client.open_sftp()
+    try:
+        sftp.put(os.path.join(REPO_ROOT, "framework", "framework.cpp"),
+                 f"{remote_fw}/framework.cpp")
+        sftp.put(os.path.join(REPO_ROOT, "sdk", "pplugin.h"),
+                 f"{REMOTE_ROOT}/sdk/pplugin.h")
+        sftp.put(os.path.join(REPO_ROOT, "libs", "nlohmann", "json.hpp"),
+                 f"{REMOTE_ROOT}/libs/nlohmann/json.hpp")
+        # CivetWeb 是单文件 C，但 civetweb.c 会 #include 多个 .inl（md5/sha1/sort/
+        # match/response/timer/handle_form 等），整目录上传最稳妥。
+        civet_dir = os.path.join(REPO_ROOT, "libs", "civetweb")
+        remote_civet = f"{REMOTE_ROOT}/libs/civetweb"
+        for name in os.listdir(civet_dir):
+            p = os.path.join(civet_dir, name)
+            if os.path.isfile(p):
+                sftp.put(p, f"{remote_civet}/{name}")
+    finally:
+        sftp.close()
+
+    # CivetWeb 是 C 文件，用 gcc 单独编；-DNO_SSL 避开 OpenSSL，-DUSE_WEBSOCKET
+    # 把 mg_set_websocket_handler / mg_websocket_write 编进库（否则链接报未定义）。
+    cmd = (
+        f"cd {remote_fw} && "
+        f"x86_64-w64-mingw32-gcc -c -O2 -DNO_SSL -DUSE_WEBSOCKET "
+        f"../libs/civetweb/civetweb.c -o civetweb.o && "
+        f"x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static "
+        f"-static-libgcc -static-libstdc++ "
+        f"-I../sdk -I../libs -I../libs/civetweb "
+        f"-o framework.dll framework.cpp civetweb.o "
+        f"-lws2_32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lpthread"
+    )
+    status, out = run_status(client, cmd)
+    if out.strip():
+        log(out.strip())
+    if status != 0:
+        log("framework.dll 远端编译失败（exit %d）" % status)
+        return False
+
+    sftp = client.open_sftp()
+    try:
+        sftp.get(f"{remote_fw}/framework.dll", FRAMEWORK_DLL)
+    finally:
+        sftp.close()
+    log(f"已下载 {FRAMEWORK_DLL}")
+    return True
+
+
 def main():
     client = ssh_connect()
     try:
         if not build(client):
+            raise SystemExit(1)
+        if not build_framework(client):
             raise SystemExit(1)
     finally:
         client.close()
