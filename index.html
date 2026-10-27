@@ -45,6 +45,19 @@
 </div>
 
 <div class="row">
+  滚轮：
+  <button onclick="send({type:'mouse',action:'scroll',delta:120})">上滚</button>
+  <button onclick="send({type:'mouse',action:'scroll',delta:-120})">下滚</button>
+  <button onclick="send({type:'mouse',action:'scroll',delta:600})">上滚x5</button>
+  <button onclick="send({type:'mouse',action:'scroll',delta:-600})">下滚x5</button>
+</div>
+
+<div class="row">
+  文本：<input id="text" style="width:220px" value="hello 你好">
+  <button onclick="send({type:'text', text:$('text').value})">输入文本</button>
+</div>
+
+<div class="row">
   <label><input type="checkbox" id="kbd" onchange="toggleKbd()"> 键盘捕获</label>
   <button onclick="send({type:'key',vk:13})">Enter</button>
   <button onclick="send({type:'key',vk:27})">Esc</button>

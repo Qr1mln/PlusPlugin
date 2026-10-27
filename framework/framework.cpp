@@ -10,7 +10,7 @@
 //   - 用 CivetWeb（libs/civetweb，C，裸 TCP/WS，零协议风险）起一个
 //     127.0.0.1 的 WebSocket 服务端，URI 为 /ws；顺带把 DLL 所在目录当 document_root，
 //     可直接 http 托管 index.html。
-//   - 事件执行只做 3 个：鼠标移动/点击（SendInput）、键盘按键（SendInput）、延迟（Sleep）。
+//   - 事件执行：鼠标/键盘/滚轮/文本走 PostMessage 后台投递到目标窗口（不动物理鼠标）。
 //   - 每条命令执行后，把日志写回 proxy.log（host->log）并通过 WS 回一个 JSON 包。
 //
 // 明确不做（见 MVP 规划）：截图取点、OCR、任务调度、热重载、Web 编辑器、JS 脚本层。
@@ -52,7 +52,8 @@ void EmitLog(std::vector<std::string>& logs, const char* fmt, ...) {
     }
 }
 
-// ---- 三个事件执行（直接用 SendInput，独立于宿主窗口句柄也能产生可见动作）----
+// ---- 事件执行：后台 PostMessage 投递到目标窗口（不移动真实鼠标、不抢焦点）----
+// 注意：PostMessage 不进系统输入队列，个别程序（Raw Input / 特殊自绘）可能不响应。
 
 // ---- 坐标换算：view（FLUTTERVIEW）相对坐标 <-> 屏幕绝对坐标 ----
 
@@ -92,128 +93,160 @@ bool ViewRect(RECT& out) {
     return true;
 }
 
-// view 相对坐标 -> 屏幕绝对坐标。窗口不可用时返回 false（调用方按屏幕坐标兜底）。
-bool ViewToScreen(int x, int y, int& sx, int& sy) {
-    RECT rc;
-    if (!ViewRect(rc)) {
+// 虚拟光标（客户区坐标），插件内部维护，供相对移动/拖拽使用。
+int g_cx = 0;
+int g_cy = 0;
+
+// 向目标窗口投递鼠标消息（客户区坐标）。
+void PostMouse(UINT msg, WPARAM wParam, int cx, int cy) {
+    HWND w = TargetWindow();
+    if (w == nullptr) {
+        return;
+    }
+    PostMessageW(w, msg, wParam,
+                 MAKELPARAM(static_cast<short>(cx), static_cast<short>(cy)));
+}
+
+// 把 (x,y)（space 指定）解析成客户区坐标；窗口不可用返回 false。
+bool ResolveClient(int x, int y, const std::string& space, int& cx, int& cy) {
+    HWND w = TargetWindow();
+    if (w == nullptr) {
         return false;
     }
-    sx = rc.left + x;
-    sy = rc.top + y;
+    if (space == "screen") {
+        POINT p = {x, y};
+        if (!ScreenToClient(w, &p)) {
+            return false;
+        }
+        cx = p.x;
+        cy = p.y;
+    } else {
+        cx = x;
+        cy = y;
+    }
     return true;
 }
 
-// 以绝对方式把光标移到屏幕点（按虚拟桌面归一化，支持多显示器）。
-void MoveToScreen(int sx, int sy) {
-    const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if (vw <= 1 || vh <= 1) {
+void ExecMove(int dx, int dy) {
+    g_cx += dx;
+    g_cy += dy;
+    PostMouse(WM_MOUSEMOVE, 0, g_cx, g_cy);
+}
+
+void ExecMoveTo(int x, int y, const std::string& space) {
+    int cx = x;
+    int cy = y;
+    if (!ResolveClient(x, y, space, cx, cy)) {
         return;
     }
-    INPUT m = {};
-    m.type = INPUT_MOUSE;
-    m.mi.dx = static_cast<LONG>((static_cast<long long>(sx - vx) * 65535) / (vw - 1));
-    m.mi.dy = static_cast<LONG>((static_cast<long long>(sy - vy) * 65535) / (vh - 1));
-    m.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    SendInput(1, &m, sizeof(m));
+    g_cx = cx;
+    g_cy = cy;
+    PostMouse(WM_MOUSEMOVE, 0, g_cx, g_cy);
 }
 
-// 相对移动（保留旧语义）。
-void ExecMove(int dx, int dy) {
-    INPUT in = {};
-    in.type = INPUT_MOUSE;
-    in.mi.dx = dx;
-    in.mi.dy = dy;
-    in.mi.dwFlags = MOUSEEVENTF_MOVE;
-    SendInput(1, &in, sizeof(in));
-}
-
-// button -> SendInput 的按下/抬起标志。
-DWORD ButtonDownFlag(const std::string& button) {
+UINT ButtonDownMsg(const std::string& button) {
     if (button == "right") {
-        return MOUSEEVENTF_RIGHTDOWN;
+        return WM_RBUTTONDOWN;
     }
     if (button == "middle") {
-        return MOUSEEVENTF_MIDDLEDOWN;
+        return WM_MBUTTONDOWN;
     }
-    return MOUSEEVENTF_LEFTDOWN;
+    return WM_LBUTTONDOWN;
 }
-DWORD ButtonUpFlag(const std::string& button) {
+UINT ButtonUpMsg(const std::string& button) {
     if (button == "right") {
-        return MOUSEEVENTF_RIGHTUP;
+        return WM_RBUTTONUP;
     }
     if (button == "middle") {
-        return MOUSEEVENTF_MIDDLEUP;
+        return WM_MBUTTONUP;
     }
-    return MOUSEEVENTF_LEFTUP;
+    return WM_LBUTTONUP;
 }
-
-// view 相对 / screen 绝对 -> 屏幕点。space != "screen" 时按 view 换算。
-void ResolvePoint(int x, int y, const std::string& space, int& sx, int& sy) {
-    sx = x;
-    sy = y;
-    if (space != "screen") {
-        ViewToScreen(x, y, sx, sy);  // 窗口不可用时按屏幕坐标兜底
+WPARAM ButtonDownKey(const std::string& button) {
+    if (button == "right") {
+        return MK_RBUTTON;
     }
+    if (button == "middle") {
+        return MK_MBUTTON;
+    }
+    return MK_LBUTTON;
 }
 
-// 绝对移动。space: "view"(默认) / "screen"。
-void ExecMoveTo(int x, int y, const std::string& space) {
-    int sx = x;
-    int sy = y;
-    ResolvePoint(x, y, space, sx, sy);
-    MoveToScreen(sx, sy);
-}
-
-// 点击：x,y<0 表示在当前光标处点击。button: left/right/middle。
 void ExecClick(int x, int y, const std::string& space, const std::string& button) {
     if (x >= 0 && y >= 0) {
-        int sx = x;
-        int sy = y;
-        ResolvePoint(x, y, space, sx, sy);
-        MoveToScreen(sx, sy);
+        int cx = x;
+        int cy = y;
+        if (ResolveClient(x, y, space, cx, cy)) {
+            g_cx = cx;
+            g_cy = cy;
+        }
     }
-    INPUT down = {};
-    down.type = INPUT_MOUSE;
-    down.mi.dwFlags = ButtonDownFlag(button);
-    SendInput(1, &down, sizeof(down));
-    INPUT up = {};
-    up.type = INPUT_MOUSE;
-    up.mi.dwFlags = ButtonUpFlag(button);
-    SendInput(1, &up, sizeof(up));
+    PostMouse(WM_MOUSEMOVE, 0, g_cx, g_cy);
+    PostMouse(ButtonDownMsg(button), ButtonDownKey(button), g_cx, g_cy);
+    PostMouse(ButtonUpMsg(button), 0, g_cx, g_cy);
 }
 
-// 按下/抬起（拖拽用）。
 void ExecButton(int x, int y, const std::string& space, const std::string& button,
                 bool down) {
     if (x >= 0 && y >= 0) {
-        int sx = x;
-        int sy = y;
-        ResolvePoint(x, y, space, sx, sy);
-        MoveToScreen(sx, sy);
+        int cx = x;
+        int cy = y;
+        if (ResolveClient(x, y, space, cx, cy)) {
+            g_cx = cx;
+            g_cy = cy;
+        }
     }
-    INPUT in = {};
-    in.type = INPUT_MOUSE;
-    in.mi.dwFlags = down ? ButtonDownFlag(button) : ButtonUpFlag(button);
-    SendInput(1, &in, sizeof(in));
+    PostMouse(down ? ButtonDownMsg(button) : ButtonUpMsg(button),
+              down ? ButtonDownKey(button) : 0, g_cx, g_cy);
 }
 
 void ExecKey(WORD vk) {
-    INPUT down = {};
-    down.type = INPUT_KEYBOARD;
-    down.ki.wVk = vk;
-    SendInput(1, &down, sizeof(down));
-    INPUT up = {};
-    up.type = INPUT_KEYBOARD;
-    up.ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(1, &up, sizeof(up));
+    HWND w = TargetWindow();
+    if (w == nullptr) {
+        return;
+    }
+    PostMessageW(w, WM_KEYDOWN, vk, 0);
+    PostMessageW(w, WM_KEYUP, vk, 0);
 }
 
 void ExecDelay(int ms) {
     if (ms > 0 && ms <= 60000) {
         Sleep(static_cast<DWORD>(ms));
+    }
+}
+
+// 滚轮：delta 以 WHEEL_DELTA(120) 的倍数，正=上滚，负=下滚。
+void ExecScroll(int delta) {
+    if (delta == 0) {
+        return;
+    }
+    HWND w = TargetWindow();
+    if (w == nullptr) {
+        return;
+    }
+    POINT p = {g_cx, g_cy};
+    ClientToScreen(w, &p);
+    PostMessageW(w, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<short>(delta)),
+                 MAKELPARAM(p.x, p.y));
+}
+
+// 文本输入：UTF-8 -> UTF-16，逐字符向目标窗口投递 WM_CHAR。
+void ExecText(const std::string& utf8) {
+    if (utf8.empty()) {
+        return;
+    }
+    HWND w = TargetWindow();
+    if (w == nullptr) {
+        return;
+    }
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) {
+        return;
+    }
+    std::wstring ws(static_cast<size_t>(wlen - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &ws[0], wlen);
+    for (const wchar_t ch : ws) {
+        PostMessageW(w, WM_CHAR, static_cast<WPARAM>(ch), 0);
     }
 }
 
@@ -307,6 +340,10 @@ std::string HandleCommand(const std::string& msg, std::vector<std::string>& logs
             ExecButton(x, y, space, button, sub == "down");
             EmitLog(logs, "mouse %s %s=%d,%d button=%s", sub.c_str(), space.c_str(),
                     x, y, button.c_str());
+        } else if (sub == "scroll") {
+            const int delta = cmd.value("delta", 0);
+            ExecScroll(delta);
+            EmitLog(logs, "mouse scroll delta=%d", delta);
         } else {
             return MakeReply(id, false, "unknown mouse action", kErr);
         }
@@ -320,6 +357,16 @@ std::string HandleCommand(const std::string& msg, std::vector<std::string>& logs
         }
         ExecKey(static_cast<WORD>(vk));
         EmitLog(logs, "key vk=%d", vk);
+        return MakeReply(id, true, "", kOk);
+    }
+
+    if (category == "text") {
+        const std::string text = cmd.value("text", std::string());
+        if (text.empty()) {
+            return MakeReply(id, false, "text is empty", kErr);
+        }
+        ExecText(text);
+        EmitLog(logs, "text bytes=%d", static_cast<int>(text.size()));
         return MakeReply(id, true, "", kOk);
     }
 
