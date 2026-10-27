@@ -11,8 +11,8 @@
 
 // The framework is header-only and lives at the repo root. It uses ::Log and
 // ::g_logFanout from log.h, so those declarations must be seen first.
-#include "framework/plugin_api.inc"
-#include "framework/plugin_loader.inc"
+#include "plugin_api.inc"
+#include "plugin_loader.inc"
 
 namespace {
 
@@ -116,7 +116,7 @@ DWORD WINAPI PayloadThread(LPVOID param) {
 
     const wchar_t* target = TargetExeName();
     if (target[0] == L'\0') {
-        Log("skip: no target= in target.ini next to version.dll");
+        Log("skip: no target= in version.ini next to version.dll");
         return 0;
     }
     if (lstrcmpiW(ExeBaseName(), target) != 0) {
@@ -152,6 +152,9 @@ DWORD WINAPI PayloadThread(LPVOID param) {
     // a plugin may touch user32 or create a thread in its own DllMain.
     plugins::SetHostContext(hwnd);
     plugins::Start();
+
+    // framework.dll 现在是 pplugin 插件，由上面的 plugins::Start() / plugin_loader
+    // 扫描 plugins\ 自动加载（含热加载），不再在这里直接 LoadLibrary。
 
     // Shown last so the dialog never delays plugin startup, and it parks only
     // this worker thread, not the host.

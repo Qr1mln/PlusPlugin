@@ -1,5 +1,5 @@
 // version.dll proxy payload: exporting shell + loader bootstrap.
-// Target process: whatever target.ini (next to this DLL) names in target=;
+// Target process: whatever version.ini (next to this DLL) names in target=;
 // the shipped app is a Flutter + ANGLE(D3D11) host, e.g. TTVoice.exe (x64).
 //
 // Forwarding model:
@@ -9,7 +9,7 @@
 //
 // Module layout (this file is only the entry point):
 //   log.h/.cpp         proxy.log + plugin log fan-out
-//   config.h/.cpp      target.ini (Win32 profile API + legacy fallback)
+//   config.h/.cpp      version.ini (Win32 profile API + legacy fallback)
 //   bootstrap.h/.cpp   WebView2 CDP switch, window discovery, plugin start
 //
 // Design note: the real DLL is resolved inside DllMain because the app may

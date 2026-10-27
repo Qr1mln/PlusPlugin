@@ -71,13 +71,6 @@ static const char* StateName(PluginState state) {
 // Bookkeeping records. One array per capability, owned by the framework.
 // M0 stores them and revokes them; dispatch happens in M1.
 // ---------------------------------------------------------------------------
-struct HotkeyEntry {
-    int vk = 0;
-    int id = 0;          // RegisterHotKey id, unique within the dispatcher window
-    HotkeyFn fn = nullptr;
-    void* user = nullptr;
-};
-
 struct TaskEntry {
     TaskFn fn = nullptr;
     void* user = nullptr;
@@ -105,9 +98,6 @@ struct PluginSlot {
     char dllName[kPathChars] = {};
     char name[kTextShort] = {};
     char version[kTextVersion] = {};
-
-    HotkeyEntry hotkeys[MAX_HOTKEYS] = {};
-    int hotkeyCount = 0;
 
     TaskEntry tasks[kMaxTasksPerPlugin] = {};
     int taskHead = 0;
@@ -166,100 +156,6 @@ static float ComputeHostScale(HWND hwnd) {
 static bool g_started = false;
 
 // ---------------------------------------------------------------------------
-// Hotkey dispatcher.
-//
-// RegisterHotKey(hwnd, ...) posts WM_HOTKEY to the thread that created hwnd, so
-// a message-only window on a dedicated thread owns every registration and pumps
-// the queue. Plugins never see RegisterHotKey: they book via Host::addHotkey and
-// get fn(vk) back here. UnregisterHotKey happens in ClearRegistrations on unload.
-// ---------------------------------------------------------------------------
-static HWND g_hotkeyHwnd = nullptr;
-static HANDLE g_hotkeyReady = nullptr;
-static const int kHotkeyIdBase = 0x2000;   // stays clear of engine ids (0x5454)
-
-static void DispatchHotkey(int id) {
-    for (int s = 0; s < g_slotCount; ++s) {
-        PluginSlot& slot = g_slots[s];
-        if (slot.state != PluginState::kActive) {
-            continue;
-        }
-        for (int h = 0; h < slot.hotkeyCount; ++h) {
-            if (slot.hotkeys[h].id != id) {
-                continue;
-            }
-            const HotkeyEntry entry = slot.hotkeys[h];   // copy before guarding
-            if (entry.fn == nullptr) {
-                return;
-            }
-            InterlockedIncrement(&slot.inflight);
-            if (slot.state == PluginState::kActive) {
-                const int prev = g_activeSlot;
-                g_activeSlot = s;   // Host::log / submitTask see the owner
-                entry.fn(entry.vk, entry.user);
-                g_activeSlot = prev;
-            }
-            InterlockedDecrement(&slot.inflight);
-            return;
-        }
-    }
-}
-
-static LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_HOTKEY) {
-        DispatchHotkey(static_cast<int>(wp));
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-static DWORD WINAPI HotkeyThreadProc(LPVOID) {
-    WNDCLASSEXW wc = {};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = &HotkeyWndProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"PPluginHotkeyWnd";
-    RegisterClassExW(&wc);
-    g_hotkeyHwnd = CreateWindowExW(0, L"PPluginHotkeyWnd", L"", 0, 0, 0, 0, 0,
-                                   HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
-    if (g_hotkeyReady != nullptr) {
-        SetEvent(g_hotkeyReady);
-    }
-    if (g_hotkeyHwnd == nullptr) {
-        return 0;
-    }
-    MSG msg = {};
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-    return 0;
-}
-
-static void StartHotkeyThread() {
-    if (g_hotkeyHwnd != nullptr || g_hotkeyReady != nullptr) {
-        return;
-    }
-    g_hotkeyReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    HANDLE thread = CreateThread(nullptr, 0, &HotkeyThreadProc, nullptr, 0, nullptr);
-    if (thread == nullptr) {
-        Log("plugin: hotkey CreateThread failed err=%lu", GetLastError());
-        if (g_hotkeyReady != nullptr) {
-            CloseHandle(g_hotkeyReady);
-            g_hotkeyReady = nullptr;
-        }
-        return;
-    }
-    CloseHandle(thread);
-    if (g_hotkeyReady != nullptr) {
-        WaitForSingleObject(g_hotkeyReady, 3000);
-        CloseHandle(g_hotkeyReady);
-        g_hotkeyReady = nullptr;
-    }
-    Log(g_hotkeyHwnd != nullptr ? "plugin: hotkey dispatcher ready"
-                                : "plugin: hotkey dispatcher unavailable");
-}
-
-// ---------------------------------------------------------------------------
 // Small helpers.
 // ---------------------------------------------------------------------------
 static void WideToUtf8(const wchar_t* src, char* dst, int cap) {
@@ -306,15 +202,8 @@ static int FindPluginByName(const char* name) {
 // ---------------------------------------------------------------------------
 // The Host entry points.
 // ---------------------------------------------------------------------------
-static void __cdecl HostLog(const char* text) {
-    Log("[plugin:%s] %s", ActiveName(), (text != nullptr) ? text : "(null)");
-}
-
-static const char* __cdecl HostPluginDir() {
-    if (g_activeSlot < 0 || g_activeSlot >= g_slotCount) {
-        return "";
-    }
-    return g_slots[g_activeSlot].dirUtf8;
+static void __cdecl PublishLog(const char* text) {
+    LogTagged(ActiveName(), "%s", (text != nullptr) ? text : "(null)");
 }
 
 static HWND __cdecl HostMainWindow() {
@@ -372,35 +261,6 @@ static float __cdecl HostScale() {
     return g_uiScale;
 }
 
-static int __cdecl HostAddHotkey(int vk, HotkeyFn fn, void* user) {
-    if (g_activeSlot < 0 || fn == nullptr || vk <= 0) {
-        return ERR_PARAM;
-    }
-    PluginSlot& slot = g_slots[g_activeSlot];
-    if (slot.hotkeyCount >= MAX_HOTKEYS) {
-        return ERR_FULL;
-    }
-    if (g_hotkeyHwnd == nullptr) {
-        Log("plugin: %s addHotkey vk=0x%02X dropped (no dispatcher)", slot.name,
-            static_cast<unsigned>(vk));
-        return ERR_STATE;
-    }
-    const int id = kHotkeyIdBase + g_activeSlot * MAX_HOTKEYS + slot.hotkeyCount;
-    if (!RegisterHotKey(g_hotkeyHwnd, id, 0, static_cast<UINT>(vk))) {
-        Log("plugin: %s RegisterHotKey vk=0x%02X failed err=%lu", slot.name,
-            static_cast<unsigned>(vk), GetLastError());
-        return ERR_PARAM;
-    }
-    HotkeyEntry& entry = slot.hotkeys[slot.hotkeyCount++];
-    entry.vk = vk;
-    entry.id = id;
-    entry.fn = fn;
-    entry.user = user;
-    Log("plugin: %s hotkey vk=0x%02X -> id=%d", slot.name,
-        static_cast<unsigned>(vk), id);
-    return P_OK;
-}
-
 static int __cdecl HostSubmitTask(TaskFn fn, void* user) {
     if (g_activeSlot < 0 || fn == nullptr) {
         return ERR_PARAM;
@@ -417,7 +277,7 @@ static int __cdecl HostSubmitTask(TaskFn fn, void* user) {
     return P_OK;
 }
 
-static int __cdecl HostAddLogSink(LogFn fn, void* user) {
+static int __cdecl SubscribeLog(LogFn fn, void* user) {
     if (g_activeSlot < 0 || fn == nullptr) {
         return ERR_PARAM;
     }
@@ -434,14 +294,12 @@ static int __cdecl HostAddLogSink(LogFn fn, void* user) {
 static const Host g_host = {
     P_ABI,
     static_cast<uint32_t>(sizeof(Host)),
-    &HostLog,
-    &HostPluginDir,
+    &PublishLog,
     &HostMainWindow,
     &HostViewWindow,
     &HostScale,
-    &HostAddHotkey,
     &HostSubmitTask,
-    &HostAddLogSink
+    &SubscribeLog
 };
 
 // ---------------------------------------------------------------------------
@@ -484,17 +342,6 @@ static void ClearRegistrations(PluginSlot* slot) {
     if (slot == nullptr) {
         return;
     }
-    // Release OS hotkeys first so a reloaded plugin can register the same vk.
-    for (int h = 0; h < slot->hotkeyCount; ++h) {
-        if (slot->hotkeys[h].id != 0 && g_hotkeyHwnd != nullptr) {
-            UnregisterHotKey(g_hotkeyHwnd, slot->hotkeys[h].id);
-        }
-        slot->hotkeys[h].id = 0;
-        slot->hotkeys[h].vk = 0;
-        slot->hotkeys[h].fn = nullptr;
-        slot->hotkeys[h].user = nullptr;
-    }
-    slot->hotkeyCount = 0;
     slot->taskHead = 0;
     slot->taskTail = 0;
     slot->logSink.fn = nullptr;

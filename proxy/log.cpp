@@ -38,13 +38,11 @@ std::filesystem::path LogPath() {
 
 }  // namespace
 
-void Log(const char* fmt, ...) {
-    char line[kLogLineChars] = {};
+namespace {
 
-    va_list ap;
-    va_start(ap, fmt);
+void LogV(const char* component, const char* fmt, va_list ap) {
+    char line[kLogLineChars] = {};
     vsnprintf(line, sizeof line, fmt, ap);
-    va_end(ap);
 
     // Resolved once: the DLL never moves at runtime.
     static const std::filesystem::path path = LogPath();
@@ -52,10 +50,10 @@ void Log(const char* fmt, ...) {
     SYSTEMTIME st = {};
     GetLocalTime(&st);
     char stamp[96] = {};
-    snprintf(stamp, sizeof stamp, "[%02u:%02u:%02u.%03u][pid=%lu][tid=%lu] ",
+    snprintf(stamp, sizeof stamp, "[%02u:%02u:%02u.%03u]-[%s] ",
              static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute),
              static_cast<unsigned>(st.wSecond), static_cast<unsigned>(st.wMilliseconds),
-             GetCurrentProcessId(), GetCurrentThreadId());
+             (component != nullptr && component[0] != 0) ? component : "proxy");
 
     // One record, one write, under a lock: no torn or interleaved lines.
     {
@@ -76,4 +74,20 @@ void Log(const char* fmt, ...) {
     if (g_logFanout != nullptr) {
         g_logFanout(line);
     }
+}
+
+}  // namespace
+
+void Log(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    LogV("proxy", fmt, ap);
+    va_end(ap);
+}
+
+void LogTagged(const char* component, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    LogV(component, fmt, ap);
+    va_end(ap);
 }

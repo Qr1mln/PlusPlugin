@@ -2,13 +2,13 @@
 // plugin_loader.inc - plugin lifecycle for the pplugin framework.
 //
 // Duties, in order of execution:
-//   1. Scan      %APPDATA%\TTVoice\plugins\<NNN-name>\ for plugin.json
+//   1. Discover  version.ini [loaders] dlls= (bare names resolved against ModuleDir())
 //   2. Validate  relative dll name, x64 PE, abi, struct size, mandatory export
 //   3. Load      LoadLibraryExW by absolute path, then Desc::init
-//   4. Dispatch  queued tasks (draw / region / hotkey dispatch lands in M1)
+//   4. Dispatch  queued tasks (draw / region dispatch lands in M1)
 //   5. Unload    mark draining, revoke registrations, wait inflight, shutdown,
 //                FreeLibrary
-//   6. Control   poll plugins\control.txt for "load <name>" / "unload <name>"
+//   6. Reload    watch each listed dll on disk and hot reload on change
 //
 // Everything here runs on one loader thread, so the slot table needs no lock.
 // Only PluginSlot::inflight is shared with other threads.
@@ -353,8 +353,7 @@ static void LoadPlugin(int index) {
     }
 
     const Desc* desc = getDesc();
-    if (desc == nullptr || desc->name == nullptr || desc->abi == 0 ||
-        desc->abi > P_ABI) {
+    if (desc == nullptr || desc->name == nullptr || desc->abi != P_ABI) {
         RejectPlugin(index, "bad desc or abi");
         return;
     }
@@ -383,8 +382,7 @@ static void LoadPlugin(int index) {
     }
 
     slot.state = PluginState::kActive;
-    Log("plugin: loaded %s v%s from %s hotkeys=%d",
-        slot.name, slot.version, slot.dirUtf8, slot.hotkeyCount);
+    Log("plugin: loaded %s v%s from %s", slot.name, slot.version, slot.dirUtf8);
 }
 
 static void UnloadPlugin(int index) {
@@ -535,36 +533,39 @@ static int CollectDirectories(const wchar_t* root, wchar_t names[][kPathChars],
     return count;
 }
 
+// Discovery is driven by version.ini [loaders] dlls= (bare file names, resolved
+// against ModuleDir()). No plugins folder scan and no plugin.json; the hot
+// reload watcher below still compares the dll file stamps on disk.
 static void ScanPlugins() {
-    wchar_t root[kPathChars] = {};
-    if (!GetPluginsRoot(root, kPathChars)) {
-        return;
-    }
-    if (CreateDirectoryW(root, nullptr) == FALSE &&
-        GetLastError() != ERROR_ALREADY_EXISTS) {
-        Log("plugin: cannot create %ls err=%lu", root, GetLastError());
-        return;
-    }
+    const std::vector<std::wstring>& names = LoadDllNames();
+    const std::wstring hostDir = ModuleDir().wstring();
+    Log("loaders.");
 
-    wchar_t names[kMaxPlugins][kPathChars] = {};
-    const int found = CollectDirectories(root, names, kMaxPlugins);
-    Log("plugin: scanning %ls, %d candidate(s)", root, found);
-
-    for (int i = 0; i < found; ++i) {
+    for (const std::wstring& name : names) {
+        if (g_slotCount >= kMaxPlugins) {
+            Log("plugin: too many dlls, rest ignored");
+            break;
+        }
         PluginSlot& slot = g_slots[g_slotCount];
         slot = PluginSlot();
         slot.state = PluginState::kDiscovered;
-        swprintf_s(slot.dir, L"%s\\%s", root, names[i]);
+        wcscpy_s(slot.dir, static_cast<size_t>(kPathChars), hostDir.c_str());
         WideToUtf8(slot.dir, slot.dirUtf8, kPathUtf8);
+        WideToUtf8(name.c_str(), slot.dllName, kPathChars);
+
+        std::wstring base = name;
+        const size_t dot = base.rfind(L'.');
+        if (dot != std::wstring::npos) {
+            base.resize(dot);
+        }
+        WideToUtf8(base.c_str(), slot.name, static_cast<int>(sizeof(slot.name)));
+
+        slot.autoLoad = true;
+        slot.priority = g_slotCount;
         ++g_slotCount;
 
-        ReadPluginManifest(g_slotCount - 1);
-        Log("plugin: found %s name=%s dll=%s auto=%d priority=%d", slot.dirUtf8,
-            slot.name, slot.dllName, slot.autoLoad ? 1 : 0, slot.priority);
-
-        if (slot.autoLoad) {
-            LoadPlugin(g_slotCount - 1);
-        }
+        Log("loader:%s.", slot.dllName);
+        LoadPlugin(g_slotCount - 1);
     }
 }
 
@@ -888,9 +889,6 @@ static void Start() {
         return;
     }
     g_started = true;
-    // The hotkey dispatcher must be live before ScanPlugins(): a plugin books
-    // its hotkeys inside init(), which runs during the scan.
-    StartHotkeyThread();
     ScanPlugins();
 
     // From here on every Log() line is mirrored to plugin log sinks. Set after
