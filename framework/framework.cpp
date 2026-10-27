@@ -19,9 +19,13 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -470,6 +474,203 @@ static void ProbePort() {
     WSACleanup();
 }
 
+// %APPDATA%\TTVoice\scripts
+static std::filesystem::path ScriptsDir() {
+    wchar_t appdata[32768] = {};
+    const DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, 32768);
+    if (n == 0 || n >= 32768) {
+        return std::filesystem::path();
+    }
+    return std::filesystem::path(appdata) / L"TTVoice" / L"scripts";
+}
+
+static std::string ReadTextFileUtf8(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::string();
+    }
+    return std::string((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+}
+
+// 脚本名只允许普通文件名，禁止路径穿越。
+static bool SafeScriptName(const std::string& name) {
+    if (name.empty() || name.find("..") != std::string::npos) {
+        return false;
+    }
+    for (const char c : name) {
+        if (c == '/' || c == '\\' || c == ':') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 脚本文件路径：%APPDATA%\TTVoice\scripts\<name>.json（UTF-8 名转宽字符）。
+static std::filesystem::path ScriptPath(const std::string& utf8Name) {
+    std::wstring wide;
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8Name.c_str(), -1, nullptr, 0);
+    if (n > 0) {
+        wide.resize(static_cast<size_t>(n - 1));
+        MultiByteToWideChar(CP_UTF8, 0, utf8Name.c_str(), -1, &wide[0], n);
+    }
+    return ScriptsDir() / (wide + L".json");
+}
+
+// GET    /api/scripts              列出
+// GET    /api/scripts?name=xx      读取
+// POST   /api/scripts?name=xx      新建/保存（body 为脚本 JSON）
+// DELETE /api/scripts?name=xx      删除
+static int ApiScripts(struct mg_connection* conn, void* /*cbdata*/) {
+    nlohmann::json resp;
+    const struct mg_request_info* ri = mg_get_request_info(conn);
+    const std::string method =
+        (ri != nullptr && ri->request_method != nullptr) ? ri->request_method : "GET";
+
+    char nameBuf[256] = {};
+    const bool hasName =
+        (ri != nullptr && ri->query_string != nullptr &&
+         mg_get_var(ri->query_string, strlen(ri->query_string), "name", nameBuf,
+                    sizeof(nameBuf)) > 0);
+    const std::string name(nameBuf);
+
+    if (hasName && !SafeScriptName(name)) {
+        resp["success"] = false;
+        resp["data"] = "bad name";
+        resp["code"] = "9999";
+    } else if (hasName && method == "DELETE") {
+        std::error_code ec;
+        const bool removed = std::filesystem::remove(ScriptPath(name), ec);
+        resp["success"] = removed;
+        resp["data"] = removed ? "" : "script not found";
+        resp["code"] = removed ? "0000" : "9999";
+    } else if (hasName && (method == "POST" || method == "PUT")) {
+        std::string payload;
+        if (ri != nullptr && ri->content_length > 0 &&
+            ri->content_length < 4 * 1024 * 1024) {
+            payload.resize(static_cast<size_t>(ri->content_length));
+            size_t got = 0;
+            while (got < payload.size()) {
+                const int n = mg_read(conn, &payload[got], payload.size() - got);
+                if (n <= 0) {
+                    break;
+                }
+                got += static_cast<size_t>(n);
+            }
+            payload.resize(got);
+        }
+
+        bool ok = false;
+        std::string error = "bad json";
+        try {
+            const nlohmann::json j = nlohmann::json::parse(payload);
+            if (j.is_object()) {
+                const std::filesystem::path path = ScriptPath(name);
+                std::filesystem::path tmp = path;
+                tmp += L".tmp";
+                std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+                if (out) {
+                    out << j.dump(2);
+                    out.close();
+                    std::error_code ec;
+                    std::filesystem::rename(tmp, path, ec);
+                    ok = !ec;
+                    if (!ok) {
+                        error = "write failed";
+                        std::filesystem::remove(tmp, ec);
+                    }
+                } else {
+                    error = "open failed";
+                }
+            } else {
+                error = "not an object";
+            }
+        } catch (...) {
+            error = "bad json";
+        }
+        resp["success"] = ok;
+        resp["data"] = ok ? "" : error;
+        resp["code"] = ok ? "0000" : "9999";
+    } else if (hasName) {
+        const std::string text = ReadTextFileUtf8(ScriptPath(name));
+        if (text.empty()) {
+            resp["success"] = false;
+            resp["data"] = "script not found";
+            resp["code"] = "9999";
+        } else {
+            try {
+                resp["data"] = nlohmann::json::parse(text);
+                resp["success"] = true;
+                resp["code"] = "0000";
+            } catch (...) {
+                resp["success"] = false;
+                resp["data"] = "bad json";
+                resp["code"] = "9999";
+            }
+        }
+    } else {
+        nlohmann::json arr = nlohmann::json::array();
+        std::error_code ec;
+        const std::filesystem::path dir = ScriptsDir();
+        std::vector<std::string> names;
+        if (!dir.empty() && std::filesystem::is_directory(dir, ec)) {
+            for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+                if (ec) {
+                    break;
+                }
+                if (!entry.is_regular_file()) {
+                    continue;
+                }
+                if (_wcsicmp(entry.path().extension().c_str(), L".json") != 0) {
+                    continue;
+                }
+                names.push_back(entry.path().stem().u8string());
+            }
+        }
+        std::sort(names.begin(), names.end());
+        for (const std::string& s : names) {
+            arr.push_back(s);
+        }
+        resp["success"] = true;
+        resp["data"] = arr;
+        resp["code"] = "0000";
+    }
+
+    const std::string body = resp.dump();
+    mg_send_http_ok(conn, "application/json; charset=utf-8",
+                    static_cast<long long>(body.size()));
+    mg_write(conn, body.data(), body.size());
+    return 200;
+}
+
+// GET /api/app: 目标窗口客户区几何 + DPI 缩放（供“刷新应用”展示）。
+static int ApiApp(struct mg_connection* conn, void* /*cbdata*/) {
+    nlohmann::json resp;
+    RECT rc;
+    if (!ViewRect(rc)) {
+        resp["success"] = false;
+        resp["data"] = "view window unavailable";
+        resp["code"] = "9999";
+    } else {
+        nlohmann::json g;
+        g["x"] = rc.left;
+        g["y"] = rc.top;
+        g["w"] = rc.right - rc.left;
+        g["h"] = rc.bottom - rc.top;
+        g["scale"] = (g_host != nullptr && g_host->scale != nullptr) ? g_host->scale() : 1.0f;
+        g["app"] = "TTVoice.exe";
+        resp["success"] = true;
+        resp["data"] = g;
+        resp["code"] = "0000";
+    }
+
+    const std::string body = resp.dump();
+    mg_send_http_ok(conn, "application/json; charset=utf-8",
+                    static_cast<long long>(body.size()));
+    mg_write(conn, body.data(), body.size());
+    return 200;
+}
+
 }  // namespace
 
 // pplugin 插件入口：Desc::init(const Host*) 由 framework 的 plugin_loader 调用。
@@ -501,6 +702,8 @@ static int __cdecl PluginInit(const Host* host) {
     }
     mg_set_websocket_handler(g_ctx, "/ws", &WSConnect, &WSReady, &WSData, &WSClose,
                              nullptr);
+    mg_set_request_handler(g_ctx, "/api/scripts", &ApiScripts, nullptr);
+    mg_set_request_handler(g_ctx, "/api/app", &ApiApp, nullptr);
 
     std::string ok = "started, ws=ws://127.0.0.1:47801/ws doc_root=";
     ok += docRoot;
