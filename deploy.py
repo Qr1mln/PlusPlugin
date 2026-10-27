@@ -9,6 +9,8 @@ PlusPlugin 运行时部署脚本（把本地编译的 version.dll 更新到本�
   4) 重新启动 TTVoice.exe
 
 说明：
+  - 本脚本只部署 version.dll（代理）。插件（framework.dll + 前端页面）用
+    deploy_plugin.py 单独部署。
   - 不编译。编译请先跑 build.py；插件（plugin\ 下）用 build_plugin.py。
   - 与 build_plugin.py 的 deploy_local 保持一致：运行时（TTVoice）就跑在本机，
     因此直接在本机停/启 + 复制，不再 SSH 到远程 Windows（旧版是这么做的，已废弃）。
@@ -22,8 +24,6 @@ import time
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DLL = os.path.join(REPO_ROOT, "proxy", "version.dll")  # 源（build.py 产出）
-FRAMEWORK_DLL = os.path.join(REPO_ROOT, "framework", "framework.dll")  # 源（build.py 产出）
-INDEX_HTML = os.path.join(REPO_ROOT, "index.html")  # 测试页（CivetWeb 顺带托管）
 START_AFTER_DEPLOY = True
 
 APP_EXE = "TTVoice.exe"
@@ -129,18 +129,6 @@ def main():
         log("仍无法覆盖，请手动关闭占用 version.dll 的进程后重试。")
         log("诊断（本机执行）： tasklist /m version.dll")
         raise SystemExit(1)
-
-    # framework.dll 由 version.ini [loaders] 驱动、从 app 目录(ModuleDir())加载，
-    # 走 pplugin 热加载；index.html 由 CivetWeb 的 document_root（= 该目录）托管。
-    for src, label in ((FRAMEWORK_DLL, "framework.dll"), (INDEX_HTML, "index.html")):
-        if not os.path.isfile(src):
-            log(f"[WARN] 未找到 {src}，跳过部署 {label}（请先跑 build.py）")
-            continue
-        try:
-            shutil.copy2(src, os.path.join(runtime_dir, os.path.basename(src)))
-            log(f"部署 {label} -> {runtime_dir}")
-        except OSError as exc:
-            log(f"[WARN] 部署 {label} 失败：{exc}")
 
     if START_AFTER_DEPLOY:
         start_app()
