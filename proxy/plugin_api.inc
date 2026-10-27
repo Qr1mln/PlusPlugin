@@ -94,6 +94,7 @@ struct PluginSlot {
 
     wchar_t dir[kPathChars] = {};
     wchar_t dllPath[kPathChars] = {};
+    wchar_t loadedPath[kPathChars] = {};  // 实际加载的副本路径（原文件不被锁定）
     char dirUtf8[kPathUtf8] = {};
     char dllName[kPathChars] = {};
     char name[kTextShort] = {};

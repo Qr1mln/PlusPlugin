@@ -145,6 +145,10 @@ static void RejectPlugin(int index, const char* reason) {
         FreeLibrary(slot.module);
         slot.module = nullptr;
     }
+    if (slot.loadedPath[0] != 0 && wcscmp(slot.loadedPath, slot.dllPath) != 0) {
+        DeleteFileW(slot.loadedPath);
+    }
+    slot.loadedPath[0] = 0;
     slot.desc = nullptr;
     slot.state = PluginState::kRejected;
     Log("plugin: rejected %s (%s)", slot.dirUtf8,
@@ -181,9 +185,19 @@ static void LoadPlugin(int index) {
         return;
     }
 
+    // 复制成唯一名字再加载：原 DLL 不被映射锁定，部署可直接覆盖原文件，
+    // watcher 察觉变化后自动热重载（否则 Windows 锁文件，只能重启）。
+    static LONG s_loadSeq = 0;
+    const LONG seq = InterlockedIncrement(&s_loadSeq);
+    swprintf_s(slot.loadedPath, L"%s\\%s.%ld.loaded", slot.dir, leaf, seq);
+    if (!CopyFileW(slot.dllPath, slot.loadedPath, FALSE)) {
+        // 复制失败（如目录只读）就退回直接加载原文件。
+        wcscpy_s(slot.loadedPath, static_cast<size_t>(kPathChars), slot.dllPath);
+    }
+
     // Absolute path plus DLL_LOAD_DIR: the plugin's own dependencies resolve
     // next to it, never through the process working directory.
-    HMODULE module = LoadLibraryExW(slot.dllPath, nullptr,
+    HMODULE module = LoadLibraryExW(slot.loadedPath, nullptr,
                                     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                                     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (module == nullptr) {
@@ -282,6 +296,10 @@ static void UnloadPlugin(int index) {
     if (module != nullptr) {
         FreeLibrary(module);
     }
+    if (slot.loadedPath[0] != 0 && wcscmp(slot.loadedPath, slot.dllPath) != 0) {
+        DeleteFileW(slot.loadedPath);
+    }
+    slot.loadedPath[0] = 0;
     slot.state = PluginState::kUnloaded;
     Log("plugin: unloaded %s", slot.name);
 }
@@ -340,6 +358,27 @@ static void RunPendingTasks() {
 // Discovery is driven by version.ini [loaders] dlls= (bare file names, resolved
 // against ModuleDir()). No plugins folder scan and no plugin.json; the hot
 // reload watcher below still compares the dll file stamps on disk.
+// 清理上次进程退出遗留的 *.loaded 副本（当前未加载时能删掉）。
+static void CleanupLoadedCopies(const wchar_t* dir, const char* dllNameUtf8) {
+    wchar_t leaf[kPathChars] = {};
+    Utf8ToWide(dllNameUtf8, leaf, kPathChars);
+    wchar_t pattern[kPathChars] = {};
+    swprintf_s(pattern, L"%s\\%s.*.loaded", dir, leaf);
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            wchar_t full[kPathChars] = {};
+            swprintf_s(full, L"%s\\%s", dir, fd.cFileName);
+            DeleteFileW(full);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 static void ScanPlugins() {
     const std::vector<std::wstring>& names = LoadDllNames();
     const std::wstring hostDir = ModuleDir().wstring();
@@ -368,6 +407,7 @@ static void ScanPlugins() {
         slot.priority = g_slotCount;
         ++g_slotCount;
 
+        CleanupLoadedCopies(slot.dir, slot.dllName);
         Log("loader:%s.", slot.dllName);
         LoadPlugin(g_slotCount - 1);
     }
