@@ -72,6 +72,8 @@ flowchart LR
 {"id":"3","type":"key","vk":65}
 {"id":"4","type":"delay","ms":500}
 {"id":"5","type":"geometry"}
+{"id":"6","type":"mouse","action":"scroll","delta":-120}
+{"id":"7","type":"text","text":"hello 你好"}
 ```
 
 **回包**（`{id, success, data, code}`，`0000`=成功 / `9999`=失败）：
