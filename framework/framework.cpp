@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -100,6 +101,57 @@ bool ViewRect(RECT& out) {
 // 虚拟光标（客户区坐标），插件内部维护，供相对移动/拖拽使用。
 int g_cx = 0;
 int g_cy = 0;
+
+// ---- Cursor readout (read-only): where the real mouse is inside the view ----
+// Feeds the editor "pick coordinate" panel. It only queries state: no hooks,
+// no injected messages, no hooks that swallow clicks.
+
+// Round to 1 decimal without depending on printf formatting.
+double Round1(double v) {
+    return (v >= 0.0) ? std::floor(v * 10.0 + 0.5) / 10.0
+                      : std::ceil(v * 10.0 - 0.5) / 10.0;
+}
+
+// Fills: sx/sy (screen), x/y (view client, physical px), lx/ly (logical px),
+// w/h (view client size), scale (DPI/96), inside, f8 (F8 held down).
+bool BuildCursorInfo(nlohmann::json& out) {
+    HWND wnd = TargetWindow();
+    if (wnd == nullptr) {
+        return false;
+    }
+    POINT sp = {0, 0};
+    if (!GetCursorPos(&sp)) {
+        return false;
+    }
+    RECT rc;  // client area size (client coords)
+    if (!GetClientRect(wnd, &rc)) {
+        return false;
+    }
+    POINT cp = sp;
+    if (!ScreenToClient(wnd, &cp)) {
+        return false;
+    }
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+    double scale = (g_host != nullptr && g_host->scale != nullptr) ? g_host->scale() : 1.0;
+    if (!(scale > 0.0)) {
+        scale = 1.0;
+    }
+    out["sx"] = sp.x;
+    out["sy"] = sp.y;
+    out["x"] = cp.x;
+    out["y"] = cp.y;
+    out["lx"] = Round1(cp.x / scale);
+    out["ly"] = Round1(cp.y / scale);
+    out["w"] = w;
+    out["h"] = h;
+    out["scale"] = scale;
+    out["inside"] = (cp.x >= 0 && cp.y >= 0 && cp.x < w && cp.y < h);
+    // The page has no focus while the mouse sits over the target window, so the
+    // key state has to be sampled here in the host process.
+    out["f8"] = ((GetAsyncKeyState(VK_F8) & 0x8000) != 0);
+    return true;
+}
 
 // 向目标窗口投递鼠标消息（客户区坐标）。
 void PostMouse(UINT msg, WPARAM wParam, int cx, int cy) {
@@ -395,6 +447,15 @@ std::string HandleCommand(const std::string& msg, std::vector<std::string>& logs
         return MakeReply(id, true, g, kOk);
     }
 
+    if (category == "cursor") {
+        // 只读：回报真实光标在 view 内的位置，供编辑器取点面板轮询。
+        nlohmann::json c;
+        if (!BuildCursorInfo(c)) {
+            return MakeReply(id, false, "view window unavailable", kErr);
+        }
+        return MakeReply(id, true, c, kOk);
+    }
+
     return MakeReply(id, false, "unknown type", kErr);
 }
 
@@ -406,7 +467,10 @@ int WSData(struct mg_connection* conn, int /*bits*/, char* data, size_t data_len
     // 收一条命令（MVP 消息很小，单帧足够；多帧场景留待后续）。
     std::string msg(data, data_len);
     std::vector<std::string> logs;
-    EmitLog(logs, "recv: %s", msg.c_str());
+    // 取点轮询约 14 次/秒，回显到 proxy.log 会把日志刷爆，直接跳过。
+    if (msg.find("\"cursor\"") == std::string::npos) {
+        EmitLog(logs, "recv: %s", msg.c_str());
+    }
 
     const std::string reply = HandleCommand(msg, logs);
     // 执行日志已由 EmitLog 写入 proxy.log；回包只发统一封套。
@@ -671,6 +735,28 @@ static int ApiApp(struct mg_connection* conn, void* /*cbdata*/) {
     return 200;
 }
 
+// GET /api/cursor: live cursor readout in view client coords (read-only).
+// Same payload as the WS {"type":"cursor"} branch, so both callers agree.
+static int ApiCursor(struct mg_connection* conn, void* /*cbdata*/) {
+    nlohmann::json resp;
+    nlohmann::json cur;
+    if (!BuildCursorInfo(cur)) {
+        resp["success"] = false;
+        resp["data"] = "view window unavailable";
+        resp["code"] = "9999";
+    } else {
+        resp["success"] = true;
+        resp["data"] = cur;
+        resp["code"] = "0000";
+    }
+
+    const std::string body = resp.dump();
+    mg_send_http_ok(conn, "application/json; charset=utf-8",
+                    static_cast<long long>(body.size()));
+    mg_write(conn, body.data(), body.size());
+    return 200;
+}
+
 }  // namespace
 
 // pplugin 插件入口：Desc::init(const Host*) 由 framework 的 plugin_loader 调用。
@@ -704,6 +790,7 @@ static int __cdecl PluginInit(const Host* host) {
                              nullptr);
     mg_set_request_handler(g_ctx, "/api/scripts", &ApiScripts, nullptr);
     mg_set_request_handler(g_ctx, "/api/app", &ApiApp, nullptr);
+    mg_set_request_handler(g_ctx, "/api/cursor", &ApiCursor, nullptr);
 
     std::string ok = "started, ws=ws://127.0.0.1:47801/ws doc_root=";
     ok += docRoot;

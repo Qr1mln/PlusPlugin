@@ -1,5 +1,7 @@
 <script setup>
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
+import { cursor, start as startCursor, stop as stopCursor } from './cursorStore'
+import CursorReadout from './CursorReadout.vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -30,10 +32,23 @@ const form = ref({
   remark: '',
 })
 
+// 取坐标只在鼠标事件里需要：弹窗开着且类型为 mouse 时才轮询。
+function isPickType(type) {
+  return type === 'mouse'
+}
+
+function syncPolling() {
+  if (props.open && isPickType(form.value.type)) startCursor()
+  else stopCursor()
+}
+
 watch(
   () => props.open,
   (open) => {
-    if (!open) return
+    if (!open) {
+      stopCursor()
+      return
+    }
     const ev = props.initial || {}
     const ms = Number(ev.ms ?? 500) || 0
     const useSeconds = ms >= 1000 && ms % 1000 === 0
@@ -53,9 +68,13 @@ watch(
       keyAction: ev.type === 'key' ? ev.action || 'press' : 'press',
       remark: ev.remark || '',
     }
+    syncPolling()
   },
   { immediate: true },
 )
+
+// 切换事件类型时跟着开/关轮询（延迟、按键不需要坐标）
+watch(() => form.value.type, syncPolling)
 
 function num(v) {
   const n = Number(v) || 0
@@ -81,9 +100,22 @@ function onPasteXY(e) {
   }
 }
 
+// 弹窗开着时按 F8 捕获到新点，直接回填 X/Y
+watch(
+  () => cursor.frozen,
+  (f) => {
+    if (!f || !props.open || !isPickType(form.value.type)) return
+    form.value.x = Math.round(Number(f.lx) * 10) / 10
+    form.value.y = Math.round(Number(f.ly) * 10) / 10
+  },
+)
+
 function close() {
+  stopCursor()
   emit('update:open', false)
 }
+
+onBeforeUnmount(stopCursor)
 
 function submit() {
   const f = form.value
@@ -178,6 +210,7 @@ function onKeydown(e) {
             @paste="onPasteXY"
           />
         </div>
+        <CursorReadout />
       </template>
 
       <template v-else-if="form.type === 'delay'">

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { connect, onMessage, onStatus, request } from './ws'
 import EventDialog from './EventDialog.vue'
+import { setScale } from './cursorStore'
 
 // ---- 演示数据（真实数据后续从脚本文件加载）----
 const scripts = ref([])
@@ -524,6 +525,7 @@ async function onRefreshApp() {
       const d = j.data
       const scale = Number(d.scale) || 1
       appScale.value = scale
+      setScale(scale) // 取点面板的兜底 scale，与试跑换算同源
       const dpi = Math.round(scale * 100)
       appInfo.value = `${d.app || 'TTVoice.exe'} view ${d.w}x${d.h} DPI ${dpi}%`
     } else {

@@ -74,6 +74,7 @@ flowchart LR
 {"id":"5","type":"geometry"}
 {"id":"6","type":"mouse","action":"scroll","delta":-120}
 {"id":"7","type":"text","text":"hello 你好"}
+{"id":"8","type":"cursor"}
 ```
 
 **回包**（`{id, success, data, code}`，`0000`=成功 / `9999`=失败）：
@@ -81,7 +82,18 @@ flowchart LR
 {"id":"1","success":true,"data":"","code":"0000"}
 {"id":"5","success":true,"data":{"x":862,"y":155,"w":2115,"h":1777,"scale":1.5},"code":"0000"}
 {"id":"2","success":false,"data":"moveTo needs x,y","code":"9999"}
+{"id":"8","success":true,"data":{"sx":1530,"sy":420,"x":301,"y":210,"lx":200.7,"ly":140,"w":2115,"h":1777,"scale":1.5,"inside":true,"f8":false},"code":"0000"}
 ```
+
+### 取坐标（只读）
+
+`{"type":"cursor"}`（或 HTTP `GET /api/cursor`）只回报真实光标位置，不注入任何鼠标事件、不装钩子、不吞点击：
+
+- `sx/sy`：屏幕坐标；`x/y`：view 客户区物理像素；`lx/ly`：逻辑坐标（`x/scale`，脚本里存这套）；
+- `w/h`：view 客户区尺寸；`scale`：DPI 缩放（与 `/api/app`、`geometry` 同源）；
+- `inside`：光标是否落在 view 内；`f8`：宿主进程采样的 F8 键态（页面没焦点时浏览器收不到按键，只能由宿主查全局键态）。
+
+editor2 的「添加/修改事件」弹窗（仅 `mouse` 类型）开着时约 70ms 轮询一次：弹窗内直接显示逻辑/物理/屏幕坐标，鼠标停在目标上按 F8 即捕获并回填 X/Y（不用点按钮、页面无需焦点）；也可以在 X 框粘贴 `"lx, ly"` 一次填两格。
 
 ## 日志格式
 
