@@ -1,8 +1,8 @@
 // protocol.h - base side of the version protocol (version.dll <-> framework.dll).
 //
 // Contract (see docs/framework_protocol.md):
-//   base -> platform : int PlatformEntry(req, resp, cap)      (platform exports)
-//   platform -> base : int BaseDispatch(req, resp, cap, ctx)  (base provides)
+//   base -> platform : int PutPlatform(req, resp, cap)      (platform exports)
+//   platform -> base : int baseRequest(req, resp, cap, ctx)  (base provides)
 //
 // Both signatures never change; all evolution happens inside JSON. The request
 // and response buffers are owned by the caller, so neither side frees memory
@@ -25,13 +25,13 @@ struct HostContext {
 
 // base -> platform reverse call, handed to platform through the "init" request.
 // Never change the signature.
-int __cdecl BaseDispatch(const char* reqJson, char* respJson, int cap, void* ctx);
+int __cdecl baseRequest(const char* reqJson, char* respJson, int cap, void* ctx);
 
 // base -> platform forward call. Returns >= 0 bytes written, or < 0 the number
 // of bytes required (the caller grows its buffer and retries).
 int CallPlatform(const char* reqJson, char* respJson, int cap);
 
-// Lifecycle. Resolves PlatformEntry inside frameworkDll, then sends "init".
+// Lifecycle. Resolves PutPlatform inside frameworkDll, then sends "init".
 bool ProtocolStart(HMODULE frameworkDll, const HostContext& host);
 
 // Sends "shutdown" and drops the platform pointer. Call before FreeLibrary.

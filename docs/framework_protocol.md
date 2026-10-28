@@ -20,8 +20,8 @@ base       version.dll     底座（导出转发 / D3D11 hook / 宿主能力 / �
 
 | 层 | DLL | 职责 | 边界符号 |
 |---|---|---|---|
-| **base** | `version.dll` | 代理转发、hook、宿主能力（`mainWindow`/`scale`/`publishLog`）、加载上层 | 提供 `BaseDispatch` |
-| **platform** | `framework.dll` | WebSocket 服务、命令执行、调度 | 导出 `PlatformEntry`，借用 `BaseDispatch` |
+| **base** | `version.dll` | 代理转发、hook、宿主能力（`mainWindow`/`scale`/`publishLog`）、加载上层 | 提供 `baseRequest` |
+| **platform** | `framework.dll` | WebSocket 服务、命令执行、调度 | 导出 `PutPlatform`，借用 `baseRequest` |
 | **user** | （概念） | 消费 platform 能力的一层 | 本轮不落地 |
 
 > 模式是**可递归**的：每一层向上暴露一个 `XxxEntry`，向下借一个 `XxxDispatch`。
@@ -32,7 +32,7 @@ base       version.dll     底座（导出转发 / D3D11 hook / 宿主能力 / �
 
 - **唯一不变式**：两个函数签名（§3）**永不改变**。所有演进都发生在 JSON 内部。
 - **向后兼容**：新增能力 = 新增命令名，字段**只增不删**；未知命令只回错误，不崩、不拒绝加载。
-- **热加载保留**：仍走 `LoadLibrary` → `GetProcAddress("PlatformEntry")` → … → `FreeLibrary`。
+- **热加载保留**：仍走 `LoadLibrary` → `GetProcAddress("PutPlatform")` → … → `FreeLibrary`。
 - **语言中立**：base = C / 汇编（version.dll），platform = C# NativeAOT（framework.dll）。
 - **零外部依赖新增**：控制流走文本；大数据块走 buffer 旁路（§8）。
 
@@ -43,11 +43,11 @@ base       version.dll     底座（导出转发 / D3D11 hook / 宿主能力 / �
 // 返回值 >= 0：已写入 resp 的字节数（不含结尾 NUL）
 //       < 0：所需字节数（取绝对值），调用方扩容后重试
 // respJson 由「调用方」提供；被调方只写入，不负责分配/释放。
-int PlatformEntry(const char* reqJson, char* respJson, int cap);
+int PutPlatform(const char* reqJson, char* respJson, int cap);
 
 // base 提供给 platform 的唯一函数指针，签名同样永不改变。
 // 第 4 参 ctx 是 base 侧的不透明上下文（注意：与 base/platform/user 里的 "user 层" 无关）。
-typedef int (*BaseDispatchFn)(const char* reqJson, char* respJson, int cap, void* ctx);
+typedef int (*baseRequestFn)(const char* reqJson, char* respJson, int cap, void* ctx);
 ```
 
 **为什么「调用方分配 buffer」**：C++ 用 CRT 堆、C# 用 native allocator，跨堆 `free` 是未定义行为。
@@ -56,8 +56,8 @@ typedef int (*BaseDispatchFn)(const char* reqJson, char* respJson, int cap, void
 **方向**
 
 ```
-version.dll  ──PlatformEntry(req, resp, cap)──▶  framework.dll   (base → platform)
-version.dll  ◀──BaseDispatch(req, resp, cap)────  framework.dll   (platform → base)
+version.dll  ──PutPlatform(req, resp, cap)──▶  framework.dll   (base → platform)
+version.dll  ◀──baseRequest(req, resp, cap)────  framework.dll   (platform → base)
 ```
 
 ## 4. 返回值与缓冲区语义
@@ -79,15 +79,15 @@ sequenceDiagram
     participant V as version.dll (base)
     participant F as framework.dll (platform)
 
-    V->>F: LoadLibrary + GetProcAddress("PlatformEntry")
-    V->>F: PlatformEntry({cmd:"init", dispatch, ctx, ini})
+    V->>F: LoadLibrary + GetProcAddress("PutPlatform")
+    V->>F: PutPlatform({cmd:"init", dispatch, ctx, ini})
     F-->>V: {ok:true, proto:1}
     Note over F: 启动 worker / WebSocket 线程
-    V->>F: PlatformEntry({cmd:"geometry"})
+    V->>F: PutPlatform({cmd:"geometry"})
     F-->>V: {ok:true, ...}
-    F->>V: BaseDispatch({cmd:"publishLog", text})
+    F->>V: baseRequest({cmd:"publishLog", text})
     V-->>F: {ok:true}
-    V->>F: PlatformEntry({cmd:"shutdown"})
+    V->>F: PutPlatform({cmd:"shutdown"})
     F-->>V: {ok:true}
     V->>F: FreeLibrary
 ```
@@ -105,7 +105,7 @@ sequenceDiagram
 
 ## 7. 命令清单
 
-### 7.1 base → platform（经 `PlatformEntry`）
+### 7.1 base → platform（经 `PutPlatform`）
 
 | cmd | 参数 | 响应 | 说明 |
 |---|---|---|---|
@@ -119,7 +119,7 @@ sequenceDiagram
 {"cmd":"init","dispatch":"140712345678903","ctx":"140712345678904","ini":{"target":"TTVoice.exe","debug":false}}
 ```
 
-### 7.2 platform → base（经 `BaseDispatch`）
+### 7.2 platform → base（经 `baseRequest`）
 
 | cmd | 参数 | 响应 | 对应旧 Host 能力 |
 |---|---|---|---|
@@ -150,7 +150,7 @@ JSON 不适合传像素。截图等大数据走「buffer + 指针」约定，仍
 
 ## 9. 热加载与安全
 
-- 加载/卸载：`LoadLibrary` → `GetProcAddress("PlatformEntry")` → `init` → 使用 → `shutdown` → `FreeLibrary`。
+- 加载/卸载：`LoadLibrary` → `GetProcAddress("PutPlatform")` → `init` → 使用 → `shutdown` → `FreeLibrary`。
 - **卸载前必须确认没有 platform 代码在栈上**（沿用在途计数 `inflight`；`shutdown` 返回后停止新调用）。
 - 协议化的收益：base 不再持有「一张会悬空的函数指针表」，只持有一个 `init` 时交换的 `dispatch` 指针；
   重载后 platform 重新 `init` 拿新指针，天然重来。
@@ -165,7 +165,7 @@ JSON 不适合传像素。截图等大数据走「buffer + 指针」约定，仍
 ## 11. 编码与线程
 
 - **编码**：UTF-8，NUL 结尾。
-- **线程**：`PlatformEntry` / `BaseDispatch` 可能被多线程调用，两端各自保证线程安全；
+- **线程**：`PutPlatform` / `baseRequest` 可能被多线程调用，两端各自保证线程安全；
   跨边界的调用不得在持有 loader lock 时发起。
 
 ## 12. 错误码

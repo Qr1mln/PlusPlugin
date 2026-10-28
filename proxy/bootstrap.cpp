@@ -123,7 +123,7 @@ HWND ResolveViewWindow(HWND main) {
     return (ctx.visible != nullptr) ? ctx.visible : ctx.first;
 }
 
-// 加载同目录 framework.dll 并走 JSON 协议（PlatformEntry）。
+// 加载同目录 framework.dll 并走 JSON 协议（PutPlatform）。
 void LoadFrameworkViaProtocol(HWND hwnd) {
     const wchar_t* dir = ModuleDir();
     if (dir[0] == L'\0') {
@@ -185,7 +185,7 @@ DWORD WINAPI PayloadThread(LPVOID param) {
 
     // Plugins load only after the UI exists and never under the loader lock:
     // a plugin may touch user32 or create a thread in its own DllMain.
-    // 新链路：直接加载同目录 framework.dll，经 JSON 协议（PlatformEntry）启动。
+    // 新链路：直接加载同目录 framework.dll，经 JSON 协议（PutPlatform）启动。
     LoadFrameworkViaProtocol(hwnd);
 
     // Shown last so the dialog never delays plugin startup, and it parks only

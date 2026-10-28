@@ -16,9 +16,9 @@
 namespace protocol {
 namespace {
 
-typedef int (*PlatformEntryFn)(const char* reqJson, char* respJson, int cap);
+typedef int (*PutPlatformFn)(const char* reqJson, char* respJson, int cap);
 
-PlatformEntryFn g_platform = nullptr;  // resolved PlatformEntry, null when stopped
+PutPlatformFn g_platform = nullptr;  // resolved PutPlatform, null when stopped
 HostContext g_host = {};               // injected host capabilities
 
 // Write a JSON body into the caller's buffer.
@@ -108,7 +108,7 @@ int HandleGrabFrame(char* resp, int cap) {
 
 }  // namespace
 
-int __cdecl BaseDispatch(const char* reqJson, char* respJson, int cap, void* ctx) {
+int __cdecl baseRequest(const char* reqJson, char* respJson, int cap, void* ctx) {
     (void)ctx;  // host state lives in g_host; ctx is accepted for ABI symmetry
     if (reqJson == nullptr || respJson == nullptr || cap <= 0) {
         return -1;
@@ -143,9 +143,9 @@ bool ProtocolStart(HMODULE frameworkDll, const HostContext& host) {
         return false;
     }
     g_host = host;
-    g_platform = reinterpret_cast<PlatformEntryFn>(GetProcAddress(frameworkDll, "PlatformEntry"));
+    g_platform = reinterpret_cast<PutPlatformFn>(GetProcAddress(frameworkDll, "PutPlatform"));
     if (g_platform == nullptr) {
-        Log("protocol: PlatformEntry not found in framework.dll");
+        Log("protocol: PutPlatform not found in framework.dll");
         return false;
     }
 
@@ -153,7 +153,7 @@ bool ProtocolStart(HMODULE frameworkDll, const HostContext& host) {
     // missing init reply does not break the forward path.
     ppjson::Pool pool;
     char dispatch[32] = {};
-    PtrToStr(reinterpret_cast<const void*>(&BaseDispatch), dispatch, sizeof(dispatch));
+    PtrToStr(reinterpret_cast<const void*>(&baseRequest), dispatch, sizeof(dispatch));
     ppjson::Value init = ppjson::MakeObj(pool);
     ppjson::ObjSetStr(pool, init, "cmd", "init");
     ppjson::ObjSetStr(pool, init, "dispatch", dispatch);
