@@ -7,8 +7,6 @@
 #ifndef FRAMEWORK_WINDOW_TARGET_H
 #define FRAMEWORK_WINDOW_TARGET_H
 
-#include <string>
-
 #include <windows.h>
 
 #include "../common/json_util.h"
@@ -26,7 +24,7 @@ class WindowTarget {
   bool view_rect(RECT& out) const;
 
   // 把 (x,y)（space 指定 "screen"/其他）解析成客户区坐标；窗口不可用返回 false。
-  bool resolve_client(int x, int y, const std::string& space, int& cx, int& cy) const;
+  bool resolve_client(int x, int y, const char* space, int& cx, int& cy) const;
 
   // 几何信息对象 {x,y,w,h,scale}；窗口不可用时返回 false。
   bool geometry(ppjson::Value& out) const;

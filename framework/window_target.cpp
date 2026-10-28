@@ -3,6 +3,8 @@
 // ============================================================================
 #include "window_target.h"
 
+#include <cstring>
+
 #include "pplugin.h"
 
 HWND WindowTarget::target() const {
@@ -39,13 +41,13 @@ bool WindowTarget::view_rect(RECT& out) const {
   return true;
 }
 
-bool WindowTarget::resolve_client(int x, int y, const std::string& space, int& cx,
+bool WindowTarget::resolve_client(int x, int y, const char* space, int& cx,
                                   int& cy) const {
   HWND w = target();
   if (w == nullptr) {
     return false;
   }
-  if (space == "screen") {
+  if (space != nullptr && std::strcmp(space, "screen") == 0) {
     POINT p = {x, y};
     if (!ScreenToClient(w, &p)) {
       return false;

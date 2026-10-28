@@ -5,6 +5,8 @@
 // ============================================================================
 #include "input_dispatcher.h"
 
+#include <cstring>
+
 #include "window_target.h"
 
 void InputDispatcher::post_mouse(UINT msg, WPARAM wParam, int cx, int cy) const {
@@ -21,7 +23,7 @@ void InputDispatcher::move(int dx, int dy) {
   post_mouse(WM_MOUSEMOVE, 0, win_.cursor_x(), win_.cursor_y());
 }
 
-void InputDispatcher::move_to(int x, int y, const std::string& space) {
+void InputDispatcher::move_to(int x, int y, const char* space) {
   int cx = x;
   int cy = y;
   if (!win_.resolve_client(x, y, space, cx, cy)) {
@@ -31,38 +33,37 @@ void InputDispatcher::move_to(int x, int y, const std::string& space) {
   post_mouse(WM_MOUSEMOVE, 0, cx, cy);
 }
 
-UINT InputDispatcher::button_down_msg(const std::string& button) {
-  if (button == "right") {
+UINT InputDispatcher::button_down_msg(const char* button) {
+  if (button != nullptr && std::strcmp(button, "right") == 0) {
     return WM_RBUTTONDOWN;
   }
-  if (button == "middle") {
+  if (button != nullptr && std::strcmp(button, "middle") == 0) {
     return WM_MBUTTONDOWN;
   }
   return WM_LBUTTONDOWN;
 }
 
-UINT InputDispatcher::button_up_msg(const std::string& button) {
-  if (button == "right") {
+UINT InputDispatcher::button_up_msg(const char* button) {
+  if (button != nullptr && std::strcmp(button, "right") == 0) {
     return WM_RBUTTONUP;
   }
-  if (button == "middle") {
+  if (button != nullptr && std::strcmp(button, "middle") == 0) {
     return WM_MBUTTONUP;
   }
   return WM_LBUTTONUP;
 }
 
-WPARAM InputDispatcher::button_down_key(const std::string& button) {
-  if (button == "right") {
+WPARAM InputDispatcher::button_down_key(const char* button) {
+  if (button != nullptr && std::strcmp(button, "right") == 0) {
     return MK_RBUTTON;
   }
-  if (button == "middle") {
+  if (button != nullptr && std::strcmp(button, "middle") == 0) {
     return MK_MBUTTON;
   }
   return MK_LBUTTON;
 }
 
-void InputDispatcher::click(int x, int y, const std::string& space,
-                            const std::string& button) {
+void InputDispatcher::click(int x, int y, const char* space, const char* button) {
   if (x >= 0 && y >= 0) {
     int cx = x;
     int cy = y;
@@ -76,8 +77,8 @@ void InputDispatcher::click(int x, int y, const std::string& space,
   post_mouse(button_up_msg(button), 0, win_.cursor_x(), win_.cursor_y());
 }
 
-void InputDispatcher::button(int x, int y, const std::string& space,
-                             const std::string& button, bool down) {
+void InputDispatcher::button(int x, int y, const char* space, const char* button,
+                             bool down) {
   if (x >= 0 && y >= 0) {
     int cx = x;
     int cy = y;
@@ -124,21 +125,27 @@ void InputDispatcher::scroll(int delta) {
 }
 
 // 文本输入：UTF-8 -> UTF-16，逐字符向目标窗口投递 WM_CHAR。
-void InputDispatcher::text(const std::string& utf8) {
-  if (utf8.empty()) {
+// 用 HeapAlloc 的临时宽缓冲，避免 std::wstring。
+void InputDispatcher::text(const char* utf8) {
+  if (utf8 == nullptr || utf8[0] == '\0') {
     return;
   }
   HWND w = win_.target();
   if (w == nullptr) {
     return;
   }
-  const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
-  if (wlen <= 0) {
+  const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+  if (wlen <= 1) {
     return;
   }
-  std::wstring ws(static_cast<size_t>(wlen - 1), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &ws[0], wlen);
-  for (const wchar_t ch : ws) {
-    PostMessageW(w, WM_CHAR, static_cast<WPARAM>(ch), 0);
+  wchar_t* ws = static_cast<wchar_t*>(
+      HeapAlloc(GetProcessHeap(), 0, sizeof(wchar_t) * static_cast<size_t>(wlen)));
+  if (ws == nullptr) {
+    return;
   }
+  MultiByteToWideChar(CP_UTF8, 0, utf8, -1, ws, wlen);
+  for (int i = 0; i < wlen - 1; ++i) {
+    PostMessageW(w, WM_CHAR, static_cast<WPARAM>(ws[i]), 0);
+  }
+  HeapFree(GetProcessHeap(), 0, ws);
 }

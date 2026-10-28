@@ -22,8 +22,19 @@ void Logger::publish(const char* fmt, ...) noexcept {
   host_->publishLog(buf);
 }
 
-void Logger::publish_line(const std::string& line) noexcept {
-  if (host_ != nullptr && host_->publishLog != nullptr) {
-    host_->publishLog(line.c_str());
+void Logger::publish_line(const char* line) noexcept {
+  if (host_ != nullptr && host_->publishLog != nullptr && line != nullptr) {
+    host_->publishLog(line);
   }
+}
+
+void Logger::publish_line_prefix(const char* prefix, const char* line) noexcept {
+  if (host_ == nullptr || host_->publishLog == nullptr) {
+    return;
+  }
+  char buf[1024];
+  std::snprintf(buf, sizeof(buf), "%s%s", (prefix != nullptr) ? prefix : "",
+                (line != nullptr) ? line : "");
+  buf[sizeof(buf) - 1] = 0;
+  host_->publishLog(buf);
 }

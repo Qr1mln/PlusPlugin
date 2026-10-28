@@ -31,8 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <string>
+#include <cwchar>
 
 #include "../common/json_util.h"
 
@@ -49,7 +48,7 @@
 namespace {
 
 HMODULE g_hModule = nullptr;
-std::wstring g_moduleDir;
+wchar_t g_moduleDir[MAX_PATH] = {};
 
 // picker 模块的广播出口：给某个 WS 连接写一帧文本。
 void PickerSend(void* conn, const char* data, size_t len) {
@@ -59,14 +58,16 @@ void PickerSend(void* conn, const char* data, size_t len) {
   }
 }
 
-std::string ModuleDirUtf8() {
-  if (g_moduleDir.empty()) {
-    return ".";
+const char* ModuleDirUtf8() {
+  static char buf[MAX_PATH * 3] = {};
+  if (g_moduleDir[0] == L'\0') {
+    buf[0] = '.';
+    buf[1] = '\0';
+    return buf;
   }
-  char buf[MAX_PATH * 3] = {};
-  WideCharToMultiByte(CP_UTF8, 0, g_moduleDir.c_str(), -1, buf, sizeof(buf),
-                      nullptr, nullptr);
-  return std::string(buf);
+  WideCharToMultiByte(CP_UTF8, 0, g_moduleDir, -1, buf, sizeof(buf), nullptr,
+                      nullptr);
+  return buf;
 }
 
 // 在 mg_start 之前自己先绑一次端口，把 WSA 错误号打进 proxy.log。
@@ -119,7 +120,7 @@ class Framework {
  public:
   Framework() : input_(win_), handler_(log_, win_, input_) {}
 
-  int start(const Host* host, const std::string& doc_root, int port) {
+  int start(const Host* host, const char* doc_root, int port) {
     log_.set_host(host);
     win_.set_host(host);
     ProbePort(host, port);  // 先自测端口是否可绑定（结果见 proxy.log）
@@ -169,12 +170,13 @@ static int __cdecl PluginInit(const Host* host) {
   }
 
   const int port = 47801;
-  const std::string doc_root = ModuleDirUtf8();
+  const char* doc_root = ModuleDirUtf8();
   const int rc = g_fw.start(host, doc_root, port);
   if (rc == P_OK) {
-    std::string ok = "started, ws=ws://127.0.0.1:47801/ws doc_root=";
-    ok += doc_root;
-    host->publishLog(ok.c_str());
+    char ok[512] = {};
+    std::snprintf(ok, sizeof(ok), "started, ws=ws://127.0.0.1:47801/ws doc_root=%s",
+                  doc_root);
+    host->publishLog(ok);
   }
   return rc;
 }
@@ -227,13 +229,18 @@ int WriteResp(const char* body, char* resp, int cap) {
   return need;
 }
 
-std::string CallBase(const char* req) {
+// 调 ghost(request) 并把响应写进 out；返回是否成功。
+bool CallBase(const char* req, char* out, int cap) {
+  out[0] = '\0';
   if (g_dispatch == nullptr) {
-    return "{}";
+    return false;
   }
-  char resp[1024] = {};
-  const int n = g_dispatch(req, resp, static_cast<int>(sizeof(resp)), g_dispatchCtx);
-  return (n >= 0) ? std::string(resp) : std::string("{}");
+  const int n = g_dispatch(req, out, cap, g_dispatchCtx);
+  if (n < 0) {
+    out[0] = '\0';
+    return false;
+  }
+  return true;
 }
 
 void __cdecl DispatchPublishLog(const char* text) {
@@ -244,17 +251,21 @@ void __cdecl DispatchPublishLog(const char* text) {
   j.SetStr("text", (text != nullptr) ? text : "");
   char buf[1024] = {};
   j.Dump(buf, sizeof(buf));
-  CallBase(buf);
+  char resp[128] = {};
+  CallBase(buf, resp, sizeof(resp));  // 响应忽略，仅转发日志
 }
 
 // 调 base 取一个 hwnd（"mainWindow"/"viewWindow"），解析 {"hwnd":"..."}。
 HWND __cdecl DispatchWindowByCmd(const char* req) {
-  const std::string resp = CallBase(req);
+  char buf[512] = {};
+  if (!CallBase(req, buf, sizeof(buf))) {
+    return nullptr;
+  }
   ppjson::Node nodes[8] = {};
   ppjson::Pool pool(nodes, 8);
   ppjson::Value j;
   char err[32] = {};
-  if (!ppjson::Value::Parse(resp.c_str(), pool, j, err, sizeof(err))) {
+  if (!ppjson::Value::Parse(buf, pool, j, err, sizeof(err))) {
     return nullptr;
   }
   const char* hwnd = j.Find("hwnd").AsStr();
@@ -266,12 +277,15 @@ HWND __cdecl DispatchMainWindow() { return DispatchWindowByCmd("{\"cmd\":\"mainW
 HWND __cdecl DispatchViewWindow() { return DispatchWindowByCmd("{\"cmd\":\"viewWindow\"}"); }
 
 float __cdecl DispatchScale() {
-  const std::string resp = CallBase("{\"cmd\":\"scale\"}");
+  char buf[512] = {};
+  if (!CallBase("{\"cmd\":\"scale\"}", buf, sizeof(buf))) {
+    return 1.0f;
+  }
   ppjson::Node nodes[8] = {};
   ppjson::Pool pool(nodes, 8);
   ppjson::Value j;
   char err[32] = {};
-  if (!ppjson::Value::Parse(resp.c_str(), pool, j, err, sizeof(err))) {
+  if (!ppjson::Value::Parse(buf, pool, j, err, sizeof(err))) {
     return 1.0f;
   }
   return static_cast<float>(j.Find("scale").AsNum(1.0));
@@ -291,7 +305,7 @@ const Host g_hostViaDispatch = {
 
 int StartViaProtocol() {
   const int port = 47801;
-  const std::string doc_root = ModuleDirUtf8();
+  const char* doc_root = ModuleDirUtf8();
   const int rc = g_fw.start(&g_hostViaDispatch, doc_root, port);
   if (rc == P_OK) {
     DispatchPublishLog("framework started via protocol (NotifyPlatform)");
@@ -339,10 +353,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     g_hModule = hModule;
     wchar_t buf[MAX_PATH] = {};
     if (GetModuleFileNameW(hModule, buf, MAX_PATH) > 0) {
-      g_moduleDir = std::wstring(buf);
-      // 去掉文件名，保留目录（含末尾分隔符由 parent_path 处理）。
-      g_moduleDir = std::wstring(
-          std::filesystem::path(g_moduleDir).parent_path().wstring());
+      // 去掉文件名，保留目录：找最后一个反斜杠并截断（无 STL）。
+      wchar_t* last = wcsrchr(buf, L'\\');
+      if (last != nullptr) {
+        *last = L'\0';
+      }
+      wcscpy_s(g_moduleDir, MAX_PATH, buf);
     }
     DisableThreadLibraryCalls(hModule);
   } else if (reason == DLL_PROCESS_DETACH) {

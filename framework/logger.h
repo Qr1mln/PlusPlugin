@@ -8,8 +8,6 @@
 #ifndef FRAMEWORK_LOGGER_H
 #define FRAMEWORK_LOGGER_H
 
-#include <string>
-
 struct Host;  // 前向声明，避免在这里引入 pplugin.h 的全部定义
 
 class Logger {
@@ -21,7 +19,10 @@ class Logger {
   void publish(const char* fmt, ...) noexcept;
 
   // 发布一条已经格式化好的日志行（不附加任何格式）。
-  void publish_line(const std::string& line) noexcept;
+  void publish_line(const char* line) noexcept;
+
+  // 发布 "prefix + line" 拼接的一行（不附加格式）。
+  void publish_line_prefix(const char* prefix, const char* line) noexcept;
 
  private:
   const Host* host_ = nullptr;

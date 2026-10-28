@@ -19,9 +19,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
-#include <mutex>
-#include <string>
-#include <vector>
+#include <cstring>
 
 namespace {
 
@@ -39,13 +37,26 @@ struct Client {
     void* conn;
     bool watch;
 };
-std::mutex g_mutex;  // 保护 g_clients / watch 状态 / 待发拾取结果
-std::vector<Client> g_clients;
+const int kMaxClients = 64;
+
+CRITICAL_SECTION g_cs;          // 保护 g_clients / watch 状态 / 待发拾取结果
+bool g_csInit = false;          // g_cs 仅首次建线程前初始化一次
+Client g_clients[kMaxClients];
+int g_clientCount = 0;
 std::atomic<int> g_watchCount(0);
 std::atomic<bool> g_pickActive(false);
 
-std::string g_pendingPick;
+char g_pendingPick[256];
 bool g_pendingReady = false;
+
+// RAII 锁：构造即 EnterCriticalSection，析构即 LeaveCriticalSection。
+struct CsGuard {
+  explicit CsGuard(CRITICAL_SECTION& cs) : cs_(cs) { EnterCriticalSection(&cs_); }
+  ~CsGuard() { LeaveCriticalSection(&cs_); }
+  CsGuard(const CsGuard&) = delete;
+  CsGuard& operator=(const CsGuard&) = delete;
+  CRITICAL_SECTION& cs_;
+};
 
 // 钩子状态（只由推送线程访问）
 HHOOK g_hook = nullptr;
@@ -91,29 +102,32 @@ double Round1(double v) {
 // 把一帧文本发给全部（或仅订阅的）连接。
 // 写在持锁区间内，保证用到的 conn 不会被并发回收；wait=false 时拿不到锁就跳过这一帧
 // （连接正在关闭），避免与 CivetWeb 的关闭路径互相等待。
-void Broadcast(const std::string& msg, bool onlyWatch, bool wait) {
-    if (g_broadcast == nullptr || msg.empty()) {
+void Broadcast(const char* msg, int msgLen, bool onlyWatch, bool wait) {
+    if (g_broadcast == nullptr || msg == nullptr || msgLen <= 0) {
         return;
     }
-    std::unique_lock<std::mutex> lk(g_mutex, std::defer_lock);
     if (wait) {
-        lk.lock();
-    } else if (!lk.try_lock()) {
-        return;
+        EnterCriticalSection(&g_cs);
+    } else if (!TryEnterCriticalSection(&g_cs)) {
+        return;  // 连接正在关闭，跳过这一帧
     }
-    for (const Client& c : g_clients) {
+    for (int i = 0; i < g_clientCount; ++i) {
+        const Client& c = g_clients[i];
         if (onlyWatch && !c.watch) {
             continue;
         }
-        g_broadcast(c.conn, msg.c_str(), msg.size());
+        g_broadcast(c.conn, msg, static_cast<size_t>(msgLen));
     }
+    LeaveCriticalSection(&g_cs);
 }
 
 // 排一条拾取结果并唤醒推送线程立刻发出（stopAfter=true 时发完卸钩子）。
 void QueuePick(const char* json, bool stopAfter) {
     {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        g_pendingPick = (json != nullptr) ? json : "";
+        CsGuard lk(g_cs);
+        std::strncpy(g_pendingPick, (json != nullptr) ? json : "",
+                     sizeof(g_pendingPick) - 1);
+        g_pendingPick[sizeof(g_pendingPick) - 1] = '\0';
         g_pendingReady = true;
     }
     const DWORD tid = g_tid;
@@ -212,20 +226,23 @@ void PickStartInThread() {
     }
     char jbuf[256] = {};
     p.Dump(jbuf, sizeof(jbuf));
-    Broadcast(jbuf, false, true);
+    Broadcast(jbuf, static_cast<int>(std::strlen(jbuf)), false, true);
 }
 
 void PickFlushInThread(bool stopAfter) {
-    std::string msg;
+    char msg[256] = {};
+    bool has = false;
     {
-        std::lock_guard<std::mutex> lk(g_mutex);
+        CsGuard lk(g_cs);
         if (g_pendingReady) {
-            msg.swap(g_pendingPick);
+            std::strncpy(msg, g_pendingPick, sizeof(msg) - 1);
+            msg[sizeof(msg) - 1] = '\0';
             g_pendingReady = false;
+            has = true;
         }
     }
-    if (!msg.empty()) {
-        Broadcast(msg, false, true);
+    if (has) {
+        Broadcast(msg, static_cast<int>(std::strlen(msg)), false, true);
     }
     if (stopAfter) {
         PickStopInThread();
@@ -245,7 +262,7 @@ void PushCursorTick() {
     c.SetStr("t", "cursor");
     char jbuf[384] = {};
     c.Dump(jbuf, sizeof(jbuf));
-    Broadcast(jbuf, true, false);
+    Broadcast(jbuf, static_cast<int>(std::strlen(jbuf)), true, false);
 }
 
 DWORD WINAPI PushThreadProc(LPVOID) {
@@ -283,6 +300,10 @@ bool PickerStart(const Host* host, PickerBroadcast broadcast) {
     if (g_thread != nullptr) {
         return true;
     }
+    if (!g_csInit) {
+        InitializeCriticalSection(&g_cs);
+        g_csInit = true;
+    }
     g_thread = CreateThread(nullptr, 0, &PushThreadProc, nullptr, 0, nullptr);
     if (g_thread == nullptr) {
         LogLine("picker: CreateThread failed err=%lu", GetLastError());
@@ -310,26 +331,32 @@ void PickerStop() {
     g_thread = nullptr;
     g_tid = 0;
     {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        g_clients.clear();
+        CsGuard lk(g_cs);
+        g_clientCount = 0;
         g_watchCount.store(0);
     }
     LogLine("picker: push thread stopped");
 }
 
 void PickerAddClient(void* conn) {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    g_clients.push_back(Client{conn, false});
+    CsGuard lk(g_cs);
+    if (g_clientCount < kMaxClients) {
+        g_clients[g_clientCount].conn = conn;
+        g_clients[g_clientCount].watch = false;
+        ++g_clientCount;
+    }
 }
 
 void PickerRemoveClient(void* conn) {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    for (size_t i = 0; i < g_clients.size(); ++i) {
+    CsGuard lk(g_cs);
+    for (int i = 0; i < g_clientCount; ++i) {
         if (g_clients[i].conn == conn) {
             if (g_clients[i].watch) {
                 g_watchCount.fetch_sub(1);
             }
-            g_clients.erase(g_clients.begin() + static_cast<long>(i));
+            // 用尾部元素填补空洞，保持数组紧凑（O(1)）。
+            g_clients[i] = g_clients[g_clientCount - 1];
+            --g_clientCount;
             break;
         }
     }
@@ -339,11 +366,11 @@ bool PickerSetWatch(void* conn, bool on) {
     if (conn == nullptr) {
         return false;
     }
-    std::lock_guard<std::mutex> lk(g_mutex);
-    for (Client& c : g_clients) {
-        if (c.conn == conn) {
-            if (c.watch != on) {
-                c.watch = on;
+    CsGuard lk(g_cs);
+    for (int i = 0; i < g_clientCount; ++i) {
+        if (g_clients[i].conn == conn) {
+            if (g_clients[i].watch != on) {
+                g_clients[i].watch = on;
                 if (on) {
                     g_watchCount.fetch_add(1);
                 } else {

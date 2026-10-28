@@ -3,8 +3,8 @@
 // ============================================================================
 #include "ws_server.h"
 
+#include <cstdio>
 #include <cstring>
-#include <string>
 
 #include "civetweb.h"
 #include "command_handler.h"
@@ -16,30 +16,32 @@ namespace {
 const char* kOk = "0000";
 const char* kErr = "9999";
 
-// HTTP 处理器用的一块堆池：节点数按响应规模给足。
 const int kHttpPoolNodes = 256;
+const int kReplyCap = 16384;   // WS 响应缓冲（脚本列表等可能偏大）
+const int kMsgCap = 16384;     // 一帧命令文本上限
+const int kBodyCap = 4 * 1024 * 1024;  // 请求体上限（与原 4MB 一致）
 }  // namespace
 
 WsServer* WsServer::g_log_self_ = nullptr;
 
 bool WsServer::start(Logger& log, CommandHandler& handler, ScriptStore& scripts,
-                     const std::string& doc_root, int port) {
+                     const char* doc_root, int port) {
   log_ = &log;
   handler_ = &handler;
   scripts_ = &scripts;
   g_log_self_ = this;
 
-  port_opt_ = "127.0.0.1:" + std::to_string(port);
+  std::snprintf(port_opt_, sizeof(port_opt_), "127.0.0.1:%d", port);
   const char* options[] = {
-      "listening_ports",       port_opt_.c_str(),
-      "document_root",         doc_root.c_str(),
+      "listening_ports",          port_opt_,
+      "document_root",            (doc_root != nullptr) ? doc_root : "",
       "enable_directory_listing", "no",
-      "request_timeout_ms",    "30000",  // CivetWeb 只认 *_ms，且无 enable_websocket 选项
+      "request_timeout_ms",       "30000",
       nullptr,
   };
 
   struct mg_callbacks cb = {};
-  cb.log_message = &on_log;  // 把 CivetWeb 启动/运行日志导进 proxy.log
+  cb.log_message = &on_log;
   ctx_ = mg_start(&cb, this, options);
   if (ctx_ == nullptr) {
     log_->publish("mg_start failed");
@@ -61,7 +63,7 @@ void WsServer::stop() noexcept {
 }
 
 int WsServer::on_ws_connect(const mg_connection*, void* /*cbdata*/) {
-  return 0;  // 0 = 继续握手
+  return 0;
 }
 
 void WsServer::on_ws_ready(mg_connection* conn, void* cbdata) {
@@ -79,48 +81,54 @@ void WsServer::on_ws_close(const mg_connection* conn, void* cbdata) {
 int WsServer::on_ws_data(mg_connection* conn, int /*bits*/, char* data,
                          size_t len, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
-  if (conn == nullptr || data == nullptr) {
+  if (conn == nullptr || data == nullptr || len >= static_cast<size_t>(kMsgCap)) {
     return 1;
   }
-  // 收一条命令（MVP 消息很小，单帧足够；多帧场景留待后续）。
-  std::string msg(data, len);
-  // 取点轮询约 14 次/秒，回显到 proxy.log 会把日志刷爆，直接跳过。
-  if (msg.find("\"cursor\"") == std::string::npos) {
-    self->log_->publish("recv: %s", msg.c_str());
-  }
-  const std::string reply = self->handler_->handle(msg, conn);
-  mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, reply.c_str(),
-                     reply.size());
-  return 1;  // 1 = 保持连接
-}
+  // 复制到 NUL 结尾的缓冲，供解析与日志使用。
+  char msg[kMsgCap] = {};
+  std::memcpy(msg, data, len);
+  msg[len] = '\0';
 
-// CivetWeb 的日志回调：把它的启动/运行信息（含 mg_start 失败原因）导进 proxy.log。
-// 返回 1 表示抑制 civetweb 自身的 stderr 输出（我们已转发）。
-// 注意：该回调不带 cbdata，用静态 g_log_self_ 取实例（单例）。
-int WsServer::on_log(const mg_connection*, const char* message) {
-  if (g_log_self_ != nullptr && message != nullptr) {
-    g_log_self_->log_->publish_line(std::string("civetweb: ") + message);
+  // 取点轮询频繁，跳过回显。
+  if (std::strstr(msg, "\"cursor\"") == nullptr) {
+    self->log_->publish("recv: %s", msg);
+  }
+  char reply[kReplyCap] = {};
+  const int n = self->handler_->handle(msg, reply, kReplyCap, conn);
+  if (n > 0) {
+    mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, reply,
+                       static_cast<size_t>(n));
   }
   return 1;
 }
 
-std::string WsServer::read_body(mg_connection* conn,
-                                const struct mg_request_info* ri) {
-  std::string payload;
-  if (ri != nullptr && ri->content_length > 0 &&
-      ri->content_length < 4 * 1024 * 1024) {
-    payload.resize(static_cast<size_t>(ri->content_length));
-    size_t got = 0;
-    while (got < payload.size()) {
-      const int n = mg_read(conn, &payload[got], payload.size() - got);
-      if (n <= 0) {
-        break;
-      }
-      got += static_cast<size_t>(n);
-    }
-    payload.resize(got);
+int WsServer::on_log(const mg_connection*, const char* message) {
+  if (g_log_self_ != nullptr && message != nullptr) {
+    g_log_self_->log_->publish_line_prefix("civetweb: ", message);
   }
-  return payload;
+  return 1;
+}
+
+int WsServer::read_body(mg_connection* conn, const struct mg_request_info* ri,
+                        char* out, int cap) {
+  if (out == nullptr || cap <= 0) {
+    return 0;
+  }
+  out[0] = '\0';
+  if (ri == nullptr || ri->content_length <= 0 ||
+      ri->content_length >= kBodyCap || ri->content_length >= cap) {
+    return 0;
+  }
+  int got = 0;
+  while (got < static_cast<int>(ri->content_length)) {
+    const int n = mg_read(conn, out + got, static_cast<size_t>(cap - 1 - got));
+    if (n <= 0) {
+      break;
+    }
+    got += n;
+  }
+  out[got] = '\0';
+  return got;
 }
 
 void WsServer::send_json(mg_connection* conn, ppjson::Value resp) {
@@ -131,16 +139,11 @@ void WsServer::send_json(mg_connection* conn, ppjson::Value resp) {
   mg_write(conn, body, static_cast<size_t>(len));
 }
 
-// GET    /api/scripts              列出
-// GET    /api/scripts?name=xx      读取
-// POST   /api/scripts?name=xx      新建/保存（body 为脚本 JSON）
-// DELETE /api/scripts?name=xx      删除
 int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
   const struct mg_request_info* ri = mg_get_request_info(conn);
-  const std::string method =
-      (ri != nullptr && ri->request_method != nullptr) ? ri->request_method
-                                                       : "GET";
+  const char* method =
+      (ri != nullptr && ri->request_method != nullptr) ? ri->request_method : "GET";
 
   char nameBuf[256] = {};
   bool hasName = false;
@@ -149,22 +152,24 @@ int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
                  sizeof(nameBuf)) > 0) {
     hasName = true;
   }
-  const std::string name(nameBuf);
 
   ppjson::Node nodes[kHttpPoolNodes] = {};
   ppjson::Pool pool(nodes, kHttpPoolNodes);
   ppjson::Value resp = ppjson::Value::Obj(pool);
 
-  if (hasName && !ScriptStore::safe_name(name)) {
+  if (hasName && !ScriptStore::safe_name(nameBuf)) {
     resp.SetBool("success", false);
     resp.SetStr("data", "bad name");
     resp.SetStr("code", kErr);
-  } else if (hasName && method == "DELETE") {
-    self->scripts_->remove(pool, name, resp);
-  } else if (hasName && (method == "POST" || method == "PUT")) {
-    self->scripts_->write(pool, name, read_body(conn, ri), resp);
+  } else if (hasName && std::strcmp(method, "DELETE") == 0) {
+    self->scripts_->remove(pool, nameBuf, resp);
+  } else if (hasName &&
+             (std::strcmp(method, "POST") == 0 || std::strcmp(method, "PUT") == 0)) {
+    char body[kBodyCap] = {};
+    read_body(conn, ri, body, kBodyCap);
+    self->scripts_->write(pool, nameBuf, body, resp);
   } else if (hasName) {
-    self->scripts_->read(pool, name, resp);
+    self->scripts_->read(pool, nameBuf, resp);
   } else {
     self->scripts_->list(pool, resp);
   }
@@ -172,7 +177,6 @@ int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
   return 200;
 }
 
-// GET /api/app: 目标窗口客户区几何 + DPI 缩放（供“刷新应用”展示）。
 int WsServer::on_http_app(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
   ppjson::Node nodes[kHttpPoolNodes] = {};
@@ -193,7 +197,6 @@ int WsServer::on_http_app(mg_connection* conn, void* cbdata) {
   return 200;
 }
 
-// GET /api/cursor: live cursor readout in view client coords (read-only).
 int WsServer::on_http_cursor(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
   ppjson::Node nodes[kHttpPoolNodes] = {};
