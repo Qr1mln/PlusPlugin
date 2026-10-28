@@ -85,6 +85,38 @@ flowchart LR
 {"id":"8","success":true,"data":{"sx":1530,"sy":420,"x":301,"y":210,"lx":200.7,"ly":140,"w":2115,"h":1777,"scale":1.5,"inside":true,"f8":false},"code":"0000"}
 ```
 
+### 取坐标 / 拾取（picker 模块，见 `framework/picker.cpp`）
+
+取点逻辑在 **framework.dll 内部**（`picker.h` / `picker.cpp`），不在 Python 侧：
+
+- 模块自带一条消息循环线程（`SetTimer` 约 30Hz 采样 + 承载 `WH_MOUSE_LL` 钩子）；
+- 广播出口由 `framework.cpp` 用 `mg_websocket_write` 实现（`PickerSend`），
+  广播时持锁，连接 close 回调也拿同一把锁摘连接，避免写到已回收的 conn。
+
+命令（客户端 -> 服务端）：
+
+```json
+{"id":"1","type":"cursor","action":"watch"}
+{"id":"2","type":"cursor","action":"unwatch"}
+{"id":"3","type":"pick","action":"start"}
+{"id":"4","type":"pick","action":"cancel"}
+```
+
+主动推送帧（服务端 -> 客户端，**无 id**，不属任何请求的应答）：
+
+```json
+{"t":"cursor","sx":1530,"sy":420,"x":301,"y":210,"lx":200.7,"ly":140,"w":2115,"h":1777,"scale":1.5,"inside":true,"f8":false}
+{"t":"pick","action":"ready"}
+{"t":"pick","sx":1530,"sy":420,"x":301,"y":210,"lx":200.7,"ly":140,"scale":1.5}
+{"t":"pick","action":"cancel"}
+{"t":"pick","action":"failed","error":"set hook failed"}
+```
+
+- `pick/start`：装钩子，下一次落在应用窗口内的**左键被吞掉**（应用不响应）并回传坐标，
+  **右键取消**；任一结果都会自动卸钩子；
+- `cursor` 订阅是按连接记的，连接断开或 WS 重连后需重新 `watch`（前端 `cursorStore.js` 已处理），
+  收不到推送帧时前端自动退回轮询 `{"type":"cursor"}`。
+
 ### 取坐标（只读）
 
 `{"type":"cursor"}`（或 HTTP `GET /api/cursor`）只回报真实光标位置，不注入任何鼠标事件、不装钩子、不吞点击：
