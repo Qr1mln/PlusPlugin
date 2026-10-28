@@ -380,11 +380,13 @@ static void CleanupLoadedCopies(const wchar_t* dir, const char* dllNameUtf8) {
 }
 
 static void ScanPlugins() {
-    const std::vector<std::wstring>& names = LoadDllNames();
-    const std::wstring hostDir = ModuleDir().wstring();
+    wchar_t names[kMaxLoadDlls][kMaxDllNameChars] = {};
+    const int nameCount = LoadDllNames(names, kMaxLoadDlls);
+    const wchar_t* hostDir = ModuleDir();
     Log("loaders.");
 
-    for (const std::wstring& name : names) {
+    for (int ni = 0; ni < nameCount; ++ni) {
+        const wchar_t* name = names[ni];
         if (g_slotCount >= kMaxPlugins) {
             Log("plugin: too many dlls, rest ignored");
             break;
@@ -392,16 +394,17 @@ static void ScanPlugins() {
         PluginSlot& slot = g_slots[g_slotCount];
         slot = PluginSlot();
         slot.state = PluginState::kDiscovered;
-        wcscpy_s(slot.dir, static_cast<size_t>(kPathChars), hostDir.c_str());
+        wcscpy_s(slot.dir, static_cast<size_t>(kPathChars), hostDir);
         WideToUtf8(slot.dir, slot.dirUtf8, kPathUtf8);
-        WideToUtf8(name.c_str(), slot.dllName, kPathChars);
+        WideToUtf8(name, slot.dllName, kPathChars);
 
-        std::wstring base = name;
-        const size_t dot = base.rfind(L'.');
-        if (dot != std::wstring::npos) {
-            base.resize(dot);
+        wchar_t base[kMaxDllNameChars] = {};
+        wcscpy_s(base, static_cast<size_t>(kMaxDllNameChars), name);
+        wchar_t* dot = wcsrchr(base, L'.');
+        if (dot != nullptr) {
+            *dot = L'\0';
         }
-        WideToUtf8(base.c_str(), slot.name, static_cast<int>(sizeof(slot.name)));
+        WideToUtf8(base, slot.name, static_cast<int>(sizeof(slot.name)));
 
         slot.autoLoad = true;
         slot.priority = g_slotCount;

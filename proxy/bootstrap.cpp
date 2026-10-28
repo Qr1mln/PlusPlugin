@@ -4,7 +4,6 @@
 
 #include <cstdio>
 #include <cwchar>
-#include <filesystem>
 
 #include "config.h"
 #include "log.h"
@@ -19,12 +18,13 @@ namespace {
 // Base name of the host EXE, compared against target= so we only act inside
 // the configured process and never in a child or an unrelated one.
 const wchar_t* ExeBaseName() {
-    static const std::wstring name = [] {
-        wchar_t buf[MAX_PATH] = {};
+    static const wchar_t* name = [] {
+        static wchar_t buf[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, buf, MAX_PATH);
-        return std::filesystem::path(buf).filename().wstring();
+        const wchar_t* slash = wcsrchr(buf, L'\\');
+        return (slash != nullptr) ? slash + 1 : buf;
     }();
-    return name.c_str();
+    return name;
 }
 
 struct WindowSearch {

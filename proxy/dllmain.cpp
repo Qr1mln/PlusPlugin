@@ -26,8 +26,6 @@
 
 #include <windows.h>        // Win32 API：GetSystemDirectoryW / LoadLibraryW / CreateThread 等
 
-#include <filesystem>       // std::filesystem：拼装真身 DLL 的绝对路径
-
 #include "bootstrap.h"      // PayloadThread 声明
 #include "log.h"            // Log() 日志
 #include "proxy_exports.h"  // PROXY_EXPORT_LIST：17 个待转发的导出清单
@@ -52,9 +50,9 @@ HMODULE LoadSysVersionDll() {
     if (n == 0 || n >= MAX_PATH) {                         // 取失败，或路径超出缓冲区
         return nullptr;                                    // 定位失败
     }
-    const std::filesystem::path realPath =                 // 拼出真身 DLL 的绝对路径
-        std::filesystem::path(sysdir) / L"version.dll";
-    return LoadLibraryW(realPath.c_str());                 // 按绝对路径加载真身，失败返回 nullptr（防递归）
+    wchar_t realPath[MAX_PATH] = {};                        // 拼出真身 DLL 的绝对路径
+    swprintf_s(realPath, MAX_PATH, L"%s\\version.dll", sysdir);
+    return LoadLibraryW(realPath);                          // 按绝对路径加载真身，失败返回 nullptr（防递归）
 }
 
 // 职责 2：把真身的导出地址绑进 g_pfn_* —— 只填表，返回未解析到的数量。

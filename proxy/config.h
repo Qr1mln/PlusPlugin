@@ -20,19 +20,25 @@
 // accepted for [host] keys: the Win32 profile API is tried first, then a line
 // scanner.
 //
-// NOTE: keep the proxy sources pure ASCII.
+// No C++ standard library: paths are fixed wide buffers, the loader name list
+// is a fixed 2-D array.
+//
+// Keep this file pure ASCII.
 #pragma once
 
 #include <windows.h>
 
-#include <filesystem>
-#include <vector>
+// Fixed sizes. Paths cover <ModuleDir>\version.ini and the module dir itself.
+const int kConfigDirChars   = 512;   // ModuleDir / VersionIniPath buffer
+const int kMaxLoadDlls      = 8;     // [loaders] entries kept
+const int kMaxDllNameChars  = 64;    // one [loaders] dll name
 
-// Directory holding our version.dll; empty when it cannot be resolved.
-const std::filesystem::path& ModuleDir();
+// Directory holding our version.dll (no trailing backslash); L"" when it
+// cannot be resolved. Points at a cached static buffer.
+const wchar_t* ModuleDir();
 
-// <ModuleDir>\version.ini; empty when ModuleDir is empty.
-const std::filesystem::path& VersionIniPath();
+// <ModuleDir>\version.ini; L"" when ModuleDir is empty. Cached static buffer.
+const wchar_t* VersionIniPath();
 
 // Host exe base name from [host] target= (wide, cached). L"" when nothing
 // usable is configured, i.e. the caller must not attach.
@@ -41,6 +47,7 @@ const wchar_t* TargetExeName();
 // [host] debug= (default true): pop a dialog once the proxy has attached.
 bool DebugEnabled();
 
-// [loaders] dlls= entries, already validated. Plain names only: resolve each
-// against ModuleDir() before loading.
-const std::vector<std::wstring>& LoadDllNames();
+// [loaders] plain dll names, already validated and de-duplicated. Writes up to
+// cap entries (each a fixed kMaxDllNameChars buffer) and returns the count.
+// Resolve each name against ModuleDir() before loading.
+int LoadDllNames(wchar_t out[][kMaxDllNameChars], int cap);
