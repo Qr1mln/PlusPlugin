@@ -10,7 +10,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "json_util.h"
+#include "../common/json_util.h"
 #include "log.h"
 
 namespace protocol {
@@ -42,7 +42,8 @@ int RespOk(char* resp, int cap) {
 }
 
 int RespErr(char* resp, int cap, int code, const char* msg) {
-    ppjson::Pool pool;
+    ppjson::Node poolNodes[32] = {};
+    ppjson::Pool pool(poolNodes, 32);
     ppjson::Value o = ppjson::MakeObj(pool);
     ppjson::ObjSetBool(pool, o, "ok", false);
     ppjson::ObjSetStr(pool, o, "err", (msg != nullptr) ? msg : "");
@@ -68,7 +69,8 @@ int HandlePublishLog(ppjson::Value req, char* resp, int cap) {
 }
 
 int HandleMainWindow(char* resp, int cap) {
-    ppjson::Pool pool;
+    ppjson::Node poolNodes[32] = {};
+    ppjson::Pool pool(poolNodes, 32);
     ppjson::Value o = ppjson::MakeObj(pool);
     char hwnd[32] = {};
     PtrToStr(g_host.mainWindow, hwnd, sizeof(hwnd));
@@ -80,7 +82,8 @@ int HandleMainWindow(char* resp, int cap) {
 }
 
 int HandleViewWindow(char* resp, int cap) {
-    ppjson::Pool pool;
+    ppjson::Node poolNodes[32] = {};
+    ppjson::Pool pool(poolNodes, 32);
     ppjson::Value o = ppjson::MakeObj(pool);
     char hwnd[32] = {};
     PtrToStr(g_host.viewWindow, hwnd, sizeof(hwnd));
@@ -92,7 +95,8 @@ int HandleViewWindow(char* resp, int cap) {
 }
 
 int HandleScale(char* resp, int cap) {
-    ppjson::Pool pool;
+    ppjson::Node poolNodes[32] = {};
+    ppjson::Pool pool(poolNodes, 32);
     ppjson::Value o = ppjson::MakeObj(pool);
     ppjson::ObjSetBool(pool, o, "ok", true);
     ppjson::ObjSetNum(pool, o, "scale", g_host.scale);
@@ -113,7 +117,8 @@ int __cdecl NotifyGhost(const char* reqJson, char* respJson, int cap, void* ctx)
     if (reqJson == nullptr || respJson == nullptr || cap <= 0) {
         return -1;
     }
-    ppjson::Pool pool;
+    ppjson::Node poolNodes[32] = {};
+    ppjson::Pool pool(poolNodes, 32);
     ppjson::Value req;
     char err[64] = {};
     if (!ppjson::Value::Parse(reqJson, pool, req, err, sizeof(err))) {
@@ -151,7 +156,8 @@ bool ProtocolStart(HMODULE frameworkDll, const HostContext& host) {
 
     // Hand platform its reverse-call pointer. The reply is best-effort: a
     // missing init reply does not break the forward path.
-    ppjson::Pool pool;
+    ppjson::Node poolNodes[32] = {};
+    ppjson::Pool pool(poolNodes, 32);
     char dispatch[32] = {};
     PtrToStr(reinterpret_cast<const void*>(&NotifyGhost), dispatch, sizeof(dispatch));
     ppjson::Value init = ppjson::MakeObj(pool);

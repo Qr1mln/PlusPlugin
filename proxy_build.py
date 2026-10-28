@@ -101,7 +101,7 @@ def proxy_build(client):
     log(f"导出名 {len(names)} 个，生成 GAS 桩")
     stubs = gen_stubs_s(names)
 
-    client.exec_command(f"mkdir -p {REMOTE_PROXY} {REMOTE_ROOT}/framework {REMOTE_ROOT}/sdk")
+    client.exec_command(f"mkdir -p {REMOTE_PROXY} {REMOTE_ROOT}/framework {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common")
     sftp = client.open_sftp()
     try:
         # proxy 下全部源码/头/宏（遍历上传，自动包含 protocol/json_util 等新文件）。
@@ -110,7 +110,8 @@ def proxy_build(client):
                 sftp.put(os.path.join(PROXY_DIR, name), f"{REMOTE_PROXY}/{name}")
         # include 依赖：bootstrap/plugin_*.inc 需要 framework\ 与 sdk\。
         for base, remote in (("framework", f"{REMOTE_ROOT}/framework"),
-                             ("sdk", f"{REMOTE_ROOT}/sdk")):
+                             ("sdk", f"{REMOTE_ROOT}/sdk"),
+                             ("common", f"{REMOTE_ROOT}/common")):
             local = os.path.join(REPO_ROOT, base)
             for name in os.listdir(local):
                 p = os.path.join(local, name)
