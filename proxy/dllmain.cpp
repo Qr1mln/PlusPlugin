@@ -1,98 +1,96 @@
-// version.dll proxy payload: exporting shell + loader bootstrap.
-// Target process: whatever version.ini (next to this DLL) names in target=;
-// the shipped app is a Flutter + ANGLE(D3D11) host, e.g. TTVoice.exe (x64).
+// version.dll 代理（base 层）：导出的转发外壳 + 加载器引导入口。
+// 目标进程：由本 DLL 同目录 version.ini 的 target= 指定；
+// 交付的应用是 Flutter + ANGLE(D3D11) 宿主，例如 TTVoice.exe (x64)。
 //
-// Forwarding model:
-//   app -> our stub (stubs.asm) -> jmp qword ptr [g_pfn_X] -> real version.dll!X
-//   The real DLL is loaded from %SystemRoot%\System32 by absolute path, so
-//   there is no recursion and no version coupling.
+// 转发模型：
+//   应用 -> 我们的转发桩(stubs.asm) -> jmp qword ptr [g_pfn_X] -> 真身 version.dll!X
+//   真身 DLL 从 %SystemRoot%\System32 按绝对路径加载，
+//   所以既不会递归，也没有版本耦合。
 //
-// Module layout (this file is only the entry point):
-//   log.h/.cpp         proxy.log + plugin log fan-out
-//   config.h/.cpp      version.ini (Win32 profile API + legacy fallback)
-//   bootstrap.h/.cpp   window discovery, plugin start
+// 模块划分（本文件只是入口）：
+//   log.h/.cpp         proxy.log + 插件日志扇出
+//   config.h/.cpp      version.ini（Win32 profile API + 旧格式兼容）
+//   bootstrap.h/.cpp   窗口发现、插件启动
 //
-// Design note: the real DLL is resolved inside DllMain because the app may
-// call these APIs before the main window exists. Keep the dependency chain of
-// the real DLL trivial (kernel32 only) so early loading cannot disturb the
-// graphics stack.
+// 设计说明：真身 DLL 必须在 DllMain 内解析，因为应用可能在主窗口出现之前
+// 就调用这些 API；真身 DLL 的依赖链要保持极简（只用 kernel32），
+// 这样早期加载才不会干扰图形栈。
 //
-// Framework duties (this module is the framework, see pplugin.h):
-//   1. Forward every version.dll export to the real one (stubs.asm).
-//   2. Provide the plugin framework only. The proxy does NOT render: no Present
-//      hook, no D3D/DXGI device, no overlay window. Each plugin owns its own
-//      window/UI and accesses the host through the Host API. Plugins never
-//      install hooks or create devices themselves, so they stay unloadable.
-//   3. Load and unload plugins from %APPDATA%\TTVoice\plugins. A plugin only
-//      books callbacks through Host, so the loader can revoke the whole set and
-//      then FreeLibrary it.
-//
-// NOTE: keep the proxy sources pure ASCII.
+// framework 职责（本模块即 framework，见 pplugin.h）：
+//   1. 把每个 version.dll 导出转发到真身（stubs.asm）。
+//   2. 只提供插件框架。代理【不做渲染】：无 Present hook、无 D3D/DXGI 设备、
+//      无 overlay 窗口。每个插件自持窗口/UI，并通过 Host API 访问宿主。
+//      插件从不自己装 hook 或建设备，因此它们始终可卸载。
+//   3. 从 %APPDATA%\TTVoice\plugins 加载/卸载插件。插件只通过 Host 登记回调，
+//      所以加载器可以撤销整套回调后再 FreeLibrary。
 
-#include <windows.h>
+#include <windows.h>        // Win32 API：GetSystemDirectoryW / LoadLibraryW / CreateThread 等
 
-#include <filesystem>
+#include <filesystem>       // std::filesystem：拼装真身 DLL 的绝对路径
 
-#include "bootstrap.h"
-#include "log.h"
-#include "proxy_exports.h"
+#include "bootstrap.h"      // PayloadThread 声明
+#include "log.h"            // Log() 日志
+#include "proxy_exports.h"  // PROXY_EXPORT_LIST：17 个待转发的导出清单
 
-#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "user32.lib")  // 链接 user32（bootstrap 用到窗口相关 API）
 
-extern "C" {
-#define DEF_PTR(name) void* g_pfn_##name = nullptr;
-PROXY_EXPORT_LIST(DEF_PTR)
-#undef DEF_PTR
+extern "C" {  // 用 C 链接，避免 C++ 名字修饰，保证符号名干净
+#define DEF_PTR(name) void* g_pfn_##name = nullptr;  // 为每个导出生成一个函数指针，初值为空
+PROXY_EXPORT_LIST(DEF_PTR)  // 宏展开：g_pfn_GetFileVersionInfoW ... 共 17 个
+#undef DEF_PTR              // 用完即撤，避免影响之后的宏定义
 }
 
-namespace {
+namespace {  // 匿名命名空间：下列符号仅在本编译单元内可见
 
-int g_resolveMiss = -1;
+int g_resolveMiss = -1;  // 未解析到的导出数量；-1 表示“尚未解析”
 
-// Populate g_pfn_* with the real System32 version.dll exports (forwarding model).
+// 把真身 System32\version.dll 的导出地址填进 g_pfn_*（转发模型的关键一步）。
 int ResolveRealDll() {
-    wchar_t sysdir[MAX_PATH] = {};
-    const UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) {
-        return -1;
+    wchar_t sysdir[MAX_PATH] = {};                         // 存放 System32 目录路径的缓冲区
+    const UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);  // 取 C:\Windows\System32
+    if (n == 0 || n >= MAX_PATH) {                         // 取失败，或路径超出缓冲区
+        return -1;                                         // 返回 -1 表示“无法解析”
     }
-    const std::filesystem::path realPath = std::filesystem::path(sysdir) / L"version.dll";
-    HMODULE real = LoadLibraryW(realPath.c_str());
-    if (real == nullptr) {
-        return -1;
+    const std::filesystem::path realPath =                 // 拼出真身 DLL 的绝对路径
+        std::filesystem::path(sysdir) / L"version.dll";
+    HMODULE real = LoadLibraryW(realPath.c_str());         // 按绝对路径加载真身，避免加载到本代理（防递归）
+    if (real == nullptr) {                                 // 加载真身失败
+        return -1;                                         // 返回 -1 表示“无法解析”
     }
 
-    int missing = 0;
+    int missing = 0;  // 统计有多少个导出没找到
 #define RESOLVE(name)                                                     \
     g_pfn_##name = reinterpret_cast<void*>(GetProcAddress(real, #name));  \
     if (g_pfn_##name == nullptr) ++missing;
-    PROXY_EXPORT_LIST(RESOLVE)
-#undef RESOLVE
-    return missing;
+    // 上面：从真身逐个取地址填进对应 g_pfn_*；取不到则 missing 加一
+    PROXY_EXPORT_LIST(RESOLVE)   // 对 17 个导出各执行一次 RESOLVE
+#undef RESOLVE                   // 用完撤销该宏
+    return missing;              // 返回缺失计数（0 表示全部解析成功）
 }
 
 }  // namespace
 
+// 供外部查询“未解析导出数”，PayloadThread 启动日志会用。
 int ResolveMissCount() {
-    return g_resolveMiss;
+    return g_resolveMiss;  // 返回缓存的缺失计数
 }
 
+// DLL 入口：加载器在进程附加/分离时调用。
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(hModule);
-        g_resolveMiss = ResolveRealDll();
+    if (reason == DLL_PROCESS_ATTACH) {       // 只在“进程附加”（首次加载）时做事
+        DisableThreadLibraryCalls(hModule);   // 禁用线程通知，省掉无谓开销（本 DLL 用不到）
+        g_resolveMiss = ResolveRealDll();     // 解析真身导出，把所有转发指针填好
 
-        // No early hook: the proxy does not render. The framework owns the Host
-        // API (incl. scale, derived from the host window); plugins own their own
-        // windows/UI.
+        // 此处不再做任何早期 hook：代理不渲染。宿主能力（含 scale）由 framework
+        // 持有，各插件自持窗口/UI。
 
-        // Defer all plugin/host work to a worker thread, never under the loader
-        // lock. Deliberately CreateThread and not std::thread: starting a C++
-        // thread (CRT init, allocation) under the loader lock can deadlock.
-        HANDLE th = CreateThread(nullptr, 0, PayloadThread, nullptr, 0, nullptr);
-        if (th != nullptr) {
-            CloseHandle(th);
+        // 所有插件/宿主工作都推迟到工作线程，绝不在 loader lock 下执行。
+        // 这里刻意用 CreateThread 而非 std::thread：在 loader lock 下启动 C++
+        // 线程（CRT 初始化、内存分配）可能死锁。
+        HANDLE th = CreateThread(nullptr, 0, PayloadThread, nullptr, 0, nullptr);  // 启动引导线程
+        if (th != nullptr) {   // 创建成功
+            CloseHandle(th);   // 关闭句柄（线程自身会继续运行）
         }
     }
-    return TRUE;
+    return TRUE;  // 返回 TRUE 表示初始化成功
 }
