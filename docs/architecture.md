@@ -130,15 +130,16 @@ editor2 的「添加/修改事件」弹窗（仅 `mouse` 类型）开着时约 7
 ## 日志格式
 
 ```
-[HH:MM:SS.mmm]-[proxy|framework] <正文>
+[HH:MM:SS.mmm]-[proxy|framework|platform] <正文>
 ```
-- proxy 侧（`Log`）打 `[proxy]`；插件经 `Host::publishLog` 打 `[framework]`；
-- 加载时：`loaders.` + `loader:<dll>.`；写入 `%APPDATA%\TTVoice\proxy.log`。
+- proxy 侧（`Log`）打 `[proxy]`；framework 自身打 `[framework]`；framework 经 `Host::publishLog` 回写打 `[platform]`；
+- 加载时由 proxy 打 `fw:` / `proto:` 等前缀；写入 `%APPDATA%\TTVoice\proxy.log`。
 
 ## 构建 / 部署
 
 ```
-build.py  ──SSH──► Linux VM ──mingw 静态编译──► version.dll + framework.dll
-deploy.py ──拷贝──► %APPDATA%\TTVoice\ (version.dll, framework.dll, index.html) ──► 重启 TTVoice
+framework_build.py  ──SSH──► Linux VM ──mingw 静态编译──► framework.dll
+proxy_build.py      ──SSH──► Linux VM ──mingw 静态编译──► version.dll
+deploy.py           ──拷贝──► %APPDATA%\TTVoice\ (version.dll, framework.dll, index.html) ──► 重启 TTVoice
 ```
 两个 DLL 均为静态自包含（不依赖 `libstdc++/libgcc/libwinpthread`）。

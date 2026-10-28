@@ -16,7 +16,7 @@ PlusPlugin 插件：本地编译 + 安装到运行时主机
      应用在跑时走框架热重载（enabled=false 卸载 → 覆盖 → enabled=true 加载）；
      全新插件目录不会被运行中的框架发现，装完需重启一次 pplugin。
 
-说明：只负责「编译 + 装插件」；version.dll 框架本体由 build.py 编译、deploy.py 部署。
+说明：只负责「编译 + 装插件」；version.dll 框架本体由 proxy_build.py 编译、deploy.py 部署。
 前置：script-engine 在远端 Linux 上用 mingw 交叉编译（本机无需 MSVC）。
 依赖：pip install paramiko（连接编译/运行时主机用）
 """

@@ -2,12 +2,13 @@
 r"""
 framework_build.py - 编译 framework.dll（CivetWeb + 裸 TCP/WS 服务端）。
 
-与 version.dll 同机（远端 Linux mingw）交叉编译；framework.dll 是 version.dll
-经 [loaders] 直接 LoadLibrary 的独立 DLL（不是 pplugin 插件），所以单独编一遍。
+与 version.dll 同机（远端 Linux mingw）交叉编译；framework.dll 由 version.dll 的
+bootstrap 在进程启动时直接 LoadLibrary 加载（入口 NotifyPlatform，JSON 握手），
+所以单独编一遍。
 
 流程：
   1) 连远端 Linux 编译机；
-  2) 上传 framework\ 下全部 *.cpp/*.h、sdk\pplugin.h、libs\nlohmann、libs\civetweb；
+  2) 上传 framework\ 下全部 *.cpp/*.h、sdk\pplugin.h、libs\civetweb；
   3) CivetWeb 用 gcc 单独编 .o，再与 framework 源文件链接成 framework.dll；
   4) 产物 framework.dll 落回 framework\。
 
@@ -66,7 +67,7 @@ def framework_build(client):
     remote_fw = f"{REMOTE_ROOT}/framework"
     client.exec_command(
         f"mkdir -p {remote_fw} {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common "
-        f"{REMOTE_ROOT}/libs/civetweb {REMOTE_ROOT}/libs/nlohmann")
+        f"{REMOTE_ROOT}/libs/civetweb")
     sftp = client.open_sftp()
     try:
         # framework 目录下的源文件全部上传（framework.cpp + picker.cpp 等）。
@@ -81,8 +82,6 @@ def framework_build(client):
                 sftp.put(p, f"{REMOTE_ROOT}/common/{name}")
         sftp.put(os.path.join(REPO_ROOT, "sdk", "pplugin.h"),
                  f"{REMOTE_ROOT}/sdk/pplugin.h")
-        sftp.put(os.path.join(REPO_ROOT, "libs", "nlohmann", "json.hpp"),
-                 f"{REMOTE_ROOT}/libs/nlohmann/json.hpp")
         # CivetWeb 是单文件 C，但 civetweb.c 会 #include 多个 .inl（md5/sha1/sort/
         # match/response/timer/handle_form 等），整目录上传最稳妥。
         civet_dir = os.path.join(REPO_ROOT, "libs", "civetweb")

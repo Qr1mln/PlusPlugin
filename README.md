@@ -7,7 +7,8 @@ This is a plugin architecture that adds additional functions to applications thr
 Requires VS 2022 Build Tools with the x64 C++ toolset and MASM (`ml64`).
 
 ```bat
-python build.py                       :: version.dll -> proxy\version.dll
+python framework_build.py             :: framework.dll -> framework\framework.dll
+python proxy_build.py                  :: version.dll -> proxy\version.dll
 python build_plugin.py script-engine  :: compile + install to %APPDATA%\TTVoice\plugins\script-engine
 python build_plugin.py script-engine console
 ```

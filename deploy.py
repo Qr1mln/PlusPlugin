@@ -3,7 +3,7 @@ r"""
 PlusPlugin 运行时部署脚本（把本地编译的 version.dll 更新到本机运行时）
 
 流程：
-  1) 校验本地 proxy\version.dll（build.py 产出）
+  1) 校验本地 proxy\version.dll（proxy_build.py 产出）
   2) 关闭本机宿主 TTVoice.exe（顺带关掉 script_editor.py，避免它持有管道会话）
   3) 备份旧 version.dll 为 .bak（仅首次）后覆盖
   4) 重新启动 TTVoice.exe
@@ -11,7 +11,7 @@ PlusPlugin 运行时部署脚本（把本地编译的 version.dll 更新到本�
 说明：
   - 本脚本只部署 version.dll（代理）。插件（framework.dll + 前端页面）用
     deploy_plugin.py 单独部署。
-  - 不编译。编译请先跑 build.py；插件（plugin\ 下）用 build_plugin.py。
+  - 不编译。编译请跑 framework_build.py（framework.dll）与 proxy_build.py（version.dll）；插件（plugin\ 下）用 build_plugin.py。
   - 与 build_plugin.py 的 deploy_local 保持一致：运行时（TTVoice）就跑在本机，
     因此直接在本机停/启 + 复制，不再 SSH 到远程 Windows（旧版是这么做的，已废弃）。
 前置：本机需能 taskkill / 启动 TTVoice.exe，无需联网。
@@ -23,7 +23,7 @@ import sys
 import time
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DLL = os.path.join(REPO_ROOT, "proxy", "version.dll")  # 源（build.py 产出）
+PROJECT_DLL = os.path.join(REPO_ROOT, "proxy", "version.dll")  # 源（proxy_build.py 产出）
 START_AFTER_DEPLOY = True
 
 APP_EXE = "TTVoice.exe"
@@ -90,7 +90,7 @@ def start_app():
 
 def main():
     if not os.path.isfile(PROJECT_DLL):
-        log(f"未找到 {PROJECT_DLL}，请先跑 build.py 编译。")
+        log(f"未找到 {PROJECT_DLL}，请先跑 proxy_build.py 编译。")
         raise SystemExit(1)
 
     appdata = os.environ.get("APPDATA", "")

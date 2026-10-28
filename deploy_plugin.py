@@ -2,15 +2,16 @@
 r"""
 插件部署：把本地编译的 framework.dll + 前端页面更新到运行时（%APPDATA%\TTVoice）。
 
-framework.dll 是 version.dll 经 version.ini [loaders] 加载的 pplugin 插件；
-plugin_loader 会监视 DLL 文件变化并自动热重载，所以正常情况下**不需要重启 TTVoice**。
+framework.dll 由 version.dll 的 bootstrap 在进程启动时直接 LoadLibrary 加载
+（入口 NotifyPlatform，JSON 握手），没有 [loaders] / plugin_loader，也不支持热重载；
+部署后**需要重启 TTVoice** 才生效。
 
-framework.dll 在运行中被 TTVoice 映射占用，直接 copy2 覆盖会失败；本脚本用
-「改名换位」（framework.dll -> framework.dll.old，再把新文件改名为 framework.dll）
-让 plugin_loader 察觉变化并热重载。若改名也被占用阻止，才回退到停/启 TTVoice。
+framework.dll 在运行中被 TTVoice 映射占用，直接 copy2 覆盖会失败；本脚本先尝试
+「改名换位」（framework.dll -> framework.dll.old，再把新文件改名为 framework.dll），
+若被占用阻止则回退到停/启 TTVoice。
 
 本脚本只部署插件，不动 version.dll（那是 deploy.py 的职责）。
-前置：先跑 build.py 产出 framework/framework.dll；前端先 `cd editor2 && npm run build`。
+前置：先跑 framework_build.py 产出 framework/framework.dll；前端先 `cd editor2 && npm run build`。
 
 用法：
   python deploy_plugin.py
@@ -101,7 +102,7 @@ def deploy_frontend(runtime_dir):
 
 def main():
     if not os.path.isfile(FRAMEWORK_DLL):
-        log(f"未找到 {FRAMEWORK_DLL}，请先跑 build.py 编译。")
+        log(f"未找到 {FRAMEWORK_DLL}，请先跑 framework_build.py 编译。")
         raise SystemExit(1)
 
     runtime_dir = appdata_runtime_dir()
@@ -111,7 +112,7 @@ def main():
     os.makedirs(runtime_dir, exist_ok=True)
 
     if hot_replace_framework(runtime_dir):
-        log("framework.dll 已热替换，plugin_loader 会自动热重载（未重启应用）")
+        log("framework.dll 已替换（未被占用，无需重启应用）")
         restarted = False
     else:
         log("framework.dll 被占用，回退：停/启 TTVoice 部署")
