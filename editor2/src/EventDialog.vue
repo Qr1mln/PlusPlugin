@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { cursor, start as startCursor, stop as stopCursor, beginPick, cancelPick } from './cursorStore'
 import { pushLog } from './logStore'
 
@@ -28,10 +28,20 @@ const form = ref({
   threshold: 0.9,
   timeout_ms: 3000,
   text: '',
+  inputMode: 'fixed',
+  textsText: '',
   key: 'Enter',
   keyAction: 'press',
   remark: '',
 })
+
+// 随机列表里实际有几条候选（空行不算）
+const inputLines = computed(
+  () =>
+    String(form.value.textsText || '')
+      .split('\n')
+      .filter((s) => s.trim() !== '').length,
+)
 
 // "拾取时置顶"是个用一次就忘不掉的开关：存 localStorage，下次打开弹窗（含新建事件）
 // 沿用上次的选择；事件自己有 topmost 字段时以事件为准。
@@ -87,6 +97,8 @@ watch(
       threshold: ev.threshold ?? 0.9,
       timeout_ms: ev.timeout_ms ?? 3000,
       text: ev.text || '',
+      inputMode: ev.type === 'input' && ev.mode === 'random' ? 'random' : 'fixed',
+      textsText: Array.isArray(ev.texts) ? ev.texts.join('\n') : '',
       key: ev.key || 'Enter',
       keyAction: ev.type === 'key' ? ev.action || 'press' : 'press',
       remark: ev.remark || '',
@@ -181,6 +193,10 @@ onBeforeUnmount(stopCursor)
 
 function submit() {
   const f = form.value
+  if (f.type === 'input' && f.inputMode === 'random' && inputLines.value === 0) {
+    pushLog('warn', '输入：随机列表为空，先填一条候选再确定')
+    return
+  }
   let ev
   if (f.type === 'mouse') {
     ev = {
@@ -206,7 +222,22 @@ function submit() {
       remark: f.remark.trim(),
     }
   } else if (f.type === 'input') {
-    ev = { type: 'input', text: f.text, remark: f.remark.trim() }
+    if (f.inputMode === 'random') {
+      // 一行一条候选；空行丢掉。text 留空串，老逻辑也能读。
+      const lines = String(f.textsText || '')
+        .split('\n')
+        .map((s) => s.replace(/\r$/, ''))
+        .filter((s) => s.trim() !== '')
+      ev = {
+        type: 'input',
+        mode: 'random',
+        text: '',
+        texts: lines,
+        remark: f.remark.trim(),
+      }
+    } else {
+      ev = { type: 'input', mode: 'fixed', text: f.text, remark: f.remark.trim() }
+    }
   } else {
     ev = {
       type: 'key',
@@ -317,9 +348,30 @@ function onKeydown(e) {
 
       <template v-else-if="form.type === 'input'">
         <div class="row">
+          <label>来源</label>
+          <select v-model="form.inputMode">
+            <option value="fixed">固定文本</option>
+            <option value="random">随机列表</option>
+          </select>
+        </div>
+        <div v-if="form.inputMode === 'fixed'" class="row">
           <label>文本</label>
           <textarea v-model="form.text" rows="4" class="wide"></textarea>
         </div>
+        <template v-else>
+          <div class="row">
+            <label>列表</label>
+            <textarea
+              v-model="form.textsText"
+              rows="6"
+              class="wide"
+              placeholder="一行一条，执行时随机取一条"
+            ></textarea>
+          </div>
+          <div class="row">
+            <span class="hint">共 {{ inputLines }} 条候选，试跑时随机取一条</span>
+          </div>
+        </template>
       </template>
 
       <template v-else>

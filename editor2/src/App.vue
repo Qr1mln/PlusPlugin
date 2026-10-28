@@ -134,6 +134,31 @@ const MOUSE_ACTIONS = { click: '单击', move: '移动', down: '按下', up: '�
 const MOUSE_BUTTONS = { left: '左键', right: '右键', middle: '中键' }
 const KEY_ACTIONS = { press: '单击', down: '按下', up: '抬起' }
 
+// 输入事件的文本摘要：固定文本原样显示；随机列表显示条数与前三项。
+function inputCandidates(ev) {
+  return Array.isArray(ev.texts)
+    ? ev.texts.filter((s) => typeof s === 'string' && s.trim() !== '')
+    : []
+}
+
+function inputSummary(ev) {
+  if (ev.mode === 'random') {
+    const list = inputCandidates(ev)
+    if (!list.length) return '随机列表（空）'
+    const head = list.slice(0, 3).join(' / ')
+    return `随机[${list.length}]: ${head}${list.length > 3 ? ' …' : ''}`
+  }
+  return `"${ev.text || ''}"`
+}
+
+// 随机模式：执行时从列表里抽一条；列表为空返回空串。
+function pickInputText(ev) {
+  if (ev.mode !== 'random') return String(ev.text || '')
+  const list = inputCandidates(ev)
+  if (!list.length) return ''
+  return list[Math.floor(Math.random() * list.length)]
+}
+
 function toRow(ev) {
   const t = ev.type || 'mouse'
   let params = ''
@@ -148,7 +173,7 @@ function toRow(ev) {
   } else if (t === 'findImage') {
     params = ev.image || ''
   } else if (t === 'input') {
-    params = ev.text || ''
+    params = inputSummary(ev)
   } else if (t === 'key') {
     params = ev.key || ''
     action = KEY_ACTIONS[ev.action] || '单击'
@@ -409,7 +434,9 @@ function toCommand(ev) {
     return { type: 'delay', ms: Math.max(0, Math.min(60000, Math.round(Number(ev.ms) || 0))) }
   }
   if (t === 'input') {
-    return { type: 'text', text: String(ev.text || '') }
+    // 随机列表模式：这一步执行时才抽，脚本里存的还是整份列表。
+    const text = pickInputText(ev)
+    return text ? { type: 'text', text } : null
   }
   if (t === 'key') {
     const base = String(ev.key || '').split('+').pop().trim()
@@ -446,19 +473,21 @@ async function onTryRun() {
       }
       const cmd = toCommand(ev)
       if (!cmd) {
-        pushLog('warn', `第 ${i + 1} 条（${ev.type}）暂不支持，跳过`)
+        pushLog('warn', `第 ${i + 1} 条（${ev.type}）暂不支持或内容为空，跳过`)
         continue
       }
       const timeout = cmd.type === 'delay' ? cmd.ms + 5000 : 10000
       try {
         await request(cmd, timeout)
-        const conv =
-          cmd.type === 'mouse' && cmd.x != null
-            ? ` (${ev.x},${ev.y})→(${cmd.x},${cmd.y})`
-            : ''
+        let detail = ''
+        if (cmd.type === 'mouse' && cmd.x != null) {
+          detail = ` (${ev.x},${ev.y})→(${cmd.x},${cmd.y})`
+        } else if (cmd.type === 'text') {
+          detail = ` "${cmd.text}"`
+        }
         pushLog(
           'info',
-          `第 ${i + 1} 条 OK：${cmd.type}${cmd.action ? ':' + cmd.action : ''}${conv}`,
+          `第 ${i + 1} 条 OK：${ev.type}${cmd.action ? ':' + cmd.action : ''}${detail}`,
         )
       } catch (e) {
         pushLog('error', `第 ${i + 1} 条失败：${e.message}`)
@@ -503,7 +532,9 @@ function defaultEvent(type) {
   if (type === 'findImage') {
     return { type: 'findImage', image: '', threshold: 0.9, timeout_ms: 3000, x: 0, y: 0, remark: '' }
   }
-  if (type === 'input') return { type: 'input', text: '', remark: '' }
+  if (type === 'input') {
+    return { type: 'input', mode: 'fixed', text: '', texts: [], remark: '' }
+  }
   if (type === 'key') return { type: 'key', key: 'Enter', action: 'press', remark: '' }
   // topmost 不给默认值：留给弹窗用上次记住的"拾取时置顶"选择
   return { type: 'mouse', action: 'click', button: 'left', x: 0, y: 0, remark: '' }
@@ -538,7 +569,7 @@ function evBrief(ev) {
     return `${label} ${btn}${act} @${ev.x ?? 0},${ev.y ?? 0}`
   }
   if (t === 'delay') return `${label} ${ev.ms ?? 0}ms`
-  if (t === 'input') return `${label} "${ev.text || ''}"`
+  if (t === 'input') return `${label} ${inputSummary(ev)}`
   if (t === 'key') return `${label} ${ev.key || ''} ${KEY_ACTIONS[ev.action] || ''}`.trim()
   if (t === 'findImage') return `${label} ${ev.image || '(未指定图片)'}`
   return label
@@ -638,13 +669,17 @@ async function onRowTryRun(i) {
   await onRefreshApp(true)
   const cmd = toCommand(ev)
   if (!cmd) {
-    pushLog('warn', `第 ${i + 1} 条（${ev.type}）暂不支持`)
+    pushLog('warn', `第 ${i + 1} 条（${ev.type}）暂不支持或内容为空`)
     return
   }
   const timeout = cmd.type === 'delay' ? cmd.ms + 5000 : 10000
   try {
     await request(cmd, timeout)
-    pushLog('info', `第 ${i + 1} 条 OK：${cmd.type}${cmd.action ? ':' + cmd.action : ''}`)
+    const detail = cmd.type === 'text' ? ` "${cmd.text}"` : ''
+    pushLog(
+      'info',
+      `第 ${i + 1} 条 OK：${ev.type}${cmd.action ? ':' + cmd.action : ''}${detail}`,
+    )
   } catch (e) {
     pushLog('error', `第 ${i + 1} 条失败：${e.message}`)
   }
