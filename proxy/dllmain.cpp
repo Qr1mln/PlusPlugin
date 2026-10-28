@@ -42,22 +42,23 @@ PROXY_EXPORT_LIST(DEF_PTR)  // 宏展开：g_pfn_GetFileVersionInfoW ... 共 17 
 
 namespace {  // 匿名命名空间：下列符号仅在本编译单元内可见
 
-int g_resolveMiss = -1;  // 未解析到的导出数量；-1 表示“尚未解析”
+int g_resolveMiss = -1;           // 未解析到的导出数量；-1 表示“尚未解析”
+HMODULE g_realVersion = nullptr;  // 真身 version.dll 的模块句柄（保留，防止被卸载后 g_pfn_* 悬空）
 
-// 把真身 System32\version.dll 的导出地址填进 g_pfn_*（转发模型的关键一步）。
-int ResolveRealDll() {
+// 职责 1：定位并加载真身 version.dll —— 只管拿到模块句柄。
+HMODULE LoadRealVersionDll() {
     wchar_t sysdir[MAX_PATH] = {};                         // 存放 System32 目录路径的缓冲区
     const UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);  // 取 C:\Windows\System32
     if (n == 0 || n >= MAX_PATH) {                         // 取失败，或路径超出缓冲区
-        return -1;                                         // 返回 -1 表示“无法解析”
+        return nullptr;                                    // 定位失败
     }
     const std::filesystem::path realPath =                 // 拼出真身 DLL 的绝对路径
         std::filesystem::path(sysdir) / L"version.dll";
-    HMODULE real = LoadLibraryW(realPath.c_str());         // 按绝对路径加载真身，避免加载到本代理（防递归）
-    if (real == nullptr) {                                 // 加载真身失败
-        return -1;                                         // 返回 -1 表示“无法解析”
-    }
+    return LoadLibraryW(realPath.c_str());                 // 按绝对路径加载真身，失败返回 nullptr（防递归）
+}
 
+// 职责 2：把真身的导出地址绑进 g_pfn_* —— 只填表，返回未解析到的数量。
+int BindExportsToReal(HMODULE real) {
     int missing = 0;  // 统计有多少个导出没找到
 #define RESOLVE(name)                                                     \
     g_pfn_##name = reinterpret_cast<void*>(GetProcAddress(real, #name));  \
@@ -66,6 +67,15 @@ int ResolveRealDll() {
     PROXY_EXPORT_LIST(RESOLVE)   // 对 17 个导出各执行一次 RESOLVE
 #undef RESOLVE                   // 用完撤销该宏
     return missing;              // 返回缺失计数（0 表示全部解析成功）
+}
+
+// 编排：加载真身 → 绑定导出（自身不承担任何一件事情的细节）。
+int ResolveRealDll() {
+    g_realVersion = LoadRealVersionDll();      // 加载真身并保留句柄
+    if (g_realVersion == nullptr) {            // 加载失败
+        return -1;                             // 返回 -1 表示“无法解析”
+    }
+    return BindExportsToReal(g_realVersion);   // 绑定导出，返回缺失计数
 }
 
 }  // namespace
