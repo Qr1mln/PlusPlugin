@@ -191,7 +191,7 @@ async function loadScript(name) {
       rawEvents.value = events
       rows.value = events.map(toRow)
       loadedScript = name
-      pushLog('info', `加载脚本「${name}」：${events.length} 步`)
+      pushLog('info', `加载脚本「${name}」：共 ${events.length} 条`)
     } else {
       rows.value = []
       rawEvents.value = []
@@ -255,6 +255,10 @@ async function onSaveScript() {
     pushLog('warn', '保存：先选择或新建一个脚本')
     return
   }
+  if (saving.value) {
+    pushLog('debug', '保存：上一次还没写完，忽略这次点击')
+    return
+  }
   if (loadedScript !== name) {
     pushLog(
       'warn',
@@ -262,6 +266,7 @@ async function onSaveScript() {
     )
     return
   }
+  saving.value = true
   try {
     const res = await fetch('/api/scripts?name=' + encodeURIComponent(name), {
       method: 'POST',
@@ -270,12 +275,14 @@ async function onSaveScript() {
     })
     const j = await res.json()
     if (j && j.success) {
-      pushLog('info', `已保存脚本「${name}」：${rawEvents.value.length} 步`)
+      pushLog('info', `已保存脚本「${name}」：共 ${rawEvents.value.length} 条`)
     } else {
       pushLog('error', `保存脚本「${name}」失败：${(j && j.data) || '返回异常'}`)
     }
   } catch (e) {
     pushLog('error', `保存脚本「${name}」失败：${e.message}`)
+  } finally {
+    saving.value = false
   }
 }
 
@@ -413,19 +420,20 @@ function toCommand(ev) {
 }
 
 const running = ref(false)
+const saving = ref(false)
 let runToken = 0
 
 async function onTryRun() {
   if (running.value) return
   const events = rawEvents.value
   if (!events.length) {
-    pushLog('warn', '试跑：当前脚本没有步骤')
+    pushLog('warn', '试跑：当前脚本没有记录')
     return
   }
   running.value = true
   const token = ++runToken
   await onRefreshApp(true) // 确保拿到最新 scale/几何（不单独刷日志）
-  pushLog('info', `试跑开始，共 ${events.length} 步（scale=${appScale.value}）`)
+  pushLog('info', `试跑开始，共 ${events.length} 条（scale=${appScale.value}）`)
   try {
     for (let i = 0; i < events.length; i++) {
       if (token !== runToken) {
@@ -434,11 +442,11 @@ async function onTryRun() {
       }
       const ev = events[i]
       if (ev.type === 'key' && String(ev.key || '').includes('+')) {
-        pushLog('warn', `第 ${i + 1} 步：组合键 ${ev.key} 的修饰键暂不支持，仅发主键`)
+        pushLog('warn', `第 ${i + 1} 条：组合键 ${ev.key} 的修饰键暂不支持，仅发主键`)
       }
       const cmd = toCommand(ev)
       if (!cmd) {
-        pushLog('warn', `第 ${i + 1} 步（${ev.type}）暂不支持，跳过`)
+        pushLog('warn', `第 ${i + 1} 条（${ev.type}）暂不支持，跳过`)
         continue
       }
       const timeout = cmd.type === 'delay' ? cmd.ms + 5000 : 10000
@@ -450,10 +458,10 @@ async function onTryRun() {
             : ''
         pushLog(
           'info',
-          `第 ${i + 1} 步 OK：${cmd.type}${cmd.action ? ':' + cmd.action : ''}${conv}`,
+          `第 ${i + 1} 条 OK：${cmd.type}${cmd.action ? ':' + cmd.action : ''}${conv}`,
         )
       } catch (e) {
-        pushLog('error', `第 ${i + 1} 步失败：${e.message}`)
+        pushLog('error', `第 ${i + 1} 条失败：${e.message}`)
         break
       }
     }
@@ -478,7 +486,7 @@ function refreshRows() {
 function selectRow(i) {
   if (selectedRow.value === i) return
   selectedRow.value = i
-  pushLog('debug', `选中第 ${i + 1} 步`)
+  pushLog('debug', `选中第 ${i + 1} 条`)
 }
 
 function requireScript() {
@@ -514,10 +522,10 @@ function openEdit(i) {
   const ev = rawEvents.value[i]
   if (!ev) return
   dlgInitial.value = { ...ev }
-  dlgTitle.value = `修改第 ${i + 1} 步`
+  dlgTitle.value = `修改第 ${i + 1} 条`
   dlgIndex.value = i
   dlgOpen.value = true
-  pushLog('info', `打开「修改第 ${i + 1} 步」弹窗`)
+  pushLog('info', `打开「修改第 ${i + 1} 条」弹窗`)
 }
 
 // 日志里用的一行摘要：鼠标 左键单击 @100,200 / 延迟 500ms / 输入 "abc" …
@@ -542,13 +550,13 @@ function onDialogSubmit(ev) {
     rawEvents.value.splice(i, 1, ev)
     selectedRow.value = i
     refreshRows()
-    pushLog('info', `已修改第 ${i + 1} 步：${evBrief(ev)}`)
+    pushLog('info', `已修改第 ${i + 1} 条：${evBrief(ev)}`)
     return
   }
   rawEvents.value.push(ev)
   selectedRow.value = rawEvents.value.length - 1
   refreshRows()
-  pushLog('info', `已添加第 ${rawEvents.value.length} 步：${evBrief(ev)}`)
+  pushLog('info', `已添加第 ${rawEvents.value.length} 条：${evBrief(ev)}`)
 }
 
 function onAddMouse() { openAdd('mouse') }
@@ -568,7 +576,7 @@ function onMoveUp() {
   arr[i] = tmp
   selectedRow.value = i - 1
   refreshRows()
-  pushLog('info', `第 ${i + 1} 步上移到第 ${i} 位`)
+  pushLog('info', `第 ${i + 1} 条上移到第 ${i} 位`)
 }
 
 function onMoveDown() {
@@ -583,7 +591,7 @@ function onMoveDown() {
   arr[i] = tmp
   selectedRow.value = i + 1
   refreshRows()
-  pushLog('info', `第 ${i + 1} 步下移到第 ${i + 2} 位`)
+  pushLog('info', `第 ${i + 1} 条下移到第 ${i + 2} 位`)
 }
 // 刷新应用：让宿主重新解析目标窗口并读回几何（GET /api/app）。
 // quiet=true 时（试跑内部调用）不刷屏。
@@ -630,15 +638,15 @@ async function onRowTryRun(i) {
   await onRefreshApp(true)
   const cmd = toCommand(ev)
   if (!cmd) {
-    pushLog('warn', `第 ${i + 1} 步（${ev.type}）暂不支持`)
+    pushLog('warn', `第 ${i + 1} 条（${ev.type}）暂不支持`)
     return
   }
   const timeout = cmd.type === 'delay' ? cmd.ms + 5000 : 10000
   try {
     await request(cmd, timeout)
-    pushLog('info', `第 ${i + 1} 步 OK：${cmd.type}${cmd.action ? ':' + cmd.action : ''}`)
+    pushLog('info', `第 ${i + 1} 条 OK：${cmd.type}${cmd.action ? ':' + cmd.action : ''}`)
   } catch (e) {
-    pushLog('error', `第 ${i + 1} 步失败：${e.message}`)
+    pushLog('error', `第 ${i + 1} 条失败：${e.message}`)
   }
 }
 
@@ -650,13 +658,13 @@ function onRowDelete(i) {
   const ev = rawEvents.value[i]
   if (!ev) return
   const what = `${ev.type}${ev.action ? ':' + ev.action : ''}`
-  if (!window.confirm(`删除第 ${i + 1} 步（${what}）？`)) return
+  if (!window.confirm(`删除第 ${i + 1} 条（${what}）？`)) return
   rawEvents.value.splice(i, 1)
   refreshRows()
   if (selectedRow.value >= rawEvents.value.length) {
     selectedRow.value = rawEvents.value.length - 1
   }
-  pushLog('info', `已删除第 ${i + 1} 步`)
+  pushLog('info', `已删除第 ${i + 1} 条`)
 }
 </script>
 
@@ -670,7 +678,7 @@ function onRowDelete(i) {
       </select>
       <button @click="onRefreshScripts">刷新</button>
       <button @click="onNewScript">新建</button>
-      <button @click="onSaveScript">保存</button>
+      <button @click="onSaveScript" :disabled="saving">保存</button>
       <button @click="onRenameScript">改名</button>
       <button @click="onDeleteScript">删除</button>
 
@@ -703,7 +711,7 @@ function onRowDelete(i) {
 
       <span class="spacer"></span>
       <span class="app-info">{{ appInfo }}</span>
-      <span class="case-count">共{{ rows.length }}行</span>
+      <span class="case-count">共 {{ rows.length }} 条</span>
     </div>
 
     <!-- 脚本步骤表 -->
@@ -764,7 +772,7 @@ function onRowDelete(i) {
       <span class="status-spacer"></span>
       <span class="status-item">脚本：{{ currentScript }}</span>
       <span class="sep">|</span>
-      <span class="status-item">共 {{ rows.length }} 行</span>
+      <span class="status-item">共 {{ rows.length }} 条</span>
       <span class="sep">|</span>
       <span class="status-item">控件尺寸：{{ sizeLabel }}</span>
       <span class="sep">|</span>
