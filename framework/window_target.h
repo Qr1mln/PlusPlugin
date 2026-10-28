@@ -9,8 +9,9 @@
 
 #include <string>
 
-#include <nlohmann/json.hpp>
 #include <windows.h>
+
+#include "../common/json_util.h"
 
 struct Host;  // 前向声明
 
@@ -28,7 +29,7 @@ class WindowTarget {
   bool resolve_client(int x, int y, const std::string& space, int& cx, int& cy) const;
 
   // 几何信息对象 {x,y,w,h,scale}；窗口不可用时返回 false。
-  bool geometry(nlohmann::json& out) const;
+  bool geometry(ppjson::Value& out) const;
 
   // 插件内部维护的虚拟光标（客户区坐标），供相对移动/拖拽使用。
   int cursor_x() const noexcept { return cx_; }

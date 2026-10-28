@@ -4,13 +4,15 @@
 // 只负责网络层：把 CivetWeb 的 C 回调转成语法上的成员调用（通过 cbdata /
 // user_data 拿到 WsServer* 实例），再转发给 Logger / CommandHandler /
 // ScriptStore。具体的命令解析、脚本读写都不在这里。
+//
+// JSON 用共享的 common/json_util。
 // ============================================================================
 #ifndef FRAMEWORK_WS_SERVER_H
 #define FRAMEWORK_WS_SERVER_H
 
 #include <string>
 
-#include <nlohmann/json.hpp>
+#include "../common/json_util.h"
 
 struct mg_context;
 struct mg_connection;
@@ -48,7 +50,7 @@ class WsServer {
                                const struct mg_request_info* ri);
 
   // 发送 JSON 响应（HTTP 200 + application/json）。
-  static void send_json(mg_connection* conn, const nlohmann::json& resp);
+  static void send_json(mg_connection* conn, ppjson::Value resp);
 
   mg_context* ctx_ = nullptr;
   Logger* log_ = nullptr;

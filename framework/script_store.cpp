@@ -17,20 +17,22 @@ namespace {
 const char* kOk = "0000";
 const char* kErr = "9999";
 
-nlohmann::json Fail(const std::string& data) {
-  nlohmann::json r;
-  r["success"] = false;
-  r["data"] = data;
-  r["code"] = kErr;
-  return r;
+void WriteFail(ppjson::Pool& pool, ppjson::Value& out, const char* data) {
+  out = ppjson::Value::Obj(pool);
+  out.SetBool("success", false);
+  out.SetStr("data", (data != nullptr) ? data : "");
+  out.SetStr("code", kErr);
 }
 
-nlohmann::json Ok(const nlohmann::json& data) {
-  nlohmann::json r;
-  r["success"] = true;
-  r["data"] = data;
-  r["code"] = kOk;
-  return r;
+void WriteOk(ppjson::Pool& pool, ppjson::Value& out, ppjson::Value data) {
+  out = ppjson::Value::Obj(pool);
+  out.SetBool("success", true);
+  if (data.Valid()) {
+    out.SetValue("data", data);
+  } else {
+    out.SetValue("data", ppjson::Value::Str(pool, ""));
+  }
+  out.SetStr("code", kOk);
 }
 
 }  // namespace
@@ -76,8 +78,8 @@ std::string ScriptStore::read_text_utf8(const std::filesystem::path& path) {
                      std::istreambuf_iterator<char>());
 }
 
-nlohmann::json ScriptStore::list() const {
-  nlohmann::json arr = nlohmann::json::array();
+void ScriptStore::list(ppjson::Pool& pool, ppjson::Value& out) const {
+  ppjson::Value arr = ppjson::Value::Arr(pool);
   std::error_code ec;
   const std::filesystem::path dir = scripts_dir();
   std::vector<std::string> names;
@@ -97,58 +99,75 @@ nlohmann::json ScriptStore::list() const {
   }
   std::sort(names.begin(), names.end());
   for (const std::string& s : names) {
-    arr.push_back(s);
+    arr.AddStr(s.c_str());
   }
-  return Ok(arr);
+  WriteOk(pool, out, arr);
 }
 
-nlohmann::json ScriptStore::read(const std::string& name) const {
+void ScriptStore::read(ppjson::Pool& pool, const std::string& name,
+                       ppjson::Value& out) const {
   const std::string text = read_text_utf8(script_path(name));
   if (text.empty()) {
-    return Fail("script not found");
+    WriteFail(pool, out, "script not found");
+    return;
   }
-  try {
-    return Ok(nlohmann::json::parse(text));
-  } catch (...) {
-    return Fail("bad json");
+  ppjson::Value parsed;
+  char err[64] = {};
+  if (!ppjson::Value::Parse(text.c_str(), pool, parsed, err, sizeof(err))) {
+    WriteFail(pool, out, "bad json");
+    return;
   }
+  WriteOk(pool, out, parsed);
 }
 
-nlohmann::json ScriptStore::write(const std::string& name,
-                                  const std::string& payload) {
-  nlohmann::json parsed;
-  try {
-    parsed = nlohmann::json::parse(payload);
-  } catch (...) {
-    return Fail("bad json");
+void ScriptStore::write(ppjson::Pool& pool, const std::string& name,
+                        const std::string& payload, ppjson::Value& out) {
+  ppjson::Value parsed;
+  char err[64] = {};
+  if (!ppjson::Value::Parse(payload.c_str(), pool, parsed, err, sizeof(err))) {
+    WriteFail(pool, out, "bad json");
+    return;
   }
-  if (!parsed.is_object()) {
-    return Fail("not an object");
+  if (!parsed.IsObj()) {
+    WriteFail(pool, out, "not an object");
+    return;
   }
+
+  char body[65536] = {};
+  const int n = parsed.Dump(body, sizeof(body));
+  if (n < 0) {
+    WriteFail(pool, out, "script too large");
+    return;
+  }
+
   const std::filesystem::path path = script_path(name);
   std::filesystem::path tmp = path;
   tmp += L".tmp";
   {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out) {
-      return Fail("open failed");
+    std::ofstream fout(tmp, std::ios::binary | std::ios::trunc);
+    if (!fout) {
+      WriteFail(pool, out, "open failed");
+      return;
     }
-    out << parsed.dump(2);
+    fout.write(body, n);
   }
   std::error_code ec;
   std::filesystem::rename(tmp, path, ec);
   if (ec) {
     std::filesystem::remove(tmp, ec);
-    return Fail("write failed");
+    WriteFail(pool, out, "write failed");
+    return;
   }
-  return Ok("");
+  WriteOk(pool, out, ppjson::Value());
 }
 
-nlohmann::json ScriptStore::remove(const std::string& name) {
+void ScriptStore::remove(ppjson::Pool& pool, const std::string& name,
+                         ppjson::Value& out) {
   std::error_code ec;
   const bool removed = std::filesystem::remove(script_path(name), ec);
   if (removed) {
-    return Ok("");
+    WriteOk(pool, out, ppjson::Value());
+    return;
   }
-  return Fail("script not found");
+  WriteFail(pool, out, "script not found");
 }

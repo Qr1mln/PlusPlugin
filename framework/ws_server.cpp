@@ -12,6 +12,14 @@
 #include "picker.h"
 #include "script_store.h"
 
+namespace {
+const char* kOk = "0000";
+const char* kErr = "9999";
+
+// HTTP 处理器用的一块堆池：节点数按响应规模给足。
+const int kHttpPoolNodes = 256;
+}  // namespace
+
 WsServer* WsServer::g_log_self_ = nullptr;
 
 bool WsServer::start(Logger& log, CommandHandler& handler, ScriptStore& scripts,
@@ -115,11 +123,12 @@ std::string WsServer::read_body(mg_connection* conn,
   return payload;
 }
 
-void WsServer::send_json(mg_connection* conn, const nlohmann::json& resp) {
-  const std::string body = resp.dump();
-  mg_send_http_ok(conn, "application/json; charset=utf-8",
-                  static_cast<long long>(body.size()));
-  mg_write(conn, body.data(), body.size());
+void WsServer::send_json(mg_connection* conn, ppjson::Value resp) {
+  char body[16384] = {};
+  const int n = resp.Dump(body, sizeof(body));
+  const long long len = (n >= 0) ? static_cast<long long>(n) : 0;
+  mg_send_http_ok(conn, "application/json; charset=utf-8", len);
+  mg_write(conn, body, static_cast<size_t>(len));
 }
 
 // GET    /api/scripts              列出
@@ -142,19 +151,22 @@ int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
   }
   const std::string name(nameBuf);
 
-  nlohmann::json resp;
+  ppjson::Node nodes[kHttpPoolNodes] = {};
+  ppjson::Pool pool(nodes, kHttpPoolNodes);
+  ppjson::Value resp = ppjson::Value::Obj(pool);
+
   if (hasName && !ScriptStore::safe_name(name)) {
-    resp["success"] = false;
-    resp["data"] = "bad name";
-    resp["code"] = "9999";
+    resp.SetBool("success", false);
+    resp.SetStr("data", "bad name");
+    resp.SetStr("code", kErr);
   } else if (hasName && method == "DELETE") {
-    resp = self->scripts_->remove(name);
+    self->scripts_->remove(pool, name, resp);
   } else if (hasName && (method == "POST" || method == "PUT")) {
-    resp = self->scripts_->write(name, read_body(conn, ri));
+    self->scripts_->write(pool, name, read_body(conn, ri), resp);
   } else if (hasName) {
-    resp = self->scripts_->read(name);
+    self->scripts_->read(pool, name, resp);
   } else {
-    resp = self->scripts_->list();
+    self->scripts_->list(pool, resp);
   }
   send_json(conn, resp);
   return 200;
@@ -163,17 +175,19 @@ int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
 // GET /api/app: 目标窗口客户区几何 + DPI 缩放（供“刷新应用”展示）。
 int WsServer::on_http_app(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
-  nlohmann::json g;
-  nlohmann::json resp;
+  ppjson::Node nodes[kHttpPoolNodes] = {};
+  ppjson::Pool pool(nodes, kHttpPoolNodes);
+  ppjson::Value g = ppjson::Value::Obj(pool);
+  ppjson::Value resp = ppjson::Value::Obj(pool);
   if (!self->handler_->geometry(g)) {
-    resp["success"] = false;
-    resp["data"] = "view window unavailable";
-    resp["code"] = "9999";
+    resp.SetBool("success", false);
+    resp.SetStr("data", "view window unavailable");
+    resp.SetStr("code", kErr);
   } else {
-    g["app"] = "TTVoice.exe";
-    resp["success"] = true;
-    resp["data"] = g;
-    resp["code"] = "0000";
+    g.SetStr("app", "TTVoice.exe");
+    resp.SetBool("success", true);
+    resp.SetValue("data", g);
+    resp.SetStr("code", kOk);
   }
   send_json(conn, resp);
   return 200;
@@ -182,16 +196,18 @@ int WsServer::on_http_app(mg_connection* conn, void* cbdata) {
 // GET /api/cursor: live cursor readout in view client coords (read-only).
 int WsServer::on_http_cursor(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
-  nlohmann::json c;
-  nlohmann::json resp;
+  ppjson::Node nodes[kHttpPoolNodes] = {};
+  ppjson::Pool pool(nodes, kHttpPoolNodes);
+  ppjson::Value c = ppjson::Value::Obj(pool);
+  ppjson::Value resp = ppjson::Value::Obj(pool);
   if (!self->handler_->cursor(c)) {
-    resp["success"] = false;
-    resp["data"] = "view window unavailable";
-    resp["code"] = "9999";
+    resp.SetBool("success", false);
+    resp.SetStr("data", "view window unavailable");
+    resp.SetStr("code", kErr);
   } else {
-    resp["success"] = true;
-    resp["data"] = c;
-    resp["code"] = "0000";
+    resp.SetBool("success", true);
+    resp.SetValue("data", c);
+    resp.SetStr("code", kOk);
   }
   send_json(conn, resp);
   return 200;

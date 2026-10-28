@@ -25,7 +25,7 @@
 
 #include <cstddef>
 
-#include <nlohmann/json.hpp>
+#include "../common/json_util.h"
 
 #include "pplugin.h"
 
@@ -47,6 +47,6 @@ bool PickerBeginPick();
 void PickerCancelPick();
 
 // 一次性读数（与推送帧同 payload），供 /api/cursor 与 {"type":"cursor"} 复用。
-bool PickerCursorInfo(nlohmann::json& out);
+bool PickerCursorInfo(ppjson::Value& out);
 
 #endif  // PICKER_H

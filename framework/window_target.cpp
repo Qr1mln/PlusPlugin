@@ -59,15 +59,15 @@ bool WindowTarget::resolve_client(int x, int y, const std::string& space, int& c
   return true;
 }
 
-bool WindowTarget::geometry(nlohmann::json& out) const {
+bool WindowTarget::geometry(ppjson::Value& out) const {
   RECT rc;
   if (!view_rect(rc)) {
     return false;
   }
-  out["x"] = rc.left;
-  out["y"] = rc.top;
-  out["w"] = rc.right - rc.left;
-  out["h"] = rc.bottom - rc.top;
-  out["scale"] = (host_ != nullptr && host_->scale != nullptr) ? host_->scale() : 1.0f;
+  out.SetNum("x", rc.left);
+  out.SetNum("y", rc.top);
+  out.SetNum("w", rc.right - rc.left);
+  out.SetNum("h", rc.bottom - rc.top);
+  out.SetNum("scale", (host_ != nullptr && host_->scale != nullptr) ? host_->scale() : 1.0f);
   return true;
 }

@@ -110,10 +110,10 @@ void Broadcast(const std::string& msg, bool onlyWatch, bool wait) {
 }
 
 // 排一条拾取结果并唤醒推送线程立刻发出（stopAfter=true 时发完卸钩子）。
-void QueuePick(const nlohmann::json& payload, bool stopAfter) {
+void QueuePick(const char* json, bool stopAfter) {
     {
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_pendingPick = payload.dump();
+        g_pendingPick = (json != nullptr) ? json : "";
         g_pendingReady = true;
     }
     const DWORD tid = g_tid;
@@ -136,17 +136,21 @@ LRESULT CALLBACK MouseHookProc(int code, WPARAM wParam, LPARAM lParam) {
             if (ScreenToClient(wnd, &cp) && GetClientRect(wnd, &rc) && cp.x >= 0 && cp.y >= 0 &&
                 cp.x < rc.right && cp.y < rc.bottom) {
                 const double scale = HostScale();
-                nlohmann::json p;
-                p["t"] = "pick";
-                p["sx"] = ms->pt.x;
-                p["sy"] = ms->pt.y;
-                p["x"] = cp.x;
-                p["y"] = cp.y;
-                p["lx"] = Round1(cp.x / scale);
-                p["ly"] = Round1(cp.y / scale);
-                p["scale"] = scale;
+                ppjson::Node nodes[16] = {};
+                ppjson::Pool pool(nodes, 16);
+                ppjson::Value p = ppjson::Value::Obj(pool);
+                p.SetStr("t", "pick");
+                p.SetNum("sx", ms->pt.x);
+                p.SetNum("sy", ms->pt.y);
+                p.SetNum("x", cp.x);
+                p.SetNum("y", cp.y);
+                p.SetNum("lx", Round1(cp.x / scale));
+                p.SetNum("ly", Round1(cp.y / scale));
+                p.SetNum("scale", scale);
+                char jbuf[256] = {};
+                p.Dump(jbuf, sizeof(jbuf));
                 g_swallowLeftUp = true;
-                QueuePick(p, true);
+                QueuePick(jbuf, true);
                 return 1;  // 吞掉这次点击，应用不响应
             }
         }
@@ -155,10 +159,14 @@ LRESULT CALLBACK MouseHookProc(int code, WPARAM wParam, LPARAM lParam) {
         return 1;
     } else if (wParam == WM_RBUTTONDOWN) {
         g_swallowRightUp = true;
-        nlohmann::json p;
-        p["t"] = "pick";
-        p["action"] = "cancel";
-        QueuePick(p, true);
+        ppjson::Node nodes[8] = {};
+        ppjson::Pool pool(nodes, 8);
+        ppjson::Value p = ppjson::Value::Obj(pool);
+        p.SetStr("t", "pick");
+        p.SetStr("action", "cancel");
+        char jbuf[128] = {};
+        p.Dump(jbuf, sizeof(jbuf));
+        QueuePick(jbuf, true);
         return 1;
     } else if (wParam == WM_RBUTTONUP && g_swallowRightUp) {
         g_swallowRightUp = false;
@@ -187,20 +195,24 @@ void PickStartInThread() {
     // 低级钩子不需要跨进程注入，hMod 传 NULL 即可。
     g_hook = SetWindowsHookExW(WH_MOUSE_LL, &MouseHookProc, nullptr, 0);
 
-    nlohmann::json p;
-    p["t"] = "pick";
+    ppjson::Node nodes[8] = {};
+    ppjson::Pool pool(nodes, 8);
+    ppjson::Value p = ppjson::Value::Obj(pool);
+    p.SetStr("t", "pick");
     if (g_hook == nullptr) {
         g_pickActive.store(false);
         const DWORD err = GetLastError();
         LogLine("pick: SetWindowsHookEx failed err=%lu", err);
-        p["action"] = "failed";
-        p["error"] = "set hook failed";
+        p.SetStr("action", "failed");
+        p.SetStr("error", "set hook failed");
     } else {
         g_pickActive.store(true);
         LogLine("pick: hook installed (左键拾取 / 右键取消)");
-        p["action"] = "ready";
+        p.SetStr("action", "ready");
     }
-    Broadcast(p.dump(), false, true);
+    char jbuf[256] = {};
+    p.Dump(jbuf, sizeof(jbuf));
+    Broadcast(jbuf, false, true);
 }
 
 void PickFlushInThread(bool stopAfter) {
@@ -224,12 +236,16 @@ void PushCursorTick() {
     if (g_watchCount.load() <= 0) {
         return;
     }
-    nlohmann::json c;
+    ppjson::Node nodes[16] = {};
+    ppjson::Pool pool(nodes, 16);
+    ppjson::Value c = ppjson::Value::Obj(pool);
     if (!PickerCursorInfo(c)) {
         return;
     }
-    c["t"] = "cursor";
-    Broadcast(c.dump(), true, false);
+    c.SetStr("t", "cursor");
+    char jbuf[384] = {};
+    c.Dump(jbuf, sizeof(jbuf));
+    Broadcast(jbuf, true, false);
 }
 
 DWORD WINAPI PushThreadProc(LPVOID) {
@@ -350,14 +366,18 @@ bool PickerBeginPick() {
 }
 
 void PickerCancelPick() {
-    nlohmann::json p;
-    p["t"] = "pick";
-    p["action"] = "cancel";
-    QueuePick(p, true);
+    ppjson::Node nodes[8] = {};
+    ppjson::Pool pool(nodes, 8);
+    ppjson::Value p = ppjson::Value::Obj(pool);
+    p.SetStr("t", "pick");
+    p.SetStr("action", "cancel");
+    char jbuf[128] = {};
+    p.Dump(jbuf, sizeof(jbuf));
+    QueuePick(jbuf, true);
 }
 
 // 一次性光标读数：屏幕坐标、view 客户区物理像素、逻辑像素（x/scale）、窗口尺寸。
-bool PickerCursorInfo(nlohmann::json& out) {
+bool PickerCursorInfo(ppjson::Value& out) {
     const HWND wnd = TargetWindow();
     if (wnd == nullptr) {
         return false;
@@ -377,17 +397,17 @@ bool PickerCursorInfo(nlohmann::json& out) {
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;
     const double scale = HostScale();
-    out["sx"] = sp.x;
-    out["sy"] = sp.y;
-    out["x"] = cp.x;
-    out["y"] = cp.y;
-    out["lx"] = Round1(cp.x / scale);
-    out["ly"] = Round1(cp.y / scale);
-    out["w"] = w;
-    out["h"] = h;
-    out["scale"] = scale;
-    out["inside"] = (cp.x >= 0 && cp.y >= 0 && cp.x < w && cp.y < h);
+    out.SetNum("sx", sp.x);
+    out.SetNum("sy", sp.y);
+    out.SetNum("x", cp.x);
+    out.SetNum("y", cp.y);
+    out.SetNum("lx", Round1(cp.x / scale));
+    out.SetNum("ly", Round1(cp.y / scale));
+    out.SetNum("w", w);
+    out.SetNum("h", h);
+    out.SetNum("scale", scale);
+    out.SetBool("inside", (cp.x >= 0 && cp.y >= 0 && cp.x < w && cp.y < h));
     // 页面此时没有焦点，浏览器收不到按键，只能由宿主进程采样全局键态。
-    out["f8"] = ((GetAsyncKeyState(VK_F8) & 0x8000) != 0);
+    out.SetBool("f8", ((GetAsyncKeyState(VK_F8) & 0x8000) != 0));
     return true;
 }

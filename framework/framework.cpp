@@ -28,14 +28,18 @@
 #include <winsock2.h>
 #include <windows.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
+
+#include "../common/json_util.h"
 
 #include "civetweb.h"
 #include "command_handler.h"
 #include "input_dispatcher.h"
 #include "logger.h"
-#include "nlohmann/json.hpp"
 #include "picker.h"
 #include "pplugin.h"
 #include "script_store.h"
@@ -206,57 +210,71 @@ extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
 // ============================================================================
 namespace {
 
-using nlohmann::json;
-
 typedef int (__cdecl* NotifyGhostFn)(const char*, char*, int, void*);
 NotifyGhostFn g_dispatch = nullptr;
 void* g_dispatchCtx = nullptr;
 
-int WriteResp(const std::string& body, char* resp, int cap) {
-  const int need = static_cast<int>(body.size());
+int WriteResp(const char* body, char* resp, int cap) {
+  if (body == nullptr || resp == nullptr || cap <= 0) {
+    return -1;
+  }
+  const int need = static_cast<int>(std::strlen(body));
   if (need + 1 > cap) {
     return -(need + 1);
   }
-  memcpy(resp, body.data(), static_cast<size_t>(need));
+  std::memcpy(resp, body, static_cast<size_t>(need));
   resp[need] = '\0';
   return need;
 }
 
-std::string CallBase(const std::string& req) {
+std::string CallBase(const char* req) {
   if (g_dispatch == nullptr) {
     return "{}";
   }
   char resp[1024] = {};
-  const int n = g_dispatch(req.c_str(), resp, static_cast<int>(sizeof(resp)), g_dispatchCtx);
+  const int n = g_dispatch(req, resp, static_cast<int>(sizeof(resp)), g_dispatchCtx);
   return (n >= 0) ? std::string(resp) : std::string("{}");
 }
 
-json CallBaseJson(const char* req) {
-  return json::parse(CallBase(req), nullptr, false);
-}
-
 void __cdecl DispatchPublishLog(const char* text) {
-  json j;
-  j["cmd"] = "publishLog";
-  j["text"] = (text != nullptr) ? text : "";
-  CallBase(j.dump());
+  ppjson::Node nodes[8] = {};
+  ppjson::Pool pool(nodes, 8);
+  ppjson::Value j = ppjson::Value::Obj(pool);
+  j.SetStr("cmd", "publishLog");
+  j.SetStr("text", (text != nullptr) ? text : "");
+  char buf[1024] = {};
+  j.Dump(buf, sizeof(buf));
+  CallBase(buf);
 }
 
-HWND __cdecl DispatchMainWindow() {
-  const json j = CallBaseJson("{\"cmd\":\"mainWindow\"}");
-  if (!j.is_object()) return nullptr;
-  return reinterpret_cast<HWND>(static_cast<uintptr_t>(std::stoull(j.value("hwnd", "0"))));
+// 调 base 取一个 hwnd（"mainWindow"/"viewWindow"），解析 {"hwnd":"..."}。
+HWND __cdecl DispatchWindowByCmd(const char* req) {
+  const std::string resp = CallBase(req);
+  ppjson::Node nodes[8] = {};
+  ppjson::Pool pool(nodes, 8);
+  ppjson::Value j;
+  char err[32] = {};
+  if (!ppjson::Value::Parse(resp.c_str(), pool, j, err, sizeof(err))) {
+    return nullptr;
+  }
+  const char* hwnd = j.Find("hwnd").AsStr();
+  return reinterpret_cast<HWND>(
+      static_cast<uintptr_t>(std::strtoull(hwnd, nullptr, 10)));
 }
 
-HWND __cdecl DispatchViewWindow() {
-  const json j = CallBaseJson("{\"cmd\":\"viewWindow\"}");
-  if (!j.is_object()) return nullptr;
-  return reinterpret_cast<HWND>(static_cast<uintptr_t>(std::stoull(j.value("hwnd", "0"))));
-}
+HWND __cdecl DispatchMainWindow() { return DispatchWindowByCmd("{\"cmd\":\"mainWindow\"}"); }
+HWND __cdecl DispatchViewWindow() { return DispatchWindowByCmd("{\"cmd\":\"viewWindow\"}"); }
 
 float __cdecl DispatchScale() {
-  const json j = CallBaseJson("{\"cmd\":\"scale\"}");
-  return j.is_object() ? static_cast<float>(j.value("scale", 1.0)) : 1.0f;
+  const std::string resp = CallBase("{\"cmd\":\"scale\"}");
+  ppjson::Node nodes[8] = {};
+  ppjson::Pool pool(nodes, 8);
+  ppjson::Value j;
+  char err[32] = {};
+  if (!ppjson::Value::Parse(resp.c_str(), pool, j, err, sizeof(err))) {
+    return 1.0f;
+  }
+  return static_cast<float>(j.Find("scale").AsNum(1.0));
 }
 
 // 用 ghost 的 dispatch 拼出 Host 表，交给现有子模块。
@@ -288,26 +306,32 @@ int __cdecl NotifyPlatform(const char* reqJson, char* respJson, int cap) {
   if (reqJson == nullptr || respJson == nullptr || cap <= 0) {
     return -1;
   }
-  const json req = json::parse(reqJson, nullptr, false);
-  if (req.is_discarded()) {
+  ppjson::Node nodes[16] = {};
+  ppjson::Pool pool(nodes, 16);
+  ppjson::Value req;
+  char err[64] = {};
+  if (!ppjson::Value::Parse(reqJson, pool, req, err, sizeof(err))) {
     return WriteResp("{\"ok\":false,\"err\":\"invalid json\",\"code\":400}", respJson, cap);
   }
-  const std::string cmd = req.value("cmd", "");
+  const char* cmd = req.Find("cmd").AsStr();
 
-  if (cmd == "init") {
+  if (std::strcmp(cmd, "init") == 0) {
     g_dispatch = reinterpret_cast<NotifyGhostFn>(
-        static_cast<uintptr_t>(std::stoull(req.value("dispatch", "0"))));
+        static_cast<uintptr_t>(std::strtoull(req.Find("dispatch").AsStr(), nullptr, 10)));
     g_dispatchCtx = reinterpret_cast<void*>(
-        static_cast<uintptr_t>(std::stoull(req.value("ctx", "0"))));
-    const json resp = {{"ok", StartViaProtocol() == P_OK}, {"proto", 1}};
-    return WriteResp(resp.dump(), respJson, cap);
+        static_cast<uintptr_t>(std::strtoull(req.Find("ctx").AsStr(), nullptr, 10)));
+    char buf[64] = {};
+    std::snprintf(buf, sizeof(buf), "{\"ok\":%s,\"proto\":1}",
+                  (StartViaProtocol() == P_OK) ? "true" : "false");
+    return WriteResp(buf, respJson, cap);
   }
-  if (cmd == "shutdown") {
+  if (std::strcmp(cmd, "shutdown") == 0) {
     g_fw.stop();
     return WriteResp("{\"ok\":true}", respJson, cap);
   }
-  const json resp = {{"ok", true}, {"echo", cmd}};
-  return WriteResp(resp.dump(), respJson, cap);
+  char buf[192] = {};
+  std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"echo\":\"%s\"}", cmd);
+  return WriteResp(buf, respJson, cap);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
