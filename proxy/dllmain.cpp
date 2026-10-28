@@ -43,10 +43,10 @@ PROXY_EXPORT_LIST(DEF_PTR)  // 宏展开：g_pfn_GetFileVersionInfoW ... 共 17 
 namespace {  // 匿名命名空间：下列符号仅在本编译单元内可见
 
 int g_resolveMiss = -1;           // 未解析到的导出数量；-1 表示“尚未解析”
-HMODULE g_realVersion = nullptr;  // 真身 version.dll 的模块句柄（保留，防止被卸载后 g_pfn_* 悬空）
+HMODULE g_sysVersion = nullptr;  // 真身(System32) version.dll 的模块句柄（保留，防止被卸载后 g_pfn_* 悬空）
 
 // 职责 1：定位并加载真身 version.dll —— 只管拿到模块句柄。
-HMODULE LoadRealVersionDll() {
+HMODULE LoadSysVersionDll() {
     wchar_t sysdir[MAX_PATH] = {};                         // 存放 System32 目录路径的缓冲区
     const UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);  // 取 C:\Windows\System32
     if (n == 0 || n >= MAX_PATH) {                         // 取失败，或路径超出缓冲区
@@ -58,10 +58,10 @@ HMODULE LoadRealVersionDll() {
 }
 
 // 职责 2：把真身的导出地址绑进 g_pfn_* —— 只填表，返回未解析到的数量。
-int BindExportsToReal(HMODULE real) {
+int BindExportsToSys(HMODULE sys) {
     int missing = 0;  // 统计有多少个导出没找到
 #define RESOLVE(name)                                                     \
-    g_pfn_##name = reinterpret_cast<void*>(GetProcAddress(real, #name));  \
+    g_pfn_##name = reinterpret_cast<void*>(GetProcAddress(sys, #name));  \
     if (g_pfn_##name == nullptr) ++missing;
     // 上面：从真身逐个取地址填进对应 g_pfn_*；取不到则 missing 加一
     PROXY_EXPORT_LIST(RESOLVE)   // 对 17 个导出各执行一次 RESOLVE
@@ -70,17 +70,17 @@ int BindExportsToReal(HMODULE real) {
 }
 
 // 编排：加载真身 → 绑定导出（自身不承担任何一件事情的细节）。
-int ResolveRealDll() {
-    g_realVersion = LoadRealVersionDll();      // 加载真身并保留句柄
-    if (g_realVersion == nullptr) {            // 加载失败
-        return -1;                             // 返回 -1 表示“无法解析”
+int ResolveSysVersion() {
+    g_sysVersion = LoadSysVersionDll();      // 加载真身并保留句柄
+    if (g_sysVersion == nullptr) {           // 加载失败
+        return -1;                           // 返回 -1 表示“无法解析”
     }
-    return BindExportsToReal(g_realVersion);   // 绑定导出，返回缺失计数
+    return BindExportsToSys(g_sysVersion);   // 绑定导出，返回缺失计数
 }
 
 }  // namespace
 
-// 供外部查询“未解析导出数”，PayloadThread 启动日志会用。
+// 供外部查询“未解析导出数”，PayloadThread 启动日志会用（跨 TU：bootstrap.cpp 调用）。
 int ResolveMissCount() {
     return g_resolveMiss;  // 返回缓存的缺失计数
 }
@@ -89,7 +89,7 @@ int ResolveMissCount() {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {       // 只在“进程附加”（首次加载）时做事
         DisableThreadLibraryCalls(hModule);   // 禁用线程通知，省掉无谓开销（本 DLL 用不到）
-        g_resolveMiss = ResolveRealDll();     // 解析真身导出，把所有转发指针填好
+        g_resolveMiss = ResolveSysVersion();  // 解析真身导出，把所有转发指针填好
 
         // 此处不再做任何早期 hook：代理不渲染。宿主能力（含 scale）由 framework
         // 持有，各插件自持窗口/UI。
