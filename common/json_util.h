@@ -76,6 +76,9 @@ public:
     // that composes a response in place, e.g. out.SetNum("x", rc.left).
     static Value Obj(Pool& p);
     static Value Arr(Pool& p);
+    static Value Str(Pool& p, const char* val);   // standalone string value
+    static Value Num(Pool& p, double val);        // standalone number value
+    static Value Bool(Pool& p, bool val);         // standalone bool value
     void SetStr(const char* key, const char* val);
     void SetNum(const char* key, double val);
     void SetBool(const char* key, bool val);

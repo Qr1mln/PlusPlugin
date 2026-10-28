@@ -228,6 +228,54 @@ void ArrAddValue(Pool& p, Value arr, Value child) {
 // Convenience member builders: bind the pool carried by the handle.
 Value Value::Obj(Pool& p) { return MakeObj(p); }
 Value Value::Arr(Pool& p) { return MakeArr(p); }
+
+Value Value::Str(Pool& p, const char* val) {
+    const int i = p.Alloc();
+    if (i < 0) {
+        return Value();
+    }
+    Node& n = p.nodes[i];
+    n.type = kStr;
+    n.b = false;
+    n.num = 0.0;
+    n.firstChild = -1;
+    n.next = -1;
+    n.key[0] = '\0';
+    CopyStr(n.str, kMaxStr, val);
+    return Value(&p, i);
+}
+
+Value Value::Num(Pool& p, double val) {
+    const int i = p.Alloc();
+    if (i < 0) {
+        return Value();
+    }
+    Node& n = p.nodes[i];
+    n.type = kNum;
+    n.b = false;
+    n.num = val;
+    n.str[0] = '\0';
+    n.firstChild = -1;
+    n.next = -1;
+    n.key[0] = '\0';
+    return Value(&p, i);
+}
+
+Value Value::Bool(Pool& p, bool val) {
+    const int i = p.Alloc();
+    if (i < 0) {
+        return Value();
+    }
+    Node& n = p.nodes[i];
+    n.type = kBool;
+    n.b = val;
+    n.num = 0.0;
+    n.str[0] = '\0';
+    n.firstChild = -1;
+    n.next = -1;
+    n.key[0] = '\0';
+    return Value(&p, i);
+}
 void Value::SetStr(const char* key, const char* val) { if (pool_ != nullptr) ObjSetStr(*pool_, *this, key, val); }
 void Value::SetNum(const char* key, double val) { if (pool_ != nullptr) ObjSetNum(*pool_, *this, key, val); }
 void Value::SetBool(const char* key, bool val) { if (pool_ != nullptr) ObjSetBool(*pool_, *this, key, val); }

@@ -65,7 +65,7 @@ def framework_build(client):
     log("=== framework.dll（CivetWeb + 裸 TCP/WS 服务端）===")
     remote_fw = f"{REMOTE_ROOT}/framework"
     client.exec_command(
-        f"mkdir -p {remote_fw} {REMOTE_ROOT}/sdk "
+        f"mkdir -p {remote_fw} {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common "
         f"{REMOTE_ROOT}/libs/civetweb {REMOTE_ROOT}/libs/nlohmann")
     sftp = client.open_sftp()
     try:
@@ -74,6 +74,11 @@ def framework_build(client):
             p = os.path.join(REPO_ROOT, "framework", name)
             if os.path.isfile(p) and (name.endswith(".cpp") or name.endswith(".h")):
                 sftp.put(p, f"{remote_fw}/{name}")
+        # 共享模块 common/：framework 里 #include "../common/json_util.h"。
+        for name in os.listdir(os.path.join(REPO_ROOT, "common")):
+            p = os.path.join(REPO_ROOT, "common", name)
+            if os.path.isfile(p) and (name.endswith(".cpp") or name.endswith(".h")):
+                sftp.put(p, f"{REMOTE_ROOT}/common/{name}")
         sftp.put(os.path.join(REPO_ROOT, "sdk", "pplugin.h"),
                  f"{REMOTE_ROOT}/sdk/pplugin.h")
         sftp.put(os.path.join(REPO_ROOT, "libs", "nlohmann", "json.hpp"),
