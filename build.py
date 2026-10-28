@@ -163,8 +163,11 @@ def build_framework(client):
         f"{REMOTE_ROOT}/libs/civetweb {REMOTE_ROOT}/libs/nlohmann")
     sftp = client.open_sftp()
     try:
-        sftp.put(os.path.join(REPO_ROOT, "framework", "framework.cpp"),
-                 f"{remote_fw}/framework.cpp")
+        # framework 目录下的源文件全部上传（framework.cpp + picker.cpp 等）。
+        for name in os.listdir(os.path.join(REPO_ROOT, "framework")):
+            p = os.path.join(REPO_ROOT, "framework", name)
+            if os.path.isfile(p) and (name.endswith(".cpp") or name.endswith(".h")):
+                sftp.put(p, f"{remote_fw}/{name}")
         sftp.put(os.path.join(REPO_ROOT, "sdk", "pplugin.h"),
                  f"{REMOTE_ROOT}/sdk/pplugin.h")
         sftp.put(os.path.join(REPO_ROOT, "libs", "nlohmann", "json.hpp"),
@@ -189,7 +192,7 @@ def build_framework(client):
         f"x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static "
         f"-static-libgcc -static-libstdc++ "
         f"-I../sdk -I../libs -I../libs/civetweb "
-        f"-o framework.dll framework.cpp civetweb.o "
+        f"-o framework.dll framework.cpp picker.cpp civetweb.o "
         f"-lws2_32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lpthread"
     )
     status, out = run_status(client, cmd)
