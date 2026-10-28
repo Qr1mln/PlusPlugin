@@ -12,8 +12,9 @@
 #include <nlohmann/json.hpp>
 #include <string>
 
+#include "window_target.h"
+
 class Logger;
-class WindowTarget;
 class InputDispatcher;
 
 class CommandHandler {

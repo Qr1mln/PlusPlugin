@@ -10,6 +10,8 @@
 
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 struct mg_context;
 struct mg_connection;
 
