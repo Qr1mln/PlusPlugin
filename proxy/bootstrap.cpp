@@ -16,9 +16,6 @@
 
 namespace {
 
-constexpr wchar_t kCdpEnvVar[] = L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
-constexpr wchar_t kCdpArg[] = L"--remote-debugging-port=9223";
-
 // Base name of the host EXE, compared against target= so we only act inside
 // the configured process and never in a child or an unrelated one.
 const wchar_t* ExeBaseName() {
@@ -92,24 +89,6 @@ void ShowAttachDialog(const wchar_t* target) {
 
 }  // namespace
 
-void EnableWebView2Cdp() {
-    wchar_t args[512] = {};
-    const DWORD had = GetEnvironmentVariableW(kCdpEnvVar, args, 512);
-    if (had == 0) {
-        SetEnvironmentVariableW(kCdpEnvVar, kCdpArg);
-        return;
-    }
-    if (had >= 500) {
-        return;   // suspiciously long, leave it alone
-    }
-    if (wcsstr(args, L"--remote-debugging-port") != nullptr) {
-        return;
-    }
-    // Append, never overwrite: the host may carry its own extra arguments.
-    wcscat_s(args, kCdpArg);
-    SetEnvironmentVariableW(kCdpEnvVar, args);
-}
-
 DWORD WINAPI PayloadThread(LPVOID param) {
     (void)param;
     Log("attached exe=%ls resolve_miss=%d", ExeBaseName(), ResolveMissCount());
@@ -124,14 +103,6 @@ DWORD WINAPI PayloadThread(LPVOID param) {
         return 0;
     }
     Log("target matched: %ls", target);
-
-    // DllMain armed the WebView2 debug port before any host code ran; echo it
-    // once here so a missing endpoint later is explainable from the log alone.
-    {
-        wchar_t args[256] = {};
-        GetEnvironmentVariableW(kCdpEnvVar, args, 256);
-        Log("webview2 cdp args: %ls", args[0] ? args : L"(none)");
-    }
 
     if (!WaitForDxgi()) {
         Log("WARN: dxgi.dll not found in 30s");

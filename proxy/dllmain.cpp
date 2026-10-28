@@ -10,7 +10,7 @@
 // Module layout (this file is only the entry point):
 //   log.h/.cpp         proxy.log + plugin log fan-out
 //   config.h/.cpp      version.ini (Win32 profile API + legacy fallback)
-//   bootstrap.h/.cpp   WebView2 CDP switch, window discovery, plugin start
+//   bootstrap.h/.cpp   window discovery, plugin start
 //
 // Design note: the real DLL is resolved inside DllMain because the app may
 // call these APIs before the main window exists. Keep the dependency chain of
@@ -81,11 +81,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         g_resolveMiss = ResolveRealDll();
-
-        // Must run before the host can create its first WebView2 environment
-        // (see EnableWebView2Cdp). kernel32 only, no CRT, no loader-lock
-        // hazards.
-        EnableWebView2Cdp();
 
         // No early hook: the proxy does not render. The framework owns the Host
         // API (incl. scale, derived from the host window); plugins own their own
