@@ -126,8 +126,10 @@ def proxy_build(client):
     cmd = (
         f"cd {REMOTE_PROXY} && for f in *.cpp *.S; do [ -e \"$f\" ] && sed -i 's/\\r$//' \"$f\"; done && "
         f"x86_64-w64-mingw32-as -o stubs.o stubs.S && "
-        f"x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static "
+        f"x86_64-w64-mingw32-g++ -std=c++17 -Os -shared -static "
+        f"-ffunction-sections -fdata-sections "
         f"-static-libgcc -static-libstdc++ "
+        f"-Wl,--gc-sections -s "
         f"-I{REMOTE_ROOT} -o version.dll *.cpp stubs.o exports.def -luser32"
     )
     status, out = run_status(client, cmd)
