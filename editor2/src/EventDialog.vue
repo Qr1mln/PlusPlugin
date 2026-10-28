@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { cursor, start as startCursor, stop as stopCursor, beginPick, cancelPick } from './cursorStore'
+import { pushLog } from './logStore'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -50,6 +51,7 @@ function savePickTopmost(v) {
   } catch (_) {
     // 隐私模式下写不进去，忽略：只影响下次是否记住
   }
+  pushLog('info', `拾取时置顶 → ${v ? '开' : '关'}`)
 }
 
 // 取坐标只在鼠标事件里需要：弹窗开着且类型为 mouse 时才轮询。
@@ -97,6 +99,11 @@ watch(
 // 切换事件类型时跟着开/关轮询（延迟、按键不需要坐标）
 watch(() => form.value.type, syncPolling)
 
+function onTypeChange() {
+  const t = form.value.type
+  pushLog('info', `事件类型 → ${TYPE_LABELS[t] || t}`)
+}
+
 function num(v) {
   const n = Number(v) || 0
   return Number.isInteger(n) ? n : Math.round(n * 10) / 10
@@ -128,6 +135,15 @@ watch(
     if (!f || !props.open || !isPickType(form.value.type)) return
     form.value.x = Math.round(Number(f.lx) * 10) / 10
     form.value.y = Math.round(Number(f.ly) * 10) / 10
+    pushLog('info', `F8 捕获坐标：逻辑 (${form.value.x}, ${form.value.y})`)
+  },
+)
+
+// 取点失败（钩子装不上/超时）也留一行
+watch(
+  () => cursor.error,
+  (e) => {
+    if (e) pushLog('error', `取点失败：${e}`)
   },
 )
 
@@ -138,16 +154,26 @@ watch(
     if (!p || !props.open || !isPickType(form.value.type)) return
     form.value.x = Math.round(Number(p.lx) * 10) / 10
     form.value.y = Math.round(Number(p.ly) * 10) / 10
+    pushLog('info', `左键拾取坐标：逻辑 (${form.value.x}, ${form.value.y})`)
   },
 )
 
 function onPick() {
-  if (cursor.picking) cancelPick()
-  else beginPick({ topmost: form.value.topmost === true })
+  if (cursor.picking) {
+    cancelPick()
+    pushLog('warn', '拾取：已取消')
+    return
+  }
+  const topmost = form.value.topmost === true
+  beginPick({ topmost })
+  pushLog('info', `拾取开始：在应用窗口里点一下${topmost ? '（窗口已置顶）' : ''}`)
 }
 
-function close() {
+function close(withLog = true) {
   stopCursor()
+  if (withLog && props.open) {
+    pushLog('info', '事件弹窗：已取消')
+  }
   emit('update:open', false)
 }
 
@@ -190,7 +216,7 @@ function submit() {
     }
   }
   emit('submit', ev)
-  close()
+  close(false) // 提交由 App 记日志，这里不重复打"已取消"
 }
 
 function onKeydown(e) {
@@ -210,7 +236,7 @@ function onKeydown(e) {
 
       <div class="row">
         <label>类型</label>
-        <select v-model="form.type">
+        <select v-model="form.type" @change="onTypeChange">
           <option v-for="(label, key) in TYPE_LABELS" :key="key" :value="key">{{ label }}</option>
         </select>
       </div>

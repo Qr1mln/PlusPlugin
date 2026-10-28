@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { connect, onMessage, onStatus, request } from './ws'
 import EventDialog from './EventDialog.vue'
 import { setScale } from './cursorStore'
+import { logs, pushLog, clearLogs } from './logStore'
 
 // ---- 演示数据（真实数据后续从脚本文件加载）----
 const scripts = ref([])
@@ -34,6 +35,7 @@ watch(size, (value) => {
   } catch (_) {
     // 忽略持久化失败
   }
+  pushLog('info', `控件尺寸 → ${sizeLabel.value}（${value}）`)
 })
 
 // 连接状态（占位，未接 WS）
@@ -57,12 +59,6 @@ const rows = ref([])
 // 当前脚本的原始 events（保存时写回，避免丢失 json 字段）
 const rawEvents = ref([])
 
-const logs = ref([
-  { time: '09:05:23.978', level: 'debug', msg: '' },
-  { time: '09:05:23.978', level: 'info', msg: '' },
-  { time: '09:05:23.978', level: 'error', msg: '' },
-])
-
 // 日志面板：默认贴底滚动；用户往上翻时暂停自动滚动
 const logEl = ref(null)
 let stickBottom = true
@@ -74,7 +70,7 @@ function onLogScroll() {
 }
 
 watch(
-  () => logs.value.length,
+  () => logs.length,
   async () => {
     await nextTick()
     const el = logEl.value
@@ -99,16 +95,17 @@ async function onRefreshScripts() {
     const j = await res.json()
     if (j && j.success && Array.isArray(j.data)) {
       scripts.value = j.data
+      pushLog('info', `刷新脚本列表：共 ${j.data.length} 个`)
       if (!j.data.includes(currentScript.value)) {
         currentScript.value = j.data[0] || '' // 触发 watch，加载新脚本
       } else {
         await loadScript(currentScript.value) // 值没变，手动重读内容
       }
     } else {
-      console.warn('[scripts] 返回异常', j)
+      pushLog('error', `刷新脚本列表失败：${(j && j.data) || '返回异常'}`)
     }
   } catch (e) {
-    console.warn('[scripts] 读取失败', e)
+    pushLog('error', `刷新脚本列表失败：${e.message}`)
   }
 }
 
@@ -119,6 +116,7 @@ onMounted(() => {
   // WebSocket（reconnecting-websocket，自带断线重连）
   onStatus((s) => {
     status.value = s
+    pushLog(s === '已连接' ? 'info' : 'warn', `连接状态：${s}`)
   })
   onMessage((data) => {
     try {
@@ -166,14 +164,25 @@ function toRow(ev) {
 
 // 脚本文件：%APPDATA%\TTVoice\scripts\<name>.json
 // 内容 {version,loop,events:[...]}（也兼容纯数组）。
+// loadToken：切换脚本是异步的，只让最后一次请求的结果落到表格上，否则来回切脚本
+// 时旧请求晚到会把新脚本的内容覆盖掉（再保存就把 A 的内容写进 B）。
+let loadToken = 0
+// 表格/rawEvents 当前对应的脚本名；保存前用它兜底，避免"表格是 A、保存写 B"。
+let loadedScript = ''
+
 async function loadScript(name) {
+  const token = ++loadToken
   if (!name) {
     rows.value = []
+    rawEvents.value = []
+    loadedScript = ''
+    pushLog('info', '未选择脚本，表格已清空')
     return
   }
   try {
     const res = await fetch('/api/scripts?name=' + encodeURIComponent(name))
     const j = await res.json()
+    if (token !== loadToken) return // 期间又切了脚本：丢弃这次（过期）结果
     if (j && j.success) {
       const data = j.data
       const events = Array.isArray(data)
@@ -181,23 +190,36 @@ async function loadScript(name) {
         : (data && Array.isArray(data.events) ? data.events : [])
       rawEvents.value = events
       rows.value = events.map(toRow)
+      loadedScript = name
+      pushLog('info', `加载脚本「${name}」：${events.length} 步`)
     } else {
       rows.value = []
-      console.warn('[script] 读取失败', j)
+      rawEvents.value = []
+      loadedScript = ''
+      pushLog('error', `加载脚本「${name}」失败：${(j && j.data) || '返回异常'}`)
     }
   } catch (e) {
+    if (token !== loadToken) return
     rows.value = []
-    console.warn('[script] 读取失败', e)
+    rawEvents.value = []
+    loadedScript = ''
+    pushLog('error', `加载脚本「${name}」失败：${e.message}`)
   }
 }
 
 watch(currentScript, (name) => {
+  // 表格已经是这个脚本的内容（刚新建/刚手工设过）就不必再从文件读一遍，
+  // 免得把还没来得及保存的编辑覆盖掉。
+  if (name === loadedScript) return
   loadScript(name)
 })
 // 新建：创建空脚本并选中
 async function onNewScript() {
   const name = window.prompt('新建脚本名称')
-  if (!name) return
+  if (!name) {
+    pushLog('info', '新建脚本：已取消')
+    return
+  }
   try {
     const res = await fetch('/api/scripts?name=' + encodeURIComponent(name), {
       method: 'POST',
@@ -206,20 +228,40 @@ async function onNewScript() {
     })
     const j = await res.json()
     if (j && j.success) {
-      await onRefreshScripts()
+      pushLog('info', `已新建脚本「${name}」`)
+      // 新脚本必然是空的：清表并"认领"它。不再先 onRefreshScripts()——那会去加载
+      // 旧脚本，旧请求晚到还会把空表覆盖成旧脚本的步骤（保存就写错文件）。
+      loadToken++
+      rawEvents.value = []
+      rows.value = []
+      selectedRow.value = -1
+      loadedScript = name
+      if (!scripts.value.includes(name)) {
+        scripts.value = [...scripts.value, name]
+      }
       currentScript.value = name
     } else {
-      console.warn('[new] 失败', j)
+      pushLog('error', `新建脚本「${name}」失败：${(j && j.data) || '返回异常'}`)
     }
   } catch (e) {
-    console.warn('[new] 失败', e)
+    pushLog('error', `新建脚本「${name}」失败：${e.message}`)
   }
 }
 
 // 保存：把当前脚本的原始 events 写回文件
 async function onSaveScript() {
   const name = currentScript.value
-  if (!name) return
+  if (!name) {
+    pushLog('warn', '保存：先选择或新建一个脚本')
+    return
+  }
+  if (loadedScript !== name) {
+    pushLog(
+      'warn',
+      `保存已取消：「${name}」还没加载完（表格当前是「${loadedScript || '空'}」），稍等一下再点`,
+    )
+    return
+  }
   try {
     const res = await fetch('/api/scripts?name=' + encodeURIComponent(name), {
       method: 'POST',
@@ -227,11 +269,13 @@ async function onSaveScript() {
       body: JSON.stringify({ version: 2, name, loop: 1, events: rawEvents.value }),
     })
     const j = await res.json()
-    if (!j || !j.success) {
-      console.warn('[save] 失败', j)
+    if (j && j.success) {
+      pushLog('info', `已保存脚本「${name}」：${rawEvents.value.length} 步`)
+    } else {
+      pushLog('error', `保存脚本「${name}」失败：${(j && j.data) || '返回异常'}`)
     }
   } catch (e) {
-    console.warn('[save] 失败', e)
+    pushLog('error', `保存脚本「${name}」失败：${e.message}`)
   }
 }
 
@@ -294,8 +338,14 @@ async function onRenameScript() {
 // 删除：确认后删文件并刷新列表
 async function onDeleteScript() {
   const name = currentScript.value
-  if (!name) return
-  if (!window.confirm(`删除脚本「${name}」？`)) return
+  if (!name) {
+    pushLog('warn', '删除：先选择或新建一个脚本')
+    return
+  }
+  if (!window.confirm(`删除脚本「${name}」？`)) {
+    pushLog('info', `删除脚本「${name}」：已取消`)
+    return
+  }
   try {
     const res = await fetch('/api/scripts?name=' + encodeURIComponent(name), {
       method: 'DELETE',
@@ -304,12 +354,14 @@ async function onDeleteScript() {
     if (j && j.success) {
       rows.value = []
       rawEvents.value = []
+      loadedScript = ''
+      pushLog('info', `已删除脚本「${name}」`)
       await onRefreshScripts()
     } else {
-      console.warn('[delete] 失败', j)
+      pushLog('error', `删除脚本「${name}」失败：${(j && j.data) || '返回异常'}`)
     }
   } catch (e) {
-    console.warn('[delete] 失败', e)
+    pushLog('error', `删除脚本「${name}」失败：${e.message}`)
   }
 }
 
@@ -360,17 +412,6 @@ function toCommand(ev) {
   return null
 }
 
-function stamp() {
-  const d = new Date()
-  const p = (n, w = 2) => String(n).padStart(w, '0')
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
-}
-
-function pushLog(level, msg) {
-  logs.value.push({ time: stamp(), level, msg })
-  if (logs.value.length > 500) logs.value.shift()
-}
-
 const running = ref(false)
 let runToken = 0
 
@@ -383,7 +424,7 @@ async function onTryRun() {
   }
   running.value = true
   const token = ++runToken
-  await onRefreshApp() // 确保拿到最新 scale/几何
+  await onRefreshApp(true) // 确保拿到最新 scale/几何（不单独刷日志）
   pushLog('info', `试跑开始，共 ${events.length} 步（scale=${appScale.value}）`)
   try {
     for (let i = 0; i < events.length; i++) {
@@ -435,7 +476,9 @@ function refreshRows() {
 }
 
 function selectRow(i) {
+  if (selectedRow.value === i) return
   selectedRow.value = i
+  pushLog('debug', `选中第 ${i + 1} 步`)
 }
 
 function requireScript() {
@@ -464,6 +507,7 @@ function openAdd(type) {
   dlgTitle.value = '添加事件'
   dlgIndex.value = -1
   dlgOpen.value = true
+  pushLog('info', `打开「添加${TYPE_LABELS[type] || type}」弹窗`)
 }
 
 function openEdit(i) {
@@ -473,19 +517,38 @@ function openEdit(i) {
   dlgTitle.value = `修改第 ${i + 1} 步`
   dlgIndex.value = i
   dlgOpen.value = true
+  pushLog('info', `打开「修改第 ${i + 1} 步」弹窗`)
+}
+
+// 日志里用的一行摘要：鼠标 左键单击 @100,200 / 延迟 500ms / 输入 "abc" …
+function evBrief(ev) {
+  const t = ev.type || 'mouse'
+  const label = TYPE_LABELS[t] || t
+  if (t === 'mouse') {
+    const btn = MOUSE_BUTTONS[ev.button] || '左键'
+    const act = MOUSE_ACTIONS[ev.action] || '单击'
+    return `${label} ${btn}${act} @${ev.x ?? 0},${ev.y ?? 0}`
+  }
+  if (t === 'delay') return `${label} ${ev.ms ?? 0}ms`
+  if (t === 'input') return `${label} "${ev.text || ''}"`
+  if (t === 'key') return `${label} ${ev.key || ''} ${KEY_ACTIONS[ev.action] || ''}`.trim()
+  if (t === 'findImage') return `${label} ${ev.image || '(未指定图片)'}`
+  return label
 }
 
 function onDialogSubmit(ev) {
   if (dlgIndex.value >= 0) {
-    rawEvents.value.splice(dlgIndex.value, 1, ev)
-    selectRow(dlgIndex.value)
-    pushLog('info', `已修改第 ${dlgIndex.value + 1} 步`)
-  } else {
-    rawEvents.value.push(ev)
-    selectRow(rawEvents.value.length - 1)
-    pushLog('info', '已添加事件')
+    const i = dlgIndex.value
+    rawEvents.value.splice(i, 1, ev)
+    selectedRow.value = i
+    refreshRows()
+    pushLog('info', `已修改第 ${i + 1} 步：${evBrief(ev)}`)
+    return
   }
+  rawEvents.value.push(ev)
+  selectedRow.value = rawEvents.value.length - 1
   refreshRows()
+  pushLog('info', `已添加第 ${rawEvents.value.length} 步：${evBrief(ev)}`)
 }
 
 function onAddMouse() { openAdd('mouse') }
@@ -495,27 +558,41 @@ function onAddInput() { openAdd('input') }
 function onAddKey() { openAdd('key') }
 function onMoveUp() {
   const i = selectedRow.value
-  if (i <= 0) return
+  if (i <= 0) {
+    pushLog('warn', '上移：先选中一行（且不在第一行）')
+    return
+  }
   const arr = rawEvents.value
   const tmp = arr[i - 1]
   arr[i - 1] = arr[i]
   arr[i] = tmp
   selectedRow.value = i - 1
   refreshRows()
+  pushLog('info', `第 ${i + 1} 步上移到第 ${i} 位`)
 }
 
 function onMoveDown() {
   const i = selectedRow.value
   const arr = rawEvents.value
-  if (i < 0 || i >= arr.length - 1) return
+  if (i < 0 || i >= arr.length - 1) {
+    pushLog('warn', '下移：先选中一行（且不在最后一行）')
+    return
+  }
   const tmp = arr[i + 1]
   arr[i + 1] = arr[i]
   arr[i] = tmp
   selectedRow.value = i + 1
   refreshRows()
+  pushLog('info', `第 ${i + 1} 步下移到第 ${i + 2} 位`)
 }
-// 刷新应用：读回目标窗口几何（GET /api/app）
-async function onRefreshApp() {
+// 刷新应用：让宿主重新解析目标窗口并读回几何（GET /api/app）。
+// quiet=true 时（试跑内部调用）不刷屏。
+const APP_ERRORS = {
+  'view window minimized': '目标窗口已最小化，先把它恢复出来',
+  'view window unavailable': '找不到应用窗口（应用可能已退出）',
+}
+
+async function onRefreshApp(quiet = false) {
   try {
     const res = await fetch('/api/app')
     const j = await res.json()
@@ -526,20 +603,31 @@ async function onRefreshApp() {
       setScale(scale) // 取点面板的兜底 scale，与试跑换算同源
       const dpi = Math.round(scale * 100)
       appInfo.value = `${d.app || 'TTVoice.exe'} view ${d.w}x${d.h} DPI ${dpi}%`
+      if (!quiet) {
+        pushLog(
+          'info',
+          `刷新应用：${appInfo.value}${d.refreshed ? '（窗口已重新定位）' : ''}`,
+        )
+      }
     } else {
-      console.warn('[app] 读取失败', j)
+      const raw = (j && j.data) || '返回异常'
+      appInfo.value = `TTVoice.exe view - (${raw})`
+      pushLog('error', `刷新应用失败：${APP_ERRORS[raw] || raw}`)
     }
   } catch (e) {
-    console.warn('[app] 读取失败', e)
+    pushLog('error', `刷新应用失败：${e.message}`)
   }
 }
-function onClearLog() { logs.value = [] }
+function onClearLog() {
+  clearLogs()
+  pushLog('info', '日志已清空')
+}
 
 // 行内
 async function onRowTryRun(i) {
   const ev = rawEvents.value[i]
   if (!ev) return
-  await onRefreshApp()
+  await onRefreshApp(true)
   const cmd = toCommand(ev)
   if (!cmd) {
     pushLog('warn', `第 ${i + 1} 步（${ev.type}）暂不支持`)
@@ -642,12 +730,12 @@ function onRowDelete(i) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, i) in rows" :key="i" :class="{ selected: selectedRow === i }" @click="selectedRow = i">
+          <tr v-for="(row, i) in rows" :key="i" :class="{ selected: selectedRow === i }" @click="selectRow(i)">
             <td class="center">{{ i + 1 }}</td>
             <td class="ops">
-              <button @click="onRowTryRun(i)">试跑</button>
-              <button @click="onRowEdit(i)">修改</button>
-              <button @click="onRowDelete(i)">删除</button>
+              <button @click.stop="onRowTryRun(i)">试跑</button>
+              <button @click.stop="onRowEdit(i)">修改</button>
+              <button @click.stop="onRowDelete(i)">删除</button>
             </td>
             <td>{{ row.type }}</td>
             <td>{{ row.params }}</td>
