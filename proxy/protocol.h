@@ -1,8 +1,8 @@
-// protocol.h - base side of the version protocol (version.dll <-> framework.dll).
+// protocol.h - ghost side of the version protocol (version.dll <-> framework.dll).
 //
 // Contract (see docs/framework_protocol.md):
-//   base -> platform : int PutPlatform(req, resp, cap)      (platform exports)
-//   platform -> base : int baseRequest(req, resp, cap, ctx)  (base provides)
+//   ghost -> platform : int NotifyPlatform(req, resp, cap)      (platform exports)
+//   platform -> ghost : int NotifyGhost(req, resp, cap, ctx)  (ghost provides)
 //
 // Both signatures never change; all evolution happens inside JSON. The request
 // and response buffers are owned by the caller, so neither side frees memory
@@ -15,7 +15,7 @@
 
 namespace protocol {
 
-// Host capabilities injected by base (bootstrap). A plain struct so the
+// Host capabilities injected by ghost (bootstrap). A plain struct so the
 // protocol module does not depend on the plugins namespace internals.
 struct HostContext {
     HWND  mainWindow = nullptr;  // Flutter top-level window
@@ -23,15 +23,15 @@ struct HostContext {
     float scale = 1.0f;          // DPI scale derived from the host window
 };
 
-// base -> platform reverse call, handed to platform through the "init" request.
+// ghost -> platform reverse call, handed to platform through the "init" request.
 // Never change the signature.
-int __cdecl baseRequest(const char* reqJson, char* respJson, int cap, void* ctx);
+int __cdecl NotifyGhost(const char* reqJson, char* respJson, int cap, void* ctx);
 
-// base -> platform forward call. Returns >= 0 bytes written, or < 0 the number
+// ghost -> platform forward call. Returns >= 0 bytes written, or < 0 the number
 // of bytes required (the caller grows its buffer and retries).
 int CallPlatform(const char* reqJson, char* respJson, int cap);
 
-// Lifecycle. Resolves PutPlatform inside frameworkDll, then sends "init".
+// Lifecycle. Resolves NotifyPlatform inside frameworkDll, then sends "init".
 bool ProtocolStart(HMODULE frameworkDll, const HostContext& host);
 
 // Sends "shutdown" and drops the platform pointer. Call before FreeLibrary.

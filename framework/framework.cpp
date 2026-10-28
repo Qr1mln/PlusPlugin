@@ -197,10 +197,10 @@ extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
 }
 
 // ============================================================================
-// 新链路：version.dll 直连的 JSON 协议入口（PutPlatform）。
+// 新链路：version.dll 直连的 JSON 协议入口（NotifyPlatform）。
 //
 // 不再需要 GetDesc/pplugin：version.dll 直接 LoadLibrary(framework.dll) 后调
-// PutPlatform。这里把 base 交来的 dispatch 指针包成一张 Host 表，复用现有
+// NotifyPlatform。这里把 ghost 交来的 dispatch 指针包成一张 Host 表，复用现有
 // 子模块（logger/window_target 只认 Host*），从而零改动接入新链路。
 // GetDesc 暂时保留，等新链路验证通过后再退役。
 // ============================================================================
@@ -208,8 +208,8 @@ namespace {
 
 using nlohmann::json;
 
-typedef int (__cdecl* baseRequestFn)(const char*, char*, int, void*);
-baseRequestFn g_dispatch = nullptr;
+typedef int (__cdecl* NotifyGhostFn)(const char*, char*, int, void*);
+NotifyGhostFn g_dispatch = nullptr;
 void* g_dispatchCtx = nullptr;
 
 int WriteResp(const std::string& body, char* resp, int cap) {
@@ -259,7 +259,7 @@ float __cdecl DispatchScale() {
   return j.is_object() ? static_cast<float>(j.value("scale", 1.0)) : 1.0f;
 }
 
-// 用 base 的 dispatch 拼出 Host 表，交给现有子模块。
+// 用 ghost 的 dispatch 拼出 Host 表，交给现有子模块。
 const Host g_hostViaDispatch = {
     P_ABI,
     static_cast<uint32_t>(sizeof(Host)),
@@ -276,7 +276,7 @@ int StartViaProtocol() {
   const std::string doc_root = ModuleDirUtf8();
   const int rc = g_fw.start(&g_hostViaDispatch, doc_root, port);
   if (rc == P_OK) {
-    DispatchPublishLog("framework started via protocol (PutPlatform)");
+    DispatchPublishLog("framework started via protocol (NotifyPlatform)");
   }
   return rc;
 }
@@ -284,7 +284,7 @@ int StartViaProtocol() {
 }  // namespace
 
 extern "C" __declspec(dllexport)
-int __cdecl PutPlatform(const char* reqJson, char* respJson, int cap) {
+int __cdecl NotifyPlatform(const char* reqJson, char* respJson, int cap) {
   if (reqJson == nullptr || respJson == nullptr || cap <= 0) {
     return -1;
   }
@@ -295,7 +295,7 @@ int __cdecl PutPlatform(const char* reqJson, char* respJson, int cap) {
   const std::string cmd = req.value("cmd", "");
 
   if (cmd == "init") {
-    g_dispatch = reinterpret_cast<baseRequestFn>(
+    g_dispatch = reinterpret_cast<NotifyGhostFn>(
         static_cast<uintptr_t>(std::stoull(req.value("dispatch", "0"))));
     g_dispatchCtx = reinterpret_cast<void*>(
         static_cast<uintptr_t>(std::stoull(req.value("ctx", "0"))));

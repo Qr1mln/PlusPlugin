@@ -1,4 +1,4 @@
-// protocol.cpp - implementation of the base side of the version protocol.
+// protocol.cpp - implementation of the ghost side of the version protocol.
 //
 // No C++ standard library containers: JSON lives in a stack Pool (see
 // json_util.h) and strings are fixed char buffers.
@@ -16,9 +16,9 @@
 namespace protocol {
 namespace {
 
-typedef int (*PutPlatformFn)(const char* reqJson, char* respJson, int cap);
+typedef int (*NotifyPlatformFn)(const char* reqJson, char* respJson, int cap);
 
-PutPlatformFn g_platform = nullptr;  // resolved PutPlatform, null when stopped
+NotifyPlatformFn g_platform = nullptr;  // resolved NotifyPlatform, null when stopped
 HostContext g_host = {};               // injected host capabilities
 
 // Write a JSON body into the caller's buffer.
@@ -59,7 +59,7 @@ void PtrToStr(const void* ptr, char* out, int cap) {
                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ptr)));
 }
 
-// --- handlers for platform -> base commands --------------------------------
+// --- handlers for platform -> ghost commands --------------------------------
 
 int HandlePublishLog(ppjson::Value req, char* resp, int cap) {
     ppjson::Value text = req.Find("text");
@@ -108,7 +108,7 @@ int HandleGrabFrame(char* resp, int cap) {
 
 }  // namespace
 
-int __cdecl baseRequest(const char* reqJson, char* respJson, int cap, void* ctx) {
+int __cdecl NotifyGhost(const char* reqJson, char* respJson, int cap, void* ctx) {
     (void)ctx;  // host state lives in g_host; ctx is accepted for ABI symmetry
     if (reqJson == nullptr || respJson == nullptr || cap <= 0) {
         return -1;
@@ -143,9 +143,9 @@ bool ProtocolStart(HMODULE frameworkDll, const HostContext& host) {
         return false;
     }
     g_host = host;
-    g_platform = reinterpret_cast<PutPlatformFn>(GetProcAddress(frameworkDll, "PutPlatform"));
+    g_platform = reinterpret_cast<NotifyPlatformFn>(GetProcAddress(frameworkDll, "NotifyPlatform"));
     if (g_platform == nullptr) {
-        Log("protocol: PutPlatform not found in framework.dll");
+        Log("protocol: NotifyPlatform not found in framework.dll");
         return false;
     }
 
@@ -153,7 +153,7 @@ bool ProtocolStart(HMODULE frameworkDll, const HostContext& host) {
     // missing init reply does not break the forward path.
     ppjson::Pool pool;
     char dispatch[32] = {};
-    PtrToStr(reinterpret_cast<const void*>(&baseRequest), dispatch, sizeof(dispatch));
+    PtrToStr(reinterpret_cast<const void*>(&NotifyGhost), dispatch, sizeof(dispatch));
     ppjson::Value init = ppjson::MakeObj(pool);
     ppjson::ObjSetStr(pool, init, "cmd", "init");
     ppjson::ObjSetStr(pool, init, "dispatch", dispatch);

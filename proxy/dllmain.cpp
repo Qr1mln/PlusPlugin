@@ -1,4 +1,4 @@
-// version.dll 代理（base 层）：导出的转发外壳 + 加载器引导入口。
+// version.dll 代理（ghost 层）：导出的转发外壳 + 加载器引导入口。
 // 目标进程：由本 DLL 同目录 version.ini 的 target= 指定；
 // 交付的应用是 Flutter + ANGLE(D3D11) 宿主，例如 TTVoice.exe (x64)。
 //
