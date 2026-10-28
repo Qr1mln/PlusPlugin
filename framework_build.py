@@ -67,7 +67,7 @@ def framework_build(client):
     remote_fw = f"{REMOTE_ROOT}/framework"
     client.exec_command(
         f"mkdir -p {remote_fw} {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common "
-        f"{REMOTE_ROOT}/libs/civetweb")
+        f"{REMOTE_ROOT}/libs/civetweb && rm -f {REMOTE_ROOT}/common/*")
     sftp = client.open_sftp()
     try:
         # framework 目录下的源文件全部上传（framework.cpp + picker.cpp 等）。
@@ -75,7 +75,7 @@ def framework_build(client):
             p = os.path.join(REPO_ROOT, "framework", name)
             if os.path.isfile(p) and (name.endswith(".cpp") or name.endswith(".h")):
                 sftp.put(p, f"{remote_fw}/{name}")
-        # 共享模块 common/：framework 里 #include "../common/json_util.h"。
+        # 共享模块 common/：framework 里 #include "../common/json.h"。
         for name in os.listdir(os.path.join(REPO_ROOT, "common")):
             p = os.path.join(REPO_ROOT, "common", name)
             if os.path.isfile(p) and (name.endswith(".cpp") or name.endswith(".h")):

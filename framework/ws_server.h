@@ -9,7 +9,7 @@
 
 #include <cstddef>
 
-#include "../common/json_util.h"
+#include "../common/json.h"
 
 struct mg_context;
 struct mg_connection;

@@ -1,7 +1,7 @@
-// json_util.cpp - implementation of the shared minimal JSON reader/writer.
+// json.cpp - implementation of the shared minimal JSON reader/writer.
 //
 // Keep this file pure ASCII.
-#include "json_util.h"
+#include "json.h"
 
 #include <cstdio>
 #include <cstdlib>

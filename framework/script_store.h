@@ -8,7 +8,7 @@
 #ifndef FRAMEWORK_SCRIPT_STORE_H
 #define FRAMEWORK_SCRIPT_STORE_H
 
-#include "../common/json_util.h"
+#include "../common/json.h"
 
 class ScriptStore {
  public:

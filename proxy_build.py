@@ -101,10 +101,10 @@ def proxy_build(client):
     log(f"导出名 {len(names)} 个，生成 GAS 桩")
     stubs = gen_stubs_s(names)
 
-    client.exec_command(f"mkdir -p {REMOTE_PROXY} {REMOTE_ROOT}/framework {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common")
+    client.exec_command(f"mkdir -p {REMOTE_PROXY} {REMOTE_ROOT}/framework {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common && rm -f {REMOTE_ROOT}/common/*")
     sftp = client.open_sftp()
     try:
-        # proxy 下全部源码/头/宏（遍历上传，自动包含 protocol/json_util 等新文件）。
+        # proxy 下全部源码/头/宏（遍历上传，自动包含 protocol/json 等新文件）。
         for name in sorted(os.listdir(PROXY_DIR)):
             if name.endswith((".cpp", ".h", ".inc", ".def")):
                 sftp.put(os.path.join(PROXY_DIR, name), f"{REMOTE_PROXY}/{name}")
@@ -124,11 +124,11 @@ def proxy_build(client):
         sftp.close()
 
     # 去掉 CRLF（Linux 下 GAS 不喜欢），汇编桩，再用 mingw 链接 exports.def。
-    # 注意：远端 proxy/ 可能残留旧架构的 json_util.{cpp,h} 或旧版 log.{cpp,h}
-    # （与 common/ 头不一致，会被 *.cpp 一并编入导致运行时访问违例 / 符号重定义）。
-    # 先删掉它们，改用 common/ 的实现（json_util.cpp + log.cpp）。
+    # 注意：远端 proxy/ 可能残留旧架构的 json.cpp/json.h 或旧版 json_util.{cpp,h}/
+    # log.{cpp,h}（与 common/ 头不一致，会被 *.cpp 一并编入导致运行时访问违例 /
+    # 符号重定义）。先删掉它们，改用 common/ 的实现（json.cpp + log.cpp）。
     cmd = (
-        f"cd {REMOTE_PROXY} && rm -f json_util.cpp json_util.h log.cpp log.h && "
+        f"cd {REMOTE_PROXY} && rm -f json_util.cpp json_util.h json.cpp json.h log.cpp log.h && "
         f"for f in *.cpp *.S; do [ -e \"$f\" ] && sed -i 's/\\r$//' \"$f\"; done && "
         f"x86_64-w64-mingw32-as -o stubs.o stubs.S && "
         f"x86_64-w64-mingw32-g++ -std=c++17 -Os -shared -static "
@@ -136,7 +136,7 @@ def proxy_build(client):
         f"-static-libgcc -static-libstdc++ "
         f"-Wl,--gc-sections -s "
         f"-I{REMOTE_ROOT} -I{REMOTE_ROOT}/common "
-        f"-o version.dll *.cpp ../common/json_util.cpp ../common/log.cpp stubs.o exports.def -luser32"
+        f"-o version.dll *.cpp ../common/json.cpp ../common/log.cpp stubs.o exports.def -luser32"
     )
     status, out = run_status(client, cmd)
     if out.strip():

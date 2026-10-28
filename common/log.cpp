@@ -73,6 +73,24 @@ void LogV(const char* component, const char* fmt, va_list ap) {
   snprintf(record, sizeof record, "%s%s\n", stamp, line);
   const int recordLen = static_cast<int>(std::strlen(record));
 
+  // 源字面量是 UTF-8，但 Windows 记事本/控制台默认按 ANSI(GBK) 解读 -> 中文乱码。
+  // 这里把整条记录从 UTF-8 转成本地 ANSI 再写，保证中文可读；转换失败则退回原字节。
+  // 注意：wbuf/abuf 必须活到下方 WriteFile 之后，不能放进会离开作用域的块（否则悬空指针）。
+  wchar_t wbuf[kLogLineChars + 128] = {};
+  char abuf[2 * (kLogLineChars + 128)] = {};
+  const char* outBuf = record;
+  int outLen = recordLen;
+  const int wn = MultiByteToWideChar(CP_UTF8, 0, record, recordLen, wbuf,
+                                     kLogLineChars + 128);
+  if (wn > 0) {
+    const int an = WideCharToMultiByte(CP_ACP, 0, wbuf, wn, abuf, sizeof abuf,
+                                       nullptr, nullptr);
+    if (an > 0) {
+      outBuf = abuf;
+      outLen = an;
+    }
+  }
+
   HANDLE m = LogMutex();
   if (m != nullptr) {
     WaitForSingleObject(m, INFINITE);
@@ -83,7 +101,7 @@ void LogV(const char* component, const char* fmt, va_list ap) {
   if (h != INVALID_HANDLE_VALUE) {
     SetFilePointer(h, 0, nullptr, FILE_END);
     DWORD written = 0;
-    WriteFile(h, record, static_cast<DWORD>(recordLen), &written, nullptr);
+    WriteFile(h, outBuf, static_cast<DWORD>(outLen), &written, nullptr);
     CloseHandle(h);
   }
   if (m != nullptr) {

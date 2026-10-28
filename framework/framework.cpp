@@ -32,7 +32,7 @@
 #include <cstring>
 #include <cwchar>
 
-#include "../common/json_util.h"
+#include "../common/json.h"
 #include "../common/log.h"
 
 #include "civetweb.h"

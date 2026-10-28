@@ -1,4 +1,4 @@
-// json_util.h - shared minimal JSON reader/writer (no third-party, no STL).
+// json.h - shared minimal JSON reader/writer (no third-party, no STL).
 //
 // Values live in a caller-owned node pool: the caller supplies the node array
 // and its capacity, so proxy can use a small stack pool and a heavier consumer

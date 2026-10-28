@@ -1,7 +1,7 @@
 // protocol.cpp - implementation of the ghost side of the version protocol.
 //
 // No C++ standard library containers: JSON lives in a stack Pool (see
-// json_util.h) and strings are fixed char buffers.
+// json.h) and strings are fixed char buffers.
 //
 // Keep this file pure ASCII.
 #include "protocol.h"
@@ -10,7 +10,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "../common/json_util.h"
+#include "../common/json.h"
 #include "log.h"
 
 namespace protocol {

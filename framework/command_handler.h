@@ -12,7 +12,7 @@
 
 #include <windows.h>
 
-#include "../common/json_util.h"
+#include "../common/json.h"
 
 #include "window_target.h"
 
