@@ -1,6 +1,6 @@
 <script setup>
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { cursor, start as startCursor, stop as stopCursor } from './cursorStore'
+import { cursor, start as startCursor, stop as stopCursor, beginPick, cancelPick } from './cursorStore'
 import CursorReadout from './CursorReadout.vue'
 
 const props = defineProps({
@@ -110,6 +110,21 @@ watch(
   },
 )
 
+// 拾取模式返回的点，同样回填 X/Y
+watch(
+  () => cursor.picked,
+  (p) => {
+    if (!p || !props.open || !isPickType(form.value.type)) return
+    form.value.x = Math.round(Number(p.lx) * 10) / 10
+    form.value.y = Math.round(Number(p.ly) * 10) / 10
+  },
+)
+
+function onPick() {
+  if (cursor.picking) cancelPick()
+  else beginPick()
+}
+
 function close() {
   stopCursor()
   emit('update:open', false)
@@ -209,6 +224,9 @@ function onKeydown(e) {
             placeholder="y"
             @paste="onPasteXY"
           />
+          <button type="button" class="pick" @click="onPick">
+            {{ cursor.picking ? '拾取中…（点一下）' : '左键拾取' }}
+          </button>
         </div>
         <CursorReadout />
       </template>
@@ -326,6 +344,17 @@ function onKeydown(e) {
 }
 .small {
   width: 90px;
+}
+.pick {
+  height: var(--btn-h, 22px);
+  padding: 0 8px;
+  font-size: calc(var(--font, 12px) - 1px);
+  border: 1px solid #3a7afe;
+  border-radius: 2px;
+  background: #eef4ff;
+  color: #14509c;
+  cursor: pointer;
+  white-space: nowrap;
 }
 .wide {
   flex: 1;
