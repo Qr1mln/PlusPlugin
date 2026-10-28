@@ -2,7 +2,7 @@
 //
 // Every line goes to proxy.log (next to version.dll, %TEMP% as fallback) and,
 // once the framework is up, is mirrored to the plugin log sinks. The fan-out
-// variable stays a global because plugin_api.inc writes it directly.
+// variable stays a global because plugin.cpp writes it directly.
 //
 // NOTE: keep the proxy sources pure ASCII.
 #pragma once
