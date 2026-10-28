@@ -93,10 +93,13 @@ def framework_build(client):
     # 把 mg_set_websocket_handler / mg_websocket_write 编进库（否则链接报未定义）。
     cmd = (
         f"cd {remote_fw} && "
-        f"x86_64-w64-mingw32-gcc -c -O2 -DNO_SSL -DUSE_WEBSOCKET "
+        f"x86_64-w64-mingw32-gcc -c -Os -ffunction-sections -fdata-sections "
+        f"-DNO_SSL -DUSE_WEBSOCKET "
         f"../libs/civetweb/civetweb.c -o civetweb.o && "
-        f"x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static "
+        f"x86_64-w64-mingw32-g++ -std=c++17 -Os -shared -static "
+        f"-ffunction-sections -fdata-sections "
         f"-static-libgcc -static-libstdc++ "
+        f"-Wl,--gc-sections -s "
         f"-I../sdk -I../libs -I../libs/civetweb "
         f"-o framework.dll *.cpp civetweb.o "
         f"-lws2_32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lpthread"
