@@ -35,6 +35,7 @@
 #include "command_handler.h"
 #include "input_dispatcher.h"
 #include "logger.h"
+#include "nlohmann/json.hpp"
 #include "picker.h"
 #include "pplugin.h"
 #include "script_store.h"
@@ -193,6 +194,120 @@ static const Desc g_desc = {
 
 extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
   return &g_desc;
+}
+
+// ============================================================================
+// 新链路：version.dll 直连的 JSON 协议入口（PlatformEntry）。
+//
+// 不再需要 GetDesc/pplugin：version.dll 直接 LoadLibrary(framework.dll) 后调
+// PlatformEntry。这里把 base 交来的 dispatch 指针包成一张 Host 表，复用现有
+// 子模块（logger/window_target 只认 Host*），从而零改动接入新链路。
+// GetDesc 暂时保留，等新链路验证通过后再退役。
+// ============================================================================
+namespace {
+
+using nlohmann::json;
+
+typedef int (__cdecl* BaseDispatchFn)(const char*, char*, int, void*);
+BaseDispatchFn g_dispatch = nullptr;
+void* g_dispatchCtx = nullptr;
+
+int WriteResp(const std::string& body, char* resp, int cap) {
+  const int need = static_cast<int>(body.size());
+  if (need + 1 > cap) {
+    return -(need + 1);
+  }
+  memcpy(resp, body.data(), static_cast<size_t>(need));
+  resp[need] = '\0';
+  return need;
+}
+
+std::string CallBase(const std::string& req) {
+  if (g_dispatch == nullptr) {
+    return "{}";
+  }
+  char resp[1024] = {};
+  const int n = g_dispatch(req.c_str(), resp, static_cast<int>(sizeof(resp)), g_dispatchCtx);
+  return (n >= 0) ? std::string(resp) : std::string("{}");
+}
+
+json CallBaseJson(const char* req) {
+  return json::parse(CallBase(req), nullptr, false);
+}
+
+void __cdecl DispatchPublishLog(const char* text) {
+  json j;
+  j["cmd"] = "publishLog";
+  j["text"] = (text != nullptr) ? text : "";
+  CallBase(j.dump());
+}
+
+HWND __cdecl DispatchMainWindow() {
+  const json j = CallBaseJson("{\"cmd\":\"mainWindow\"}");
+  if (!j.is_object()) return nullptr;
+  return reinterpret_cast<HWND>(static_cast<uintptr_t>(std::stoull(j.value("hwnd", "0"))));
+}
+
+HWND __cdecl DispatchViewWindow() {
+  const json j = CallBaseJson("{\"cmd\":\"viewWindow\"}");
+  if (!j.is_object()) return nullptr;
+  return reinterpret_cast<HWND>(static_cast<uintptr_t>(std::stoull(j.value("hwnd", "0"))));
+}
+
+float __cdecl DispatchScale() {
+  const json j = CallBaseJson("{\"cmd\":\"scale\"}");
+  return j.is_object() ? static_cast<float>(j.value("scale", 1.0)) : 1.0f;
+}
+
+// 用 base 的 dispatch 拼出 Host 表，交给现有子模块。
+const Host g_hostViaDispatch = {
+    P_ABI,
+    static_cast<uint32_t>(sizeof(Host)),
+    &DispatchPublishLog,
+    &DispatchMainWindow,
+    &DispatchViewWindow,
+    &DispatchScale,
+    nullptr,
+    nullptr,
+};
+
+int StartViaProtocol() {
+  const int port = 47801;
+  const std::string doc_root = ModuleDirUtf8();
+  const int rc = g_fw.start(&g_hostViaDispatch, doc_root, port);
+  if (rc == P_OK) {
+    DispatchPublishLog("framework started via protocol (PlatformEntry)");
+  }
+  return rc;
+}
+
+}  // namespace
+
+extern "C" __declspec(dllexport)
+int __cdecl PlatformEntry(const char* reqJson, char* respJson, int cap) {
+  if (reqJson == nullptr || respJson == nullptr || cap <= 0) {
+    return -1;
+  }
+  const json req = json::parse(reqJson, nullptr, false);
+  if (req.is_discarded()) {
+    return WriteResp("{\"ok\":false,\"err\":\"invalid json\",\"code\":400}", respJson, cap);
+  }
+  const std::string cmd = req.value("cmd", "");
+
+  if (cmd == "init") {
+    g_dispatch = reinterpret_cast<BaseDispatchFn>(
+        static_cast<uintptr_t>(std::stoull(req.value("dispatch", "0"))));
+    g_dispatchCtx = reinterpret_cast<void*>(
+        static_cast<uintptr_t>(std::stoull(req.value("ctx", "0"))));
+    const json resp = {{"ok", StartViaProtocol() == P_OK}, {"proto", 1}};
+    return WriteResp(resp.dump(), respJson, cap);
+  }
+  if (cmd == "shutdown") {
+    g_fw.stop();
+    return WriteResp("{\"ok\":true}", respJson, cap);
+  }
+  const json resp = {{"ok", true}, {"echo", cmd}};
+  return WriteResp(resp.dump(), respJson, cap);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {

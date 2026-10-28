@@ -8,7 +8,7 @@
 #include "config.h"
 #include "log.h"
 
-#include "plugin.h"
+#include "protocol.h"
 
 namespace {
 
@@ -84,6 +84,73 @@ void ShowAttachDialog(const wchar_t* target) {
     MessageBoxW(nullptr, msg, L"pplugin", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
 }
 
+// ---- 新链路辅助：宿主能力 + framework 直连 ----
+float ComputeScale(HWND hwnd) {
+    using PFN = UINT(WINAPI*)(HWND);
+    static PFN getDpi = reinterpret_cast<PFN>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    const UINT dpi = (getDpi && hwnd) ? getDpi(hwnd) : 96;
+    return (dpi > 0) ? (static_cast<float>(dpi) / 96.0f) : 1.0f;
+}
+
+struct ViewCtx {
+    HWND first;
+    HWND visible;
+};
+
+BOOL CALLBACK EnumViewProc(HWND child, LPARAM lp) {
+    wchar_t cls[64] = {};
+    if (GetClassNameW(child, cls, 63) <= 0 || lstrcmpiW(cls, L"FLUTTERVIEW") != 0) {
+        return TRUE;
+    }
+    ViewCtx* ctx = reinterpret_cast<ViewCtx*>(lp);
+    if (ctx->first == nullptr) {
+        ctx->first = child;
+    }
+    if (IsWindowVisible(child) != FALSE) {
+        ctx->visible = child;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND ResolveViewWindow(HWND main) {
+    if (main == nullptr) {
+        return nullptr;
+    }
+    ViewCtx ctx{nullptr, nullptr};
+    EnumChildWindows(main, &EnumViewProc, reinterpret_cast<LPARAM>(&ctx));
+    return (ctx.visible != nullptr) ? ctx.visible : ctx.first;
+}
+
+// 加载同目录 framework.dll 并走 JSON 协议（PlatformEntry）。
+void LoadFrameworkViaProtocol(HWND hwnd) {
+    const wchar_t* dir = ModuleDir();
+    if (dir[0] == L'\0') {
+        Log("WARN: module dir unknown, cannot load framework");
+        return;
+    }
+    wchar_t path[MAX_PATH] = {};
+    swprintf_s(path, MAX_PATH, L"%s\\framework.dll", dir);
+    HMODULE fw = LoadLibraryW(path);
+    if (fw == nullptr) {
+        Log("WARN: LoadLibrary %ls failed err=%lu", path, GetLastError());
+        return;
+    }
+    protocol::HostContext host = {};
+    host.mainWindow = hwnd;
+    host.viewWindow = ResolveViewWindow(hwnd);
+    host.scale = ComputeScale(hwnd);
+    if (!protocol::ProtocolStart(fw, host)) {
+        Log("WARN: ProtocolStart failed");
+        FreeLibrary(fw);
+        return;
+    }
+    Log("framework via protocol: main=%p view=%p scale=%.2f",
+        reinterpret_cast<void*>(host.mainWindow), reinterpret_cast<void*>(host.viewWindow),
+        host.scale);
+}
+
 }  // namespace
 
 DWORD WINAPI PayloadThread(LPVOID param) {
@@ -118,11 +185,8 @@ DWORD WINAPI PayloadThread(LPVOID param) {
 
     // Plugins load only after the UI exists and never under the loader lock:
     // a plugin may touch user32 or create a thread in its own DllMain.
-    plugins::SetHostContext(hwnd);
-    plugins::Start();
-
-    // framework.dll 现在是 pplugin 插件，由上面的 plugins::Start() / plugin_loader
-    // 扫描 plugins\ 自动加载（含热加载），不再在这里直接 LoadLibrary。
+    // 新链路：直接加载同目录 framework.dll，经 JSON 协议（PlatformEntry）启动。
+    LoadFrameworkViaProtocol(hwnd);
 
     // Shown last so the dialog never delays plugin startup, and it parks only
     // this worker thread, not the host.
