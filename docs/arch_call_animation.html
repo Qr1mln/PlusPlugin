@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PlusPlugin 架构调用动画（ghost ↔ platform）</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --line: #ffffff;
+    --node: #161b22;
+    --dim: #8b949e;
+    --fwd: #58a6ff;   /* ghost -> platform */
+    --back: #3fb950;  /* platform -> ghost */
+  }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: #fff;
+    font-family: "Segoe UI", "Microsoft YaHei", "Cascadia Code", monospace;
+    display: flex; align-items: center; justify-content: center;
+  }
+  svg { width: min(94vw, 960px); height: auto; }
+  .node { fill: var(--node); stroke: var(--line); stroke-width: 2; rx: 12; ry: 12; }
+  .title { fill: #fff; font-size: 19px; font-weight: 600; }
+  .sub { fill: var(--dim); font-size: 13px; }
+  .edge { fill: none; stroke: var(--line); stroke-width: 2; marker-end: url(#arrow); }
+  .edge-back { stroke-dasharray: 7 6; }
+  .label { fill: #fff; font-size: 13px; }
+  .label-dim { fill: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<svg viewBox="0 0 960 580" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ffffff"/>
+    </marker>
+  </defs>
+
+  <!-- 宿主 -->
+  <rect class="node" x="300" y="40" width="360" height="72"/>
+  <text class="title" x="480" y="72" text-anchor="middle">TTVoice.exe</text>
+  <text class="sub"   x="480" y="94" text-anchor="middle">宿主进程 · host</text>
+
+  <!-- ghost -->
+  <rect class="node" x="300" y="190" width="360" height="72"/>
+  <text class="title" x="480" y="222" text-anchor="middle">version.dll</text>
+  <text class="sub"   x="480" y="244" text-anchor="middle">代理层 · ghost（转发 / hook / 加载）</text>
+
+  <!-- platform -->
+  <rect class="node" x="300" y="340" width="360" height="72"/>
+  <text class="title" x="480" y="372" text-anchor="middle">framework.dll</text>
+  <text class="sub"   x="480" y="394" text-anchor="middle">平台层 · platform（WebSocket / 命令执行）</text>
+
+  <!-- 边：host -> ghost -->
+  <path id="e_load" class="edge" d="M480,112 L480,188"/>
+  <text class="label-dim" x="494" y="155">LoadLibrary（同名代理劫持，进入宿主进程）</text>
+
+  <!-- 边：ghost -> platform（正向，NotifyPlatform） -->
+  <path id="e_fwd" class="edge" d="M420,262 L420,338"/>
+  <text class="label"     x="434" y="294">NotifyPlatform(req, resp, cap)</text>
+  <text class="label-dim" x="434" y="312">init / geometry / shutdown …</text>
+
+  <!-- 边：platform -> ghost（反向，NotifyGhost） -->
+  <path id="e_back" class="edge edge-back" d="M540,340 L540,264"/>
+  <text class="label"     x="526" y="294" text-anchor="end">NotifyGhost(req, resp, cap, ctx)</text>
+  <text class="label-dim" x="526" y="312" text-anchor="end">publishLog / mainWindow / scale …</text>
+
+  <!-- 流动光点 -->
+  <circle r="5" fill="#ffffff">
+    <animateMotion dur="2s" repeatCount="indefinite">
+      <mpath xlink:href="#e_load"/>
+    </animateMotion>
+  </circle>
+  <circle r="5" fill="var(--fwd)">
+    <animateMotion dur="2.4s" begin="0.5s" repeatCount="indefinite">
+      <mpath xlink:href="#e_fwd"/>
+    </animateMotion>
+  </circle>
+  <circle r="5" fill="var(--back)">
+    <animateMotion dur="2.4s" begin="1.3s" repeatCount="indefinite">
+      <mpath xlink:href="#e_back"/>
+    </animateMotion>
+  </circle>
+</svg>
+</body>
+</html>
