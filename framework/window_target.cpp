@@ -73,3 +73,18 @@ bool WindowTarget::geometry(ppjson::Value& out) const {
   out.SetNum("scale", (host_ != nullptr && host_->scale != nullptr) ? host_->scale() : 1.0f);
   return true;
 }
+
+bool WindowTarget::refresh() const {
+  return (host_ != nullptr && host_->refreshWindow != nullptr)
+             ? host_->refreshWindow()
+             : false;
+}
+
+bool WindowTarget::target_minimized() const {
+  const HWND w = target();
+  if (w == nullptr) {
+    return false;
+  }
+  const HWND root = GetAncestor(w, GA_ROOT);
+  return (root != nullptr) && (IsIconic(root) != FALSE);
+}

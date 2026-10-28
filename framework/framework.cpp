@@ -220,6 +220,22 @@ HWND __cdecl DispatchWindowByCmd(const char* req) {
 HWND __cdecl DispatchMainWindow() { return DispatchWindowByCmd("{\"cmd\":\"mainWindow\"}"); }
 HWND __cdecl DispatchViewWindow() { return DispatchWindowByCmd("{\"cmd\":\"viewWindow\"}"); }
 
+// 让宿主重新解析窗口（应用换主题/开多窗口会重建 HWND，旧句柄就失效了）。
+bool __cdecl DispatchRefreshWindow() {
+  char buf[256] = {};
+  if (!CallBase("{\"cmd\":\"refreshWindow\"}", buf, sizeof(buf))) {
+    return false;
+  }
+  ppjson::Node nodes[8] = {};
+  ppjson::Pool pool(nodes, 8);
+  ppjson::Value j;
+  char err[32] = {};
+  if (!ppjson::Value::Parse(buf, pool, j, err, sizeof(err))) {
+    return false;
+  }
+  return j.Find("ok").AsBool(false);
+}
+
 float __cdecl DispatchScale() {
   char buf[512] = {};
   if (!CallBase("{\"cmd\":\"scale\"}", buf, sizeof(buf))) {
@@ -237,7 +253,7 @@ float __cdecl DispatchScale() {
 
 // 用 ghost 的 dispatch 拼出内部能力表，交给现有子模块。
 const HostCaps g_hostCaps = {&DispatchMainWindow, &DispatchViewWindow,
-                             &DispatchScale};
+                             &DispatchScale, &DispatchRefreshWindow};
 
 int StartViaProtocol() {
   const int port = 47801;

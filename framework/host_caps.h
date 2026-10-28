@@ -14,6 +14,8 @@ struct HostCaps {
   HWND (__cdecl* mainWindow)();   // 宿主顶层窗口（FLUTTER_RUNNER_WIN32_WINDOW）
   HWND (__cdecl* viewWindow)();   // 真正接收输入的子窗口（FLUTTERVIEW）
   float (__cdecl* scale)();       // DPI 缩放（96dpi = 1.0）
+  // 让宿重新解析窗口（应用重建窗口后清缓存）。旧宿主可能没有这一根 -> nullptr。
+  bool (__cdecl* refreshWindow)();
 };
 
 #endif  // FRAMEWORK_HOST_CAPS_H

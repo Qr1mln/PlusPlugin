@@ -30,6 +30,10 @@ class CommandHandler {
   bool geometry(ppjson::Value& out) const { return win_.geometry(out); }
   bool cursor(ppjson::Value& out) const;
 
+  // 让宿主重新解析目标窗口（"刷新应用"） / 目标窗口是否最小化。
+  bool refresh_window() const { return win_.refresh(); }
+  bool target_minimized() const { return win_.target_minimized(); }
+
  private:
   static int make_reply(ppjson::Pool& pool, char* out, int cap, const char* id,
                         bool success, ppjson::Value data, const char* code);

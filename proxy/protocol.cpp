@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "../common/json.h"
+#include "bootstrap.h"
 #include "log.h"
 #include "log_relay.h"
 
@@ -101,6 +102,50 @@ int HandleScale(char* resp, int cap) {
     return WriteResp(buf, resp, cap);
 }
 
+// 重新解析宿主窗口（主窗口 + FLUTTERVIEW 子窗口 + DPI）。
+// 目标应用会重建窗口（换主题、开多窗口、分辨率变化），缓存的 HWND 就失效了；
+// 编辑器点"刷新应用"时走这里，而不是继续拿旧句柄算几何。
+int HandleRefreshWindow(char* resp, int cap) {
+    // 只重选"已经失效"的句柄：窗口最小化时 IsWindow 仍为真，这时不能改主意去
+    // 挑别的 Flutter 窗口（应用常同时开着图片查看器等窗口），否则会认错目标。
+    bool ok = true;
+    if (g_host.mainWindow == nullptr || IsWindow(g_host.mainWindow) == FALSE) {
+        const HWND main = FindHostMainWindow();
+        if (main != nullptr) {
+            g_host.mainWindow = main;
+            g_host.viewWindow = FindHostViewWindow(main);
+            Log("protocol: refreshWindow re-resolved main=%p view=%p",
+                reinterpret_cast<void*>(g_host.mainWindow),
+                reinterpret_cast<void*>(g_host.viewWindow));
+        } else {
+            ok = false;
+            Log("protocol: refreshWindow found no Flutter window");
+        }
+    } else if (g_host.viewWindow == nullptr || IsWindow(g_host.viewWindow) == FALSE) {
+        g_host.viewWindow = FindHostViewWindow(g_host.mainWindow);
+        Log("protocol: refreshWindow re-resolved view=%p",
+            reinterpret_cast<void*>(g_host.viewWindow));
+    }
+    if (g_host.mainWindow != nullptr) {
+        g_host.scale = HostDpiScale(g_host.mainWindow);
+    }
+
+    ppjson::Node poolNodes[32] = {};
+    ppjson::Pool pool(poolNodes, 32);
+    ppjson::Value o = ppjson::MakeObj(pool);
+    char mainStr[32] = {};
+    char viewStr[32] = {};
+    PtrToStr(g_host.mainWindow, mainStr, sizeof(mainStr));
+    PtrToStr(g_host.viewWindow, viewStr, sizeof(viewStr));
+    ppjson::ObjSetBool(pool, o, "ok", ok);
+    ppjson::ObjSetStr(pool, o, "main", mainStr);
+    ppjson::ObjSetStr(pool, o, "view", viewStr);
+    ppjson::ObjSetNum(pool, o, "scale", g_host.scale);
+    char buf[192] = {};
+    o.Dump(buf, sizeof(buf));
+    return WriteResp(buf, resp, cap);
+}
+
 int HandleGrabFrame(char* resp, int cap) {
     // Reserved: needs the D3D11 Present hook, not wired yet.
     return RespErr(resp, cap, 501, "grabFrame not implemented");
@@ -125,6 +170,7 @@ int __cdecl NotifyGhost(const char* reqJson, char* respJson, int cap, void* ctx)
     if (std::strcmp(cmd, "mainWindow") == 0) return HandleMainWindow(respJson, cap);
     if (std::strcmp(cmd, "viewWindow") == 0) return HandleViewWindow(respJson, cap);
     if (std::strcmp(cmd, "scale") == 0)      return HandleScale(respJson, cap);
+    if (std::strcmp(cmd, "refreshWindow") == 0) return HandleRefreshWindow(respJson, cap);
     if (std::strcmp(cmd, "grabFrame") == 0)  return HandleGrabFrame(respJson, cap);
     if (std::strcmp(cmd, "onUiThread") == 0) return RespErr(respJson, cap, 501, "onUiThread not implemented");
 

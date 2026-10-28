@@ -282,11 +282,19 @@ int WsServer::on_http_app(mg_connection* conn, void* cbdata) {
   ppjson::Pool& pool = hp.pool;
   ppjson::Value g = ppjson::Value::Obj(pool);
   ppjson::Value resp = ppjson::Value::Obj(pool);
-  if (!self->handler_->geometry(g)) {
+  // 每次读几何都让宿主重新解析一次窗口：应用重建窗口（换主题/多窗口/改分辨率）
+  // 后旧 HWND 失效，这一步就是"刷新应用"真正起作用的地方。
+  const bool refreshed = self->handler_->refresh_window();
+  if (self->handler_->target_minimized()) {
+    resp.SetBool("success", false);
+    resp.SetStr("data", "view window minimized");
+    resp.SetStr("code", kErr);
+  } else if (!self->handler_->geometry(g)) {
     resp.SetBool("success", false);
     resp.SetStr("data", "view window unavailable");
     resp.SetStr("code", kErr);
   } else {
+    g.SetBool("refreshed", refreshed);
     g.SetStr("app", "TTVoice.exe");
     resp.SetBool("success", true);
     resp.SetValue("data", g);

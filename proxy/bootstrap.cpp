@@ -26,7 +26,9 @@ const wchar_t* ExeBaseName() {
 
 struct WindowSearch {
     DWORD pid;
-    HWND found;
+    HWND found;      // largest visible, non-minimized Flutter window
+    LONG foundArea;
+    HWND minimized;  // first minimized one, used only when nothing else exists
 };
 
 BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lp) {
@@ -38,9 +40,26 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lp) {
     }
     wchar_t cls[128] = {};
     GetClassNameW(hwnd, cls, 128);
-    if (wcscmp(cls, L"FLUTTER_RUNNER_WIN32_WINDOW") == 0) {
+    if (wcscmp(cls, L"FLUTTER_RUNNER_WIN32_WINDOW") != 0) {
+        return TRUE;
+    }
+    // The host may own several Flutter windows (main UI, image viewer, multi-window
+    // dialogs). The main UI is the largest visible one; minimize creates a
+    // throwaway 160x30 window, so never pick a minimized one unless it is all we have.
+    if (IsIconic(hwnd)) {
+        if (ctx->minimized == nullptr) {
+            ctx->minimized = hwnd;
+        }
+        return TRUE;
+    }
+    RECT rc = {};
+    if (!GetWindowRect(hwnd, &rc)) {
+        return TRUE;
+    }
+    const LONG area = (rc.right - rc.left) * (rc.bottom - rc.top);
+    if (ctx->found == nullptr || area > ctx->foundArea) {
         ctx->found = hwnd;
-        return FALSE;
+        ctx->foundArea = area;
     }
     return TRUE;
 }
@@ -49,9 +68,9 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lp) {
 // well-known FLUTTER_RUNNER_WIN32_WINDOW class. The framework derives the DPI
 // scale from it and the plugins look their FLUTTERVIEW child up themselves.
 HWND FindFlutterWindow() {
-    WindowSearch ctx{GetCurrentProcessId(), nullptr};
+    WindowSearch ctx{GetCurrentProcessId(), nullptr, 0, nullptr};
     EnumWindows(EnumProc, reinterpret_cast<LPARAM>(&ctx));
-    return ctx.found;
+    return (ctx.found != nullptr) ? ctx.found : ctx.minimized;
 }
 
 bool WaitForDxgi() {
@@ -124,6 +143,14 @@ HWND ResolveViewWindow(HWND main) {
 }
 
 }  // namespace
+
+// Shared with protocol.cpp: the "refreshWindow" command re-resolves the host
+// window pair when the app rebuilds its window (theme switch / multi-window).
+HWND FindHostMainWindow() { return FindFlutterWindow(); }
+
+HWND FindHostViewWindow(HWND main) { return ResolveViewWindow(main); }
+
+float HostDpiScale(HWND hwnd) { return ComputeScale(hwnd); }
 
 DWORD WINAPI PayloadThread(LPVOID param) {
     (void)param;

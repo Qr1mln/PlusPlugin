@@ -28,6 +28,12 @@ class WindowTarget {
   // 几何信息对象 {x,y,w,h,scale}；窗口不可用时返回 false。
   bool geometry(ppjson::Value& out) const;
 
+  // 让宿主重新解析目标窗口（编辑器"刷新应用"用）；宿主不支持则返回 false。
+  bool refresh() const;
+
+  // 目标窗口的顶层窗口是否最小化（最小化时客户区屏幕坐标是 -32000，不能算几何）。
+  bool target_minimized() const;
+
   // 插件内部维护的虚拟光标（客户区坐标），供相对移动/拖拽使用。
   int cursor_x() const noexcept { return cx_; }
   int cursor_y() const noexcept { return cy_; }
