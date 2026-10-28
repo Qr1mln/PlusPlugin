@@ -2,7 +2,7 @@
 // input_dispatcher.h - 后台输入派发（PostMessage，不动物理鼠标）。
 //
 // 把鼠标/键盘/滚轮/文本事件以 PostMessage 形式投递到目标窗口（见 WindowTarget）。
-// 设计为无状态、对 WindowTarget 的只读引用，方便单测与复用。
+// 无状态，但持有 WindowTarget 的**可写**引用：输入会更新其虚拟光标。
 // ============================================================================
 #ifndef FRAMEWORK_INPUT_DISPATCHER_H
 #define FRAMEWORK_INPUT_DISPATCHER_H
@@ -15,7 +15,7 @@ class WindowTarget;  // 前向声明
 
 class InputDispatcher {
  public:
-  explicit InputDispatcher(const WindowTarget& win) : win_(win) {}
+  explicit InputDispatcher(WindowTarget& win) : win_(win) {}
 
   void move(int dx, int dy);
   void move_to(int x, int y, const std::string& space);
@@ -35,7 +35,7 @@ class InputDispatcher {
   static UINT button_up_msg(const std::string& button);
   static WPARAM button_down_key(const std::string& button);
 
-  const WindowTarget& win_;
+  WindowTarget& win_;
 };
 
 #endif  // FRAMEWORK_INPUT_DISPATCHER_H
