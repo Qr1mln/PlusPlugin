@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "name": "empty",
-  "version": "0.1.0",
-  "enabled": true,
-  "priority": 0,
-  "dll": "empty.dll"
-}

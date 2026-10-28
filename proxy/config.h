@@ -6,15 +6,15 @@
 //     target=MyApp.exe
 //     debug=true
 //
-//     [loaders]
-//     framework.dll
-//     other.dll
+//     [modules]
+//     console.dll
 //
 // [host] keys keep the old semantics: target= says which host process this
 // version.dll attaches to, debug= pops a dialog once attached.
-// [loaders] entries are plain DLL file names loaded from ModuleDir(), one per
-// line; an entry that is not listed is not loaded. Names are validated on read
-// (no path separators, no "..", must end in .dll), de-duplicated and capped.
+// [modules] lists *extra* JSON modules (plain dll names in ModuleDir()). The
+// same contract as framework.dll: export NotifyPlatform, answer {"cmd":"init"}
+// / {"cmd":"shutdown"}. framework.dll itself is NOT configured here: it is
+// always loaded first and watched for hot reload (see module_loader.h).
 //
 // Bare "key=value" files written by older builds (no [host] header) are still
 // accepted for [host] keys: the Win32 profile API is tried first, then a line
@@ -29,9 +29,9 @@
 #include <windows.h>
 
 // Fixed sizes. Paths cover <ModuleDir>\version.ini and the module dir itself.
-const int kConfigDirChars   = 512;   // ModuleDir / VersionIniPath buffer
-const int kMaxLoadDlls      = 8;     // [loaders] entries kept
-const int kMaxDllNameChars  = 64;    // one [loaders] dll name
+const int kConfigDirChars     = 512;  // ModuleDir / VersionIniPath buffer
+const int kMaxModuleNames     = 8;    // [modules] entries kept
+const int kMaxModuleNameChars = 64;   // one [modules] dll name
 
 // Directory holding our version.dll (no trailing backslash); L"" when it
 // cannot be resolved. Points at a cached static buffer.
@@ -47,7 +47,7 @@ const wchar_t* TargetExeName();
 // [host] debug= (default true): pop a dialog once the proxy has attached.
 bool DebugEnabled();
 
-// [loaders] plain dll names, already validated and de-duplicated. Writes up to
-// cap entries (each a fixed kMaxDllNameChars buffer) and returns the count.
+// [modules] plain dll names, already validated and de-duplicated. Writes up to
+// cap entries (each a fixed kMaxModuleNameChars buffer) and returns the count.
 // Resolve each name against ModuleDir() before loading.
-int LoadDllNames(wchar_t out[][kMaxDllNameChars], int cap);
+int ExtraModuleNames(wchar_t out[][kMaxModuleNameChars], int cap);

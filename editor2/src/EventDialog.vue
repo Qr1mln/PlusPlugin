@@ -1,7 +1,6 @@
 <script setup>
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { cursor, start as startCursor, stop as stopCursor, beginPick, cancelPick } from './cursorStore'
-import CursorReadout from './CursorReadout.vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -21,6 +20,7 @@ const form = ref({
   button: 'left',
   x: 0,
   y: 0,
+  topmost: false,
   ms: 500,
   unit: '毫秒',
   image: '',
@@ -31,6 +31,26 @@ const form = ref({
   keyAction: 'press',
   remark: '',
 })
+
+// "拾取时置顶"是个用一次就忘不掉的开关：存 localStorage，下次打开弹窗（含新建事件）
+// 沿用上次的选择；事件自己有 topmost 字段时以事件为准。
+const TOPMOST_KEY = 'pp.pickTopmost'
+
+function loadPickTopmost() {
+  try {
+    return localStorage.getItem(TOPMOST_KEY) === '1'
+  } catch (_) {
+    return false
+  }
+}
+
+function savePickTopmost(v) {
+  try {
+    localStorage.setItem(TOPMOST_KEY, v ? '1' : '0')
+  } catch (_) {
+    // 隐私模式下写不进去，忽略：只影响下次是否记住
+  }
+}
 
 // 取坐标只在鼠标事件里需要：弹窗开着且类型为 mouse 时才轮询。
 function isPickType(type) {
@@ -58,6 +78,7 @@ watch(
       button: ev.button || 'left',
       x: ev.x ?? 0,
       y: ev.y ?? 0,
+      topmost: ev.topmost === undefined ? loadPickTopmost() : ev.topmost === true,
       ms: useSeconds ? ms / 1000 : ms,
       unit: useSeconds ? '秒' : '毫秒',
       image: ev.image || '',
@@ -122,7 +143,7 @@ watch(
 
 function onPick() {
   if (cursor.picking) cancelPick()
-  else beginPick()
+  else beginPick({ topmost: form.value.topmost === true })
 }
 
 function close() {
@@ -142,6 +163,7 @@ function submit() {
       button: f.button,
       x: num(f.x),
       y: num(f.y),
+      topmost: f.topmost === true,
       remark: f.remark.trim(),
     }
   } else if (f.type === 'delay') {
@@ -228,7 +250,17 @@ function onKeydown(e) {
             {{ cursor.picking ? '拾取中…（点一下）' : '左键拾取' }}
           </button>
         </div>
-        <CursorReadout />
+        <div class="row">
+          <label>窗口</label>
+          <label class="check">
+            <input
+              v-model="form.topmost"
+              type="checkbox"
+              @change="savePickTopmost(form.topmost)"
+            />
+            拾取时置顶（把应用窗口提到最前再取点）
+          </label>
+        </div>
       </template>
 
       <template v-else-if="form.type === 'delay'">
@@ -344,6 +376,19 @@ function onKeydown(e) {
 }
 .small {
   width: 90px;
+}
+.row > label.check {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #333;
+  cursor: pointer;
+}
+.row > label.check input {
+  height: auto;
+  margin: 0;
+  padding: 0;
 }
 .pick {
   height: var(--btn-h, 22px);

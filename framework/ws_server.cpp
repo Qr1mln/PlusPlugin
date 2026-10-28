@@ -7,6 +7,9 @@
 #include <cstring>
 
 #include "civetweb.h"
+
+#include <windows.h>  // HeapAlloc：HTTP 请求缓冲不能放栈（CivetWeb 线程栈很小）
+
 #include "command_handler.h"
 #include "picker.h"
 #include "script_store.h"
@@ -18,9 +21,72 @@ const char* kOk = "0000";
 const char* kErr = "9999";
 
 const int kHttpPoolNodes = 256;
-const int kReplyCap = 16384;   // WS 响应缓冲（脚本列表等可能偏大）
-const int kMsgCap = 16384;     // 一帧命令文本上限
-const int kBodyCap = 4 * 1024 * 1024;  // 请求体上限（与原 4MB 一致）
+const int kReplyCap = 16384;          // WS 响应缓冲（脚本列表等可能偏大）
+const int kMsgCap = 16384;            // 一帧命令文本上限
+const int kBodyCap = 4 * 1024 * 1024; // 请求体上限（与原 4MB 一致）
+const int kHttpReplyCap = 65536;      // HTTP 响应缓冲（脚本正文最大 64KB）
+
+// --- 堆上的请求缓冲 ---------------------------------------------------------
+// CivetWeb 的请求处理跑在它自己的工作线程里，栈很小。曾经把 4MB 的请求体
+// （POST /api/scripts 保存脚本）和 256 个 ppjson::Node（约 150KB）放在栈上，
+// 一点保存就直接把宿主进程栈打爆 -> TTVoice 无任何日志闪退。
+// 现在统一走进程堆，RAII 归还。
+struct HeapNodes {
+  ppjson::Node* nodes;
+  ppjson::Pool pool;
+
+  explicit HeapNodes(int n)
+      : nodes(static_cast<ppjson::Node*>(
+            HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                      sizeof(ppjson::Node) * static_cast<size_t>(n)))),
+        pool(nodes, n) {}
+
+  ~HeapNodes() {
+    if (nodes != nullptr) {
+      HeapFree(GetProcessHeap(), 0, nodes);
+    }
+  }
+
+  bool ok() const { return nodes != nullptr; }
+
+  HeapNodes(const HeapNodes&) = delete;
+  HeapNodes& operator=(const HeapNodes&) = delete;
+};
+
+struct HeapText {
+  char* p;
+
+  explicit HeapText(int cap)
+      : p(static_cast<char*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                       static_cast<size_t>(cap)))) {}
+
+  ~HeapText() {
+    if (p != nullptr) {
+      HeapFree(GetProcessHeap(), 0, p);
+    }
+  }
+
+  bool ok() const { return p != nullptr; }
+
+  HeapText(const HeapText&) = delete;
+  HeapText& operator=(const HeapText&) = delete;
+};
+
+int RequestBodyCap(const struct mg_request_info* ri) {
+  if (ri == nullptr || ri->content_length <= 0) {
+    return 1;
+  }
+  const long long need = static_cast<long long>(ri->content_length) + 1;
+  return (need > kBodyCap) ? kBodyCap : static_cast<int>(need);
+}
+
+// 内存分配失败时的兜底响应（不再继续用空指针去构建 JSON）。
+int SendOom(mg_connection* conn) {
+  static const char kOom[] = "{\"success\":false,\"data\":\"out of memory\",\"code\":\"9999\"}";
+  mg_send_http_ok(conn, "application/json; charset=utf-8", sizeof(kOom) - 1);
+  mg_write(conn, kOom, sizeof(kOom) - 1);
+  return 500;
+}
 }  // namespace
 
 bool WsServer::start(CommandHandler& handler, ScriptStore& scripts,
@@ -151,11 +217,15 @@ int WsServer::read_body(mg_connection* conn, const struct mg_request_info* ri,
 }
 
 void WsServer::send_json(mg_connection* conn, ppjson::Value resp) {
-  char body[16384] = {};
-  const int n = resp.Dump(body, sizeof(body));
+  HeapText body(kHttpReplyCap);
+  if (!body.ok()) {
+    SendOom(conn);
+    return;
+  }
+  const int n = resp.Dump(body.p, kHttpReplyCap);
   const long long len = (n >= 0) ? static_cast<long long>(n) : 0;
   mg_send_http_ok(conn, "application/json; charset=utf-8", len);
-  mg_write(conn, body, static_cast<size_t>(len));
+  mg_write(conn, body.p, static_cast<size_t>(len));
 }
 
 int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
@@ -172,8 +242,11 @@ int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
     hasName = true;
   }
 
-  ppjson::Node nodes[kHttpPoolNodes] = {};
-  ppjson::Pool pool(nodes, kHttpPoolNodes);
+  HeapNodes hp(kHttpPoolNodes);
+  if (!hp.ok()) {
+    return SendOom(conn);
+  }
+  ppjson::Pool& pool = hp.pool;
   ppjson::Value resp = ppjson::Value::Obj(pool);
 
   if (hasName && !ScriptStore::safe_name(nameBuf)) {
@@ -184,9 +257,13 @@ int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
     self->scripts_->remove(pool, nameBuf, resp);
   } else if (hasName &&
              (std::strcmp(method, "POST") == 0 || std::strcmp(method, "PUT") == 0)) {
-    char body[kBodyCap] = {};
-    read_body(conn, ri, body, kBodyCap);
-    self->scripts_->write(pool, nameBuf, body, resp);
+    const int bodyCap = RequestBodyCap(ri);
+    HeapText body(bodyCap);
+    if (!body.ok()) {
+      return SendOom(conn);
+    }
+    read_body(conn, ri, body.p, bodyCap);
+    self->scripts_->write(pool, nameBuf, body.p, resp);
   } else if (hasName) {
     self->scripts_->read(pool, nameBuf, resp);
   } else {
@@ -198,8 +275,11 @@ int WsServer::on_http_scripts(mg_connection* conn, void* cbdata) {
 
 int WsServer::on_http_app(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
-  ppjson::Node nodes[kHttpPoolNodes] = {};
-  ppjson::Pool pool(nodes, kHttpPoolNodes);
+  HeapNodes hp(kHttpPoolNodes);
+  if (!hp.ok()) {
+    return SendOom(conn);
+  }
+  ppjson::Pool& pool = hp.pool;
   ppjson::Value g = ppjson::Value::Obj(pool);
   ppjson::Value resp = ppjson::Value::Obj(pool);
   if (!self->handler_->geometry(g)) {
@@ -218,8 +298,11 @@ int WsServer::on_http_app(mg_connection* conn, void* cbdata) {
 
 int WsServer::on_http_cursor(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
-  ppjson::Node nodes[kHttpPoolNodes] = {};
-  ppjson::Pool pool(nodes, kHttpPoolNodes);
+  HeapNodes hp(kHttpPoolNodes);
+  if (!hp.ok()) {
+    return SendOom(conn);
+  }
+  ppjson::Pool& pool = hp.pool;
   ppjson::Value c = ppjson::Value::Obj(pool);
   ppjson::Value resp = ppjson::Value::Obj(pool);
   if (!self->handler_->cursor(c)) {

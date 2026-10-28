@@ -2,9 +2,9 @@
 # ============================================================================
 # build_linux.sh - cross-compile the Windows artifacts from Linux (mingw-w64)
 #
-#   ./build_linux.sh                 # version.dll + script-engine.dll + console.dll
+#   ./build_linux.sh                 # version.dll + console.dll
 #   ./build_linux.sh proxy           # version.dll only
-#   ./build_linux.sh script-engine console  # selected plugins
+#   ./build_linux.sh console         # selected plugins
 #
 # Toolchain (Ubuntu 24.04 / Debian 12 / Mint 22):
 #   sudo apt install -y nasm g++-mingw-w64-x86-64 llvm
@@ -132,15 +132,6 @@ build_proxy() {
     verify "$ROOT/proxy/version.dll" "$STUB_COUNT"
 }
 
-build_script() {
-    info "building script-engine.dll (plugin)"
-    "$CXX" "${COMMON[@]}" -std=c++17 -I"$ROOT/plugin" -I"$ROOT" \
-        -o "$ROOT/plugin/script-engine/script-engine.dll" \
-        "$ROOT"/plugin/script-engine/*.cpp \
-        -luser32 -lgdi32 -lws2_32
-    verify "$ROOT/plugin/script-engine/script-engine.dll" 5
-}
-
 build_console() {
     info "building console.dll (plugin)"
     "$CXX" "${COMMON[@]}" -I"$ROOT/plugin" -I"$ROOT" \
@@ -154,17 +145,17 @@ build_console() {
 # main
 # ---------------------------------------------------------------------------
 TARGETS=("$@")
-[ ${#TARGETS[@]} -eq 0 ] && TARGETS=(proxy script-engine console)
+[ ${#TARGETS[@]} -eq 0 ] && TARGETS=(proxy console)
 
 for t in "${TARGETS[@]}"; do
     case "$t" in
-    proxy | script-engine | console) ;;
-    all) TARGETS=(proxy script-engine console) ; break ;;
+    proxy | console) ;;
+    all) TARGETS=(proxy console) ; break ;;
     -h | --help)
         sed -n '3,8p' "${BASH_SOURCE[0]}"
         exit 0
         ;;
-    *) die "unknown target '$t' (proxy | script-engine | console | all)" ;;
+    *) die "unknown target '$t' (proxy | console | all)" ;;
     esac
 done
 
@@ -183,7 +174,6 @@ for t in "${TARGETS[@]}"; do
         fi
         build_proxy
         ;;
-    script-engine) build_script ;;
     console) build_console ;;
     esac
 done

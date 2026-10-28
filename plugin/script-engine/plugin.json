@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "name": "script-engine",
-  "version": "0.1.0",
-  "enabled": true,
-  "priority": 10,
-  "dll": "script-engine.dll"
-}

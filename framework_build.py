@@ -8,7 +8,7 @@ bootstrap 在进程启动时直接 LoadLibrary 加载（入口 NotifyPlatform，
 
 流程：
   1) 连远端 Linux 编译机；
-  2) 上传 framework\ 下全部 *.cpp/*.h、sdk\pplugin.h、libs\civetweb；
+  2) 上传 framework\ 下全部 *.cpp/*.h、common\（json/log）、libs\civetweb；
   3) CivetWeb 用 gcc 单独编 .o，再与 framework 源文件链接成 framework.dll；
   4) 产物 framework.dll 落回 framework\。
 
@@ -66,8 +66,9 @@ def framework_build(client):
     log("=== framework.dll（CivetWeb + 裸 TCP/WS 服务端）===")
     remote_fw = f"{REMOTE_ROOT}/framework"
     client.exec_command(
-        f"mkdir -p {remote_fw} {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common "
-        f"{REMOTE_ROOT}/libs/civetweb && rm -f {REMOTE_ROOT}/common/*")
+        f"mkdir -p {remote_fw} {REMOTE_ROOT}/common "
+        f"{REMOTE_ROOT}/libs/civetweb && rm -f {REMOTE_ROOT}/common/* "
+        f"{remote_fw}/*.cpp {remote_fw}/*.h")
     sftp = client.open_sftp()
     try:
         # framework 目录下的源文件全部上传（framework.cpp + picker.cpp 等）。
@@ -75,13 +76,11 @@ def framework_build(client):
             p = os.path.join(REPO_ROOT, "framework", name)
             if os.path.isfile(p) and (name.endswith(".cpp") or name.endswith(".h")):
                 sftp.put(p, f"{remote_fw}/{name}")
-        # 共享模块 common/：framework 里 #include "../common/json.h"。
+        # 共享模块 common/：framework 里 #include "../common/json.h" / log.h。
         for name in os.listdir(os.path.join(REPO_ROOT, "common")):
             p = os.path.join(REPO_ROOT, "common", name)
             if os.path.isfile(p) and (name.endswith(".cpp") or name.endswith(".h")):
                 sftp.put(p, f"{REMOTE_ROOT}/common/{name}")
-        sftp.put(os.path.join(REPO_ROOT, "sdk", "pplugin.h"),
-                 f"{REMOTE_ROOT}/sdk/pplugin.h")
         # CivetWeb 是单文件 C，但 civetweb.c 会 #include 多个 .inl（md5/sha1/sort/
         # match/response/timer/handle_form 等），整目录上传最稳妥。
         civet_dir = os.path.join(REPO_ROOT, "libs", "civetweb")
@@ -104,7 +103,7 @@ def framework_build(client):
         f"-ffunction-sections -fdata-sections "
         f"-static-libgcc -static-libstdc++ "
         f"-Wl,--gc-sections -s "
-        f"-I../sdk -I../libs -I../libs/civetweb "
+        f"-I../common -I../libs -I../libs/civetweb "
         f"-o framework.dll *.cpp ../common/*.cpp civetweb.o "
         f"-lws2_32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lpthread"
     )

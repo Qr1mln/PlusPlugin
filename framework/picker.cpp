@@ -21,11 +21,13 @@
 #include <cstdio>
 #include <cstring>
 
+#include "pick_overlay.h"
+
 #include "../common/log.h"
 
 namespace {
 
-const Host* g_host = nullptr;
+const HostCaps* g_host = nullptr;
 PickerBroadcast g_broadcast = nullptr;
 
 // 推送线程的消息 id
@@ -189,23 +191,65 @@ LRESULT CALLBACK MouseHookProc(int code, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(g_hook, code, wParam, lParam);
 }
 
+// 拾取期间的临时置顶：先记下窗口原本是否已经置顶，拾取结束（取到点/取消）再还原，
+// 免得把用户自己设的置顶也一起关掉。最小化时顺手还原窗口，否则窗口和遮罩都在屏幕外。
+HWND g_topRoot = nullptr;
+bool g_needRestoreTopmost = false;
+
+void ApplyTopmost(bool on) {
+    if (on) {
+        const HWND view = TargetWindow();
+        if (view == nullptr) {
+            return;
+        }
+        const HWND root = GetAncestor(view, GA_ROOT);
+        if (root == nullptr) {
+            return;
+        }
+        if (IsIconic(root)) {
+            ShowWindow(root, SW_RESTORE);
+        }
+        g_topRoot = root;
+        g_needRestoreTopmost =
+            (GetWindowLongPtrW(root, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0;
+        SetWindowPos(root, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        LogLine("pick: window topmost on (restore=%d)", g_needRestoreTopmost ? 1 : 0);
+        return;
+    }
+    if (g_topRoot != nullptr) {
+        if (g_needRestoreTopmost && IsWindow(g_topRoot)) {
+            SetWindowPos(g_topRoot, HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        g_topRoot = nullptr;
+        g_needRestoreTopmost = false;
+        LogLine("pick: window topmost restored");
+    }
+}
+
 void PickStopInThread() {
     if (g_hook != nullptr) {
         UnhookWindowsHookEx(g_hook);
         g_hook = nullptr;
         LogLine("pick: hook removed");
     }
+    PickOverlayHide();
+    ApplyTopmost(false);
     g_swallowLeftUp = false;
     g_swallowRightUp = false;
     g_pickActive.store(false);
 }
 
-void PickStartInThread() {
+void PickStartInThread(bool topmost) {
     if (g_hook != nullptr) {
         return;
     }
     g_swallowLeftUp = false;
     g_swallowRightUp = false;
+    if (topmost) {
+        ApplyTopmost(true);
+    }
     // 低级钩子不需要跨进程注入，hMod 传 NULL 即可。
     g_hook = SetWindowsHookExW(WH_MOUSE_LL, &MouseHookProc, nullptr, 0);
 
@@ -221,7 +265,10 @@ void PickStartInThread() {
         p.SetStr("error", "set hook failed");
     } else {
         g_pickActive.store(true);
-        LogLine("pick: hook installed (左键拾取 / 右键取消)");
+        // 遮罩盖在 view 上：十字线 + 实时坐标，点完之后在 PickStopInThread 里收起。
+        const bool overlay = PickOverlayShow(g_host);
+        LogLine("pick: hook installed (左键拾取 / 右键取消) overlay=%d",
+                overlay ? 1 : 0);
         p.SetStr("action", "ready");
     }
     char jbuf[256] = {};
@@ -273,8 +320,9 @@ DWORD WINAPI PushThreadProc(LPVOID) {
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (msg.message == WM_TIMER) {
             PushCursorTick();
+            PickOverlayTick();  // 拾取时跟随光标重绘遮罩
         } else if (msg.message == kMsgPickStart) {
-            PickStartInThread();
+            PickStartInThread(msg.wParam != 0);
         } else if (msg.message == kMsgPickFlush) {
             PickFlushInThread(msg.wParam != 0);
         } else {
@@ -284,6 +332,7 @@ DWORD WINAPI PushThreadProc(LPVOID) {
     }
 
     PickStopInThread();
+    PickOverlayDestroy();  // 窗口回调在本 DLL 里，线程退出前必须销毁
     KillTimer(nullptr, kTimerId);
     g_tid = 0;
     return 0;
@@ -291,7 +340,7 @@ DWORD WINAPI PushThreadProc(LPVOID) {
 
 }  // namespace
 
-bool PickerStart(const Host* host, PickerBroadcast broadcast) {
+bool PickerStart(const HostCaps* host, PickerBroadcast broadcast) {
     if (host == nullptr || broadcast == nullptr) {
         return false;
     }
@@ -383,12 +432,12 @@ bool PickerSetWatch(void* conn, bool on) {
     return false;
 }
 
-bool PickerBeginPick() {
+bool PickerBeginPick(bool topmost) {
     const DWORD tid = g_tid;
     if (tid == 0) {
         return false;
     }
-    PostThreadMessageW(tid, kMsgPickStart, 0, 0);
+    PostThreadMessageW(tid, kMsgPickStart, topmost ? 1 : 0, 0);
     return true;
 }
 

@@ -13,7 +13,8 @@
 //
 // 客户端命令（走 /ws）：
 //   {"type":"cursor","action":"watch"|"unwatch"}   订阅/退订光标流（按连接记）
-//   {"type":"pick","action":"start"|"cancel"}      开始/取消拾取
+//   {"type":"pick","action":"start","topmost":true} 开始拾取（topmost=先把应用窗口提到最前）
+//   {"type":"pick","action":"cancel"}              取消拾取
 //
 // 并发模型：模块内起一条消息循环线程，它同时承担
 //   1) SetTimer 驱动的光标采样（约 30Hz）；
@@ -27,13 +28,13 @@
 
 #include "../common/json.h"
 
-#include "pplugin.h"
+#include "host_caps.h"
 
 // 把一帧文本写给某个 WS 连接（由 framework.cpp 用 mg_websocket_write 实现）。
 using PickerBroadcast = void (*)(void* conn, const char* data, size_t len);
 
 // 启动/停止推送线程。日志走公共 log 模块（组件 framework），broadcast 用于下发。
-bool PickerStart(const Host* host, PickerBroadcast broadcast);
+bool PickerStart(const HostCaps* host, PickerBroadcast broadcast);
 void PickerStop();          // 停线程并等待退出（PluginShutdown 用）
 void PickerRequestStop();   // 只发退出信号、不等待（DllMain 里不能 join）
 
@@ -42,8 +43,9 @@ void PickerAddClient(void* conn);
 void PickerRemoveClient(void* conn);
 
 // 命令入口：订阅/退订光标流、开始/取消拾取。
+// topmost=true 时拾取期间把应用窗口临时置顶，拾取结束（取消/取到点）后还原。
 bool PickerSetWatch(void* conn, bool on);
-bool PickerBeginPick();
+bool PickerBeginPick(bool topmost);
 void PickerCancelPick();
 
 // 一次性读数（与推送帧同 payload），供 /api/cursor 与 {"type":"cursor"} 复用。

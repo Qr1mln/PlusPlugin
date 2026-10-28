@@ -8,21 +8,24 @@
 //   所以既不会递归，也没有版本耦合。
 //
 // 模块划分（本文件只是入口）：
-//   log.h/.cpp         proxy.log + 插件日志扇出
-//   config.h/.cpp      version.ini（Win32 profile API + 旧格式兼容）
-//   bootstrap.h/.cpp   窗口发现、插件启动
+//   common/log          proxy.log（[proxy] 前缀；实现在 common/）
+//   config.h/.cpp       version.ini（Win32 profile API + 旧格式兼容）
+//   bootstrap.h/.cpp    窗口发现、拉起 framework
+//   framework_loader    加载 framework.dll + 监视文件替换做热加载
+//   protocol.h/.cpp     NotifyPlatform / NotifyGhost 的 JSON 转发
 //
 // 设计说明：真身 DLL 必须在 DllMain 内解析，因为应用可能在主窗口出现之前
 // 就调用这些 API；真身 DLL 的依赖链要保持极简（只用 kernel32），
 // 这样早期加载才不会干扰图形栈。
 //
-// framework 职责（本模块即 framework，见 pplugin.h）：
+// 本模块（ghost 层）职责：
 //   1. 把每个 version.dll 导出转发到真身（stubs.asm）。
-//   2. 只提供插件框架。代理【不做渲染】：无 Present hook、无 D3D/DXGI 设备、
-//      无 overlay 窗口。每个插件自持窗口/UI，并通过 Host API 访问宿主。
-//      插件从不自己装 hook 或建设备，因此它们始终可卸载。
-//   3. 从 %APPDATA%\TTVoice\plugins 加载/卸载插件。插件只通过 Host 登记回调，
-//      所以加载器可以撤销整套回调后再 FreeLibrary。
+//   2. 代理【不做渲染】：无 Present hook、无 D3D/DXGI 设备、无 overlay 窗口。
+//   3. 等宿主 UI 就绪后加载同目录 framework.dll（JSON 协议 NotifyPlatform），
+//      并持续监视该文件，实现 framework 的热加载。
+//   旧 pplugin 插件加载器（version.ini [loaders]）已退役：pplugin 的 ABI 头还
+//   在 common/pplugin.h（plugin/console 仍按它导出 GetDesc），但 proxy 不再扫描、
+//   也不再加载任何插件。
 
 #include <windows.h>        // Win32 API：GetSystemDirectoryW / LoadLibraryW / CreateThread 等
 #include <cstdio>           // swprintf_s：拼真身 DLL 的绝对路径

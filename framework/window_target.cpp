@@ -5,7 +5,7 @@
 
 #include <cstring>
 
-#include "pplugin.h"
+#include "host_caps.h"
 
 HWND WindowTarget::target() const {
   HWND h = nullptr;

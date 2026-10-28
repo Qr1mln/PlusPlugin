@@ -7,11 +7,11 @@
 // 日志文件固定为「本模块所在目录 \ proxy.log」（两 DLL 都在 %APPDATA%\TTVoice，
 // 故指向同一文件）。行格式：[HH:MM:SS.mmm]-[component] text\n
 //
-// 代理侧保留 g_logFanout：把每行镜像给已订阅的插件日志 sink（旧 pplugin 路径）。
-// 新直连链路下通常为 null，可安全忽略。
+// 代理侧保留 g_logFanout：把每行镜像给已注册的模块日志 sink（proxy/log_relay
+// 用它把日志推给 console 之类的 JSON 模块）。没人订阅时为 null。
 #pragma once
 
-// 代理侧日志 fan-out（镜像给插件订阅者）。新链路通常 null。声明在此以兼容 plugin.cpp。
+// 日志 fan-out 出口（只传正文，不带时间戳/组件前缀）。由 log_relay 挂接。
 extern void (*g_logFanout)(const char* line);
 
 // printf 风格；组件默认 "proxy"。

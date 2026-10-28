@@ -5,7 +5,7 @@ proxy_build.py - 编译 version.dll（proxy payload / 插件框架本体）。
 流程：
   1) 连远端 Linux 编译机；
   2) 上传 proxy\ 下全部源码与头（*.cpp / *.h / *.inc / *.def），
-     以及 framework\ 与 sdk\（bootstrap / plugin_*.inc 的 include 依赖）；
+     以及 framework\ 与 common\（bootstrap / plugin_*.inc 的 include 依赖）；
   3) 由 proxy_exports.h 的 PROXY_EXPORT_LIST 生成 GAS 版转发桩 stubs.S
      （mingw 能汇编，替代 MSVC 的 MASM stubs.asm，二者等价）；
   4) x86_64-w64-mingw32 交叉编译 + 链接 exports.def，产物 version.dll 落回 proxy\；
@@ -101,16 +101,20 @@ def proxy_build(client):
     log(f"导出名 {len(names)} 个，生成 GAS 桩")
     stubs = gen_stubs_s(names)
 
-    client.exec_command(f"mkdir -p {REMOTE_PROXY} {REMOTE_ROOT}/framework {REMOTE_ROOT}/sdk {REMOTE_ROOT}/common && rm -f {REMOTE_ROOT}/common/*")
+    # 远端 proxy/ 先清掉旧的 *.cpp/*.h/*.inc：本地删掉的文件否则会留在远端继续参与编译
+    # （例如退役的 plugin.cpp）。
+    client.exec_command(
+        f"mkdir -p {REMOTE_PROXY} {REMOTE_ROOT}/framework {REMOTE_ROOT}/common && "
+        f"rm -f {REMOTE_ROOT}/common/* {REMOTE_PROXY}/*.cpp {REMOTE_PROXY}/*.h "
+        f"{REMOTE_PROXY}/*.inc")
     sftp = client.open_sftp()
     try:
         # proxy 下全部源码/头/宏（遍历上传，自动包含 protocol/json 等新文件）。
         for name in sorted(os.listdir(PROXY_DIR)):
             if name.endswith((".cpp", ".h", ".inc", ".def")):
                 sftp.put(os.path.join(PROXY_DIR, name), f"{REMOTE_PROXY}/{name}")
-        # include 依赖：bootstrap/plugin_*.inc 需要 framework\ 与 sdk\。
+        # include 依赖：proxy 源码需要 framework\ 与 common\（json/log 共享实现）。
         for base, remote in (("framework", f"{REMOTE_ROOT}/framework"),
-                             ("sdk", f"{REMOTE_ROOT}/sdk"),
                              ("common", f"{REMOTE_ROOT}/common")):
             local = os.path.join(REPO_ROOT, base)
             for name in os.listdir(local):
@@ -119,7 +123,7 @@ def proxy_build(client):
                     sftp.put(p, f"{remote}/{name}")
         with sftp.open(f"{REMOTE_PROXY}/stubs.S", "w") as fh:
             fh.write(stubs.encode("utf-8"))
-        log(f"已上传源码 / framework / sdk / stubs.S -> {REMOTE_PROXY}")
+        log(f"已上传源码 / framework / common / stubs.S -> {REMOTE_PROXY}")
     finally:
         sftp.close()
 

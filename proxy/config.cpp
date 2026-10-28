@@ -16,13 +16,13 @@ namespace {
 
 constexpr wchar_t kIniName[] = L"version.ini";
 constexpr wchar_t kHostSection[] = L"host";
-constexpr wchar_t kLoaderSection[] = L"loaders";
 constexpr char kTargetKey[] = "target";
 constexpr char kDebugKey[] = "debug";
 constexpr char kDefaultTarget[] = "test.exe";
-constexpr char kDefaultDll[] = "framework.dll";
 
 // version.ini is ASCII on purpose: the Win32 profile API reads it as ANSI.
+// framework.dll 不走配置列表：bootstrap 固定加载同目录那一个并负责热加载；
+// [modules] 只列额外的 JSON 模块（同样是 NotifyPlatform 入口）。
 constexpr char kDefaultIniText[] =
     "; host process for version.dll, e.g. target=MyApp.exe\r\n"
     "[host]\r\n"
@@ -30,10 +30,10 @@ constexpr char kDefaultIniText[] =
     "; pop a dialog when the proxy is attached (default true)\r\n"
     "debug=true\r\n"
     "\r\n"
-    "; DLLs loaded from this directory, one plain file name per line.\r\n"
-    "; an entry is loaded only while it is listed here\r\n"
-    "[loaders]\r\n"
-    "framework.dll\r\n";
+    "; extra JSON modules in this directory, one plain dll name per line\r\n"
+    "; (framework.dll is always loaded; uncomment to enable one)\r\n"
+    "[modules]\r\n"
+    "; console.dll\r\n";
 
 constexpr DWORD kValueChars = 2048;   // profile API value buffer
 constexpr int   kIniTextCap = 8192;    // whole-file scan buffer
@@ -83,22 +83,6 @@ void TrimInPlace(char* s) {
     first[last] = '\0';
     if (first != s) {
         std::memmove(s, first, static_cast<size_t>(last) + 1);
-    }
-}
-
-void TrimWideInPlace(wchar_t* s) {
-    wchar_t* first = s;
-    while (*first == L' ' || *first == L'\t') {
-        ++first;
-    }
-    const int len = static_cast<int>(wcslen(first));
-    int last = len;
-    while (last > 0 && (first[last - 1] == L' ' || first[last - 1] == L'\t')) {
-        --last;
-    }
-    first[last] = L'\0';
-    if (first != s) {
-        std::memmove(s, first, (static_cast<size_t>(last) + 1) * sizeof(wchar_t));
     }
 }
 
@@ -287,8 +271,7 @@ void EnsureIniExists() {
             return true;
         }
         if (WriteDefaultIni()) {
-            Log("%ls not found, created with target=%s, [loaders] %s", kIniName,
-                kDefaultTarget, kDefaultDll);
+            Log("%ls not found, created with target=%s", kIniName, kDefaultTarget);
             return true;
         }
         Log("WARN: %ls not found and could not be created", kIniName);
@@ -297,101 +280,26 @@ void EnsureIniExists() {
     (void)done;
 }
 
-// --- [loaders] scanning -----------------------------------------------------
-
-// A [loaders] entry must be a bare file name inside ModuleDir(). Rejecting path
-// separators, ".." and absolute paths keeps the key from turning the proxy into
-// an arbitrary-DLL loader for anyone who can write version.ini.
-bool IsPlainDllName(const wchar_t* name) {
-    if (name == nullptr || name[0] == L'\0') {
+// [modules] 的一行必须是一个裸 dll 名：带路径分隔符/.. 的一律拒绝，免得
+// version.ini 变成任意 DLL 加载器。
+bool IsPlainDllName(const char* name) {
+    if (name == nullptr) {
         return false;
     }
-    const int len = static_cast<int>(wcslen(name));
-    if (len > kMaxDllNameChars || len <= 4) {
+    const size_t len = std::strlen(name);
+    if (len <= 4 || len >= static_cast<size_t>(kMaxModuleNameChars)) {
         return false;
     }
-    if (wcsstr(name, L"..") != nullptr) {
-        return false;
-    }
-    for (const wchar_t* p = name; *p != L'\0'; ++p) {
-        const wchar_t c = *p;
-        if (c == L'\\' || c == L'/' || c == L':' || c == L'"' || c == L'*' ||
-            c == L'?' || c == L'<' || c == L'>' || c == L'|') {
+    for (const char* p = name; *p != '\0'; ++p) {
+        if (std::strchr("\\/:*?\"<>|", *p) != nullptr) {
             return false;
         }
     }
-    const wchar_t* tail = name + (len - 4);
-    return _wcsicmp(tail, L".dll") == 0;
-}
-
-bool ListContains(wchar_t out[][kMaxDllNameChars], int count, const wchar_t* name) {
-    for (int i = 0; i < count; ++i) {
-        if (_wcsicmp(out[i], name) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Bare (keyless) lines under [loaders], each a plain DLL name.
-int ReadLoaderSectionLines(wchar_t out[][kMaxDllNameChars], int cap) {
-    const wchar_t* ini = VersionIniPath();
-    if (ini[0] == L'\0') {
-        return 0;
-    }
-    char buf[kIniTextCap] = {};
-    if (!ReadFileAll(ini, buf, kIniTextCap, nullptr)) {
-        return 0;
-    }
-    int count = 0;
-    bool inLoader = false;
-    char* cursor = buf;
-    for (char* line = NextLine(&cursor); line != nullptr; line = NextLine(&cursor)) {
-        char* first = line;
-        while (*first == ' ' || *first == '\t') {
-            ++first;
-        }
-        if (*first == '\0') {
-            continue;
-        }
-        if (*first == '[') {
-            char* close = std::strchr(first, ']');
-            if (close != nullptr) {
-                *close = '\0';
-                char sec[kNameCap] = {};
-                CopyStr(sec, kNameCap, first + 1);
-                TrimInPlace(sec);
-                wchar_t wsec[kNameCap] = {};
-                Widen(sec, wsec, kNameCap);
-                inLoader = (_wcsicmp(wsec, kLoaderSection) == 0);
-            }
-            continue;
-        }
-        const char head = *first;
-        if (head == ';' || head == '#' || !inLoader) {
-            continue;
-        }
-        if (std::strchr(first, '=') != nullptr) {
-            continue;   // "dlls=a,b" form is handled by LoadDllNames' caller
-        }
-        wchar_t name[kMaxDllNameChars] = {};
-        if (!Widen(first, name, kMaxDllNameChars)) {
-            continue;
-        }
-        TrimWideInPlace(name);
-        if (!IsPlainDllName(name) || ListContains(out, count, name)) {
-            continue;
-        }
-        CopyWide(out[count], kMaxDllNameChars, name);
-        ++count;
-        if (count >= cap) {
-            break;
-        }
-    }
-    return count;
+    return _stricmp(name + len - 4, ".dll") == 0;
 }
 
 }  // namespace
+
 
 // --- path resolution --------------------------------------------------------
 // Defined at namespace scope (declared in config.h) so the whole translation
@@ -472,14 +380,71 @@ const wchar_t* TargetExeName() {
     return cached;
 }
 
-int LoadDllNames(wchar_t out[][kMaxDllNameChars], int cap) {
-    static wchar_t cached[kMaxLoadDlls][kMaxDllNameChars] = {};
+int ExtraModuleNames(wchar_t out[][kMaxModuleNameChars], int cap) {
+    static wchar_t cached[kMaxModuleNames][kMaxModuleNameChars] = {};
     static int cachedCount = -1;
     if (cachedCount < 0) {
+        cachedCount = 0;
         EnsureIniExists();
-        cachedCount = ReadLoaderSectionLines(cached, kMaxLoadDlls);
-        if (cachedCount == 0) {
-            Log("WARN: %ls has no usable [loaders] entries, loading nothing", kIniName);
+        const wchar_t* ini = VersionIniPath();
+        char buf[kIniTextCap] = {};
+        if (ini[0] != L'\0' && ReadFileAll(ini, buf, kIniTextCap, nullptr)) {
+            bool inSection = false;
+            char* cursor = buf;
+            for (char* line = NextLine(&cursor); line != nullptr;
+                 line = NextLine(&cursor)) {
+                char* first = line;
+                while (*first == ' ' || *first == '\t') {
+                    ++first;
+                }
+                if (*first == '\0' || *first == ';' || *first == '#') {
+                    continue;
+                }
+                if (*first == '[') {
+                    char* close = std::strchr(first, ']');
+                    if (close != nullptr) {
+                        *close = '\0';
+                        inSection = (_stricmp(first + 1, "modules") == 0);
+                    }
+                    continue;
+                }
+                if (!inSection) {
+                    continue;
+                }
+                char* end = first + std::strlen(first);
+                while (end > first && (end[-1] == ' ' || end[-1] == '\t')) {
+                    --end;
+                }
+                *end = '\0';
+                if (!IsPlainDllName(first)) {
+                    Log("WARN: %ls [modules] entry rejected (bare name ending in .dll): %s",
+                        kIniName, first);
+                    continue;
+                }
+                bool dup = false;
+                for (int i = 0; i < cachedCount; ++i) {
+                    char existing[kMaxModuleNameChars] = {};
+                    WideCharToMultiByte(CP_ACP, 0, cached[i], -1, existing,
+                                        sizeof existing, nullptr, nullptr);
+                    if (_stricmp(existing, first) == 0) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) {
+                    continue;
+                }
+                if (!Widen(first, cached[cachedCount], kMaxModuleNameChars)) {
+                    continue;
+                }
+                ++cachedCount;
+                if (cachedCount >= kMaxModuleNames) {
+                    break;
+                }
+            }
+            if (cachedCount > 0) {
+                Log("%ls [modules]: %d extra module(s)", kIniName, cachedCount);
+            }
         }
     }
     if (cap <= 0) {
@@ -487,7 +452,7 @@ int LoadDllNames(wchar_t out[][kMaxDllNameChars], int cap) {
     }
     const int n = (cachedCount < cap) ? cachedCount : cap;
     for (int i = 0; i < n; ++i) {
-        CopyWide(out[i], kMaxDllNameChars, cached[i]);
+        CopyWide(out[i], kMaxModuleNameChars, cached[i]);
     }
     return n;
 }

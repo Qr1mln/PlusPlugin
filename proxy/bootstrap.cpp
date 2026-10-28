@@ -7,7 +7,7 @@
 
 #include "config.h"
 #include "log.h"
-
+#include "module_loader.h"
 #include "protocol.h"
 
 namespace {
@@ -123,34 +123,6 @@ HWND ResolveViewWindow(HWND main) {
     return (ctx.visible != nullptr) ? ctx.visible : ctx.first;
 }
 
-// 加载同目录 framework.dll 并走 JSON 协议（NotifyPlatform）。
-void LoadFrameworkViaProtocol(HWND hwnd) {
-    const wchar_t* dir = ModuleDir();
-    if (dir[0] == L'\0') {
-        Log("WARN: module dir unknown, cannot load framework");
-        return;
-    }
-    wchar_t path[MAX_PATH] = {};
-    swprintf_s(path, MAX_PATH, L"%s\\framework.dll", dir);
-    HMODULE fw = LoadLibraryW(path);
-    if (fw == nullptr) {
-        Log("WARN: LoadLibrary %ls failed err=%lu", path, GetLastError());
-        return;
-    }
-    protocol::HostContext host = {};
-    host.mainWindow = hwnd;
-    host.viewWindow = ResolveViewWindow(hwnd);
-    host.scale = ComputeScale(hwnd);
-    if (!protocol::ProtocolStart(fw, host)) {
-        Log("WARN: ProtocolStart failed");
-        FreeLibrary(fw);
-        return;
-    }
-    Log("framework via protocol: main=%p view=%p scale=%.2f",
-        reinterpret_cast<void*>(host.mainWindow), reinterpret_cast<void*>(host.viewWindow),
-        host.scale);
-}
-
 }  // namespace
 
 DWORD WINAPI PayloadThread(LPVOID param) {
@@ -183,10 +155,13 @@ DWORD WINAPI PayloadThread(LPVOID param) {
     Log("flutter window hwnd=%p rect=%ld,%ld,%ld,%ld", reinterpret_cast<void*>(hwnd), rc.left,
         rc.top, rc.right, rc.bottom);
 
-    // Plugins load only after the UI exists and never under the loader lock:
-    // a plugin may touch user32 or create a thread in its own DllMain.
-    // 新链路：直接加载同目录 framework.dll，经 JSON 协议（NotifyPlatform）启动。
-    LoadFrameworkViaProtocol(hwnd);
+    // 模块只在 UI 就绪后才加载，且绝不在 loader lock 下：framework 要起 WS 服务端
+    // 和取点线程。module_loader 会持续监视各模块 dll 的替换，实现热加载。
+    protocol::HostContext host = {};
+    host.mainWindow = hwnd;
+    host.viewWindow = ResolveViewWindow(hwnd);
+    host.scale = ComputeScale(hwnd);
+    module_loader::Start(host);
 
     // Shown last so the dialog never delays plugin startup, and it parks only
     // this worker thread, not the host.

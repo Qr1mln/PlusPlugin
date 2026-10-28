@@ -32,9 +32,16 @@ int __cdecl NotifyGhost(const char* reqJson, char* respJson, int cap, void* ctx)
 int CallPlatform(const char* reqJson, char* respJson, int cap);
 
 // Lifecycle. Resolves NotifyPlatform inside frameworkDll, then sends "init".
+// Only the core module (framework.dll) goes through this: it binds the forward
+// channel used by CallPlatform.
 bool ProtocolStart(HMODULE frameworkDll, const HostContext& host);
 
 // Sends "shutdown" and drops the platform pointer. Call before FreeLibrary.
 void ProtocolStop();
+
+// Extra JSON modules (same NotifyPlatform contract, no forward channel).
+// Used by module_loader for any dll listed under version.ini [modules].
+bool ModuleStart(HMODULE module, const HostContext& host);
+void ModuleStop(HMODULE module);
 
 }  // namespace protocol

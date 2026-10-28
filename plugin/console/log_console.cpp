@@ -8,11 +8,16 @@
 // With a real child window the panel repaints from tick(), independent of the
 // app, and mouse input arrives through its own WndProc.
 //
-// Threading rule that matters here: init() runs on the framework's payload
-// thread, tick() runs on the framework's loader thread, and a window's message
-// queue belongs to the thread that created it. The window is therefore created
-// lazily inside the first tick(), and tick() is also what pumps it. Creating it
-// in init() would leave it on a thread that never dispatches messages.
+// Threading rule that matters here: a window's message queue belongs to the
+// thread that created it. This module owns one pump thread; the window is created
+// lazily inside that loop and the loop is what pumps it. "init" only validates
+// and starts the thread.
+//
+// Module contract (JSON only, same as framework.dll): export NotifyPlatform,
+// receive {"cmd":"init","dispatch":"<NotifyGhost ptr>","ctx":"0"}, query the host
+// with {"cmd":"mainWindow"|"viewWindow"|"scale"}, publish a line with
+// {"cmd":"log","text":...}, register the log sink with {"cmd":"logSink","ptr":...},
+// and stop on {"cmd":"shutdown"}.
 //
 // Rendering: WS_EX_LAYERED child of the app's view window + a D2D DC render
 // target bound to a top-down 32bpp DIB, pushed with UpdateLayeredWindow. That
@@ -21,8 +26,9 @@
 // Keep this file pure ASCII.
 // ============================================================================
 
-#include "../../sdk/pplugin.h"
+#include <windows.h>
 
+#include <cstdlib>
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
@@ -68,7 +74,90 @@ int       g_tail = 0;                // oldest unread position
 SRWLOCK   g_ringLock = SRWLOCK_INIT;
 volatile LONG g_dirty = 1;           // ring changed, needs a repaint
 
-const Host*       g_host = nullptr;
+// -- JSON glue ---------------------------------------------------------------
+//
+// The only contract with the host is NotifyPlatform / NotifyGhost + JSON. The
+// payloads here are tiny and fixed, so a couple of substring helpers are enough;
+// no JSON library (and no shared ABI header) is needed.
+
+typedef int (__cdecl* GhostFn)(const char* req, char* resp, int cap, void* ctx);
+
+GhostFn   g_ghost = nullptr;
+void*     g_ghostCtx = nullptr;
+bool      g_ready = false;           // dispatch handed over by "init"
+HANDLE    g_thread = nullptr;        // pump thread
+volatile bool g_stop = false;
+
+// {"key":"value"} -> value (no escape handling: the payloads are cmd/hwnd/ptr).
+bool JsonStr(const char* json, const char* key, char* out, int cap) {
+    if (json == nullptr || key == nullptr || out == nullptr || cap <= 0) return false;
+    char pat[32] = {};
+    _snprintf_s(pat, sizeof(pat), _TRUNCATE, "\"%s\"", key);
+    const char* p = strstr(json, pat);
+    if (p == nullptr) return false;
+    p = strchr(p + strlen(pat), ':');
+    if (p == nullptr) return false;
+    ++p;
+    while (*p == ' ' || *p == '\t' || *p == '"') ++p;
+    int n = 0;
+    while (*p != '\0' && *p != '"' && *p != ',' && *p != '}' && n + 1 < cap) {
+        out[n++] = *p++;
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
+// {"key":123.5} -> number.
+bool JsonNum(const char* json, const char* key, double* out) {
+    if (json == nullptr || key == nullptr || out == nullptr) return false;
+    char pat[32] = {};
+    _snprintf_s(pat, sizeof(pat), _TRUNCATE, "\"%s\"", key);
+    const char* p = strstr(json, pat);
+    if (p == nullptr) return false;
+    p = strchr(p + strlen(pat), ':');
+    if (p == nullptr) return false;
+    *out = strtod(p + 1, nullptr);
+    return true;
+}
+
+bool GhostCall(const char* req, char* resp, int cap) {
+    if (g_ghost == nullptr) return false;
+    resp[0] = '\0';
+    return g_ghost(req, resp, cap, g_ghostCtx) >= 0;
+}
+
+// Copy a JSON body into the caller's buffer (mirrors framework's NotifyPlatform).
+int WriteResp(const char* body, char* resp, int cap) {
+    if (body == nullptr || resp == nullptr || cap <= 0) return -1;
+    const int need = static_cast<int>(strlen(body));
+    if (need + 1 > cap) return -(need + 1);
+    memcpy(resp, body, static_cast<size_t>(need));
+    resp[need] = '\0';
+    return need;
+}
+
+// {"cmd":"mainWindow"|"viewWindow"} -> hwnd (nullptr while the host has no UI).
+HWND QueryWindow(const char* cmd) {
+    char req[96] = {};
+    _snprintf_s(req, sizeof(req), _TRUNCATE, "{\"cmd\":\"%s\"}", cmd);
+    char resp[256] = {};
+    if (!GhostCall(req, resp, sizeof(resp))) return nullptr;
+    char value[32] = {};
+    if (!JsonStr(resp, "hwnd", value, sizeof(value))) return nullptr;
+    return reinterpret_cast<HWND>(
+        static_cast<uintptr_t>(_strtoui64(value, nullptr, 10)));
+}
+
+float QueryScale() {
+    char resp[256] = {};
+    double value = 1.0;
+    if (GhostCall("{\"cmd\":\"scale\"}", resp, sizeof(resp)) &&
+        JsonNum(resp, "scale", &value) && value > 0.0) {
+        return static_cast<float>(value);
+    }
+    return 1.0f;
+}
+
 HINSTANCE                 g_inst = nullptr;
 ComPtr<IDWriteFactory>    g_dw;
 ComPtr<IDWriteTextFormat> g_fmt;
@@ -134,10 +223,22 @@ bool IsWarn(const wchar_t* s) {
     return false;
 }
 
+// Publish one line into proxy.log through the ghost channel (tag=console).
 void LogLine(const char* text) {
-    if (g_host != nullptr && g_host->publishLog != nullptr) {
-        g_host->publishLog(text);
+    if (text == nullptr || !g_ready) return;
+    char escaped[1024] = {};
+    int n = 0;
+    for (const char* p = text; *p != '\0' && n + 2 < static_cast<int>(sizeof(escaped)); ++p) {
+        if (*p == '"' || *p == '\\') {
+            escaped[n++] = '\\';
+        }
+        escaped[n++] = (*p == '\n' || *p == '\r') ? ' ' : *p;
     }
+    char req[1200] = {};
+    _snprintf_s(req, sizeof(req), _TRUNCATE,
+                "{\"cmd\":\"log\",\"tag\":\"console\",\"text\":\"%s\"}", escaped);
+    char resp[128] = {};
+    GhostCall(req, resp, sizeof(resp));
 }
 
 // Framework log sink. Runs on an arbitrary framework thread: only touch the
@@ -774,8 +875,8 @@ bool RegisterPanelClass() {
 }
 
 bool CreatePanel() {
-    HWND main = (g_host != nullptr) ? g_host->mainWindow() : nullptr;
-    HWND view = (g_host != nullptr) ? g_host->viewWindow() : nullptr;
+    HWND main = QueryWindow("mainWindow");
+    HWND view = QueryWindow("viewWindow");
     if (main == nullptr && view != nullptr) {
         main = GetAncestor(view, GA_ROOT);
     }
@@ -788,7 +889,7 @@ bool CreatePanel() {
         return false;
     }
 
-    g_scale = (g_host != nullptr) ? g_host->scale() : 1.0f;
+    g_scale = QueryScale();
     if (g_scale <= 0.0f) g_scale = 1.0f;
     g_winW = static_cast<int>(kPanelW * g_scale + 0.5f);
     g_winH = static_cast<int>(kTotalH * g_scale + 0.5f);   // title bar + log body
@@ -844,23 +945,21 @@ void DestroyPanel() {
     g_ownerIconic = false;
 }
 
-// -- plugin entry points -----------------------------------------------------
+// -- module entry points -----------------------------------------------------
 
-int __cdecl OnPluginTick(void) {
-    if (g_host == nullptr) return 0;
-
+// One iteration of the panel loop. Must run on the pump thread: it creates the
+// window, pumps the thread queue and repaints it.
+void TickOnce() {
     if (g_panel == nullptr || g_owner == nullptr || !IsWindow(g_owner)) {
         DestroyPanel();
         CreatePanel();
-        if (g_panel == nullptr) return 0;
+        if (g_panel == nullptr) return;
     } else if (!IsWindow(g_panel)) {
         DestroyPanel();
-        return 0;
+        return;
     }
 
-    // The plugin owns no thread: this is the pump, and it is also why the
-    // window had to be created here instead of in init(). Pump the whole
-    // thread queue (panel + chip), not just the panel's messages.
+    // Pump the whole thread queue (panel + chip), not just the panel's messages.
     MSG msg = {};
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
@@ -875,7 +974,7 @@ int __cdecl OnPluginTick(void) {
         ShowWindow(g_panel, SW_HIDE);
         if (g_mini != nullptr) ShowWindow(g_mini, SW_HIDE);
         g_ownerIconic = true;
-        return 0;
+        return;
     }
     if (!iconic && g_ownerIconic) {
         // Restore whichever form was up: the chip means "still folded".
@@ -887,7 +986,7 @@ int __cdecl OnPluginTick(void) {
         g_ownerIconic = false;
         InterlockedExchange(&g_dirty, 1);
     }
-    if (iconic) return 0;
+    if (iconic) return;
 
     // Keep the panel visually attached to the app window: apply the delta of
     // the owner's client origin. No clamping, so a panel parked outside the
@@ -924,39 +1023,35 @@ int __cdecl OnPluginTick(void) {
             Paint();
         }
     }
+}
+
+// 面板线程：窗口属于本线程，创建/泵消息/重绘全在这里做。
+DWORD WINAPI PumpThread(LPVOID) {
+    while (!g_stop) {
+        TickOnce();
+        Sleep(10);
+    }
+    DestroyPanel();   // DestroyWindow 必须在创建它的线程上跑
     return 0;
 }
 
-int __cdecl OnPluginInit(const Host* host) {
-    g_host = host;
-    if (host == nullptr) return ERR_PARAM;
-    if (host->abi != P_ABI) return ERR_PARAM;
-
-    // subscribeLog sits at the end of the table. Refuse instead of reading past
-    // the end of an older framework build.
-    if (host->structSize < sizeof(Host)) {
-        if (host->publishLog != nullptr) host->publishLog("console: framework too old");
-        g_host = nullptr;
-        return ERR_STATE;
-    }
+bool ModuleInit() {
+    g_scale = QueryScale();
+    if (g_scale <= 0.0f) g_scale = 1.0f;
 
     if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
             __uuidof(IDWriteFactory),
             reinterpret_cast<IUnknown**>(g_dw.GetAddressOf())))) {
-        if (host->publishLog != nullptr) host->publishLog("console: DWrite factory failed");
-        g_host = nullptr;
-        return ERR_STATE;
+        LogLine("console: DWrite factory failed");
+        return false;
     }
-    g_scale = host->scale();
-    if (g_scale <= 0.0f) g_scale = 1.0f;
     if (FAILED(g_dw->CreateTextFormat(L"Consolas", nullptr,
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL, kFontSize * g_scale, L"en-us",
             g_fmt.GetAddressOf()))) {
-        if (host->publishLog != nullptr) host->publishLog("console: text format failed");
+        LogLine("console: text format failed");
         g_dw.Reset();
-        g_host = nullptr;
-        return ERR_STATE;
+        return false;
     }
     g_fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     g_fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -967,36 +1062,59 @@ int __cdecl OnPluginInit(const Host* host) {
             DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL, kFontSize * g_scale, L"en-us",
             g_titleFmt.GetAddressOf()))) {
-        if (host->publishLog != nullptr) host->publishLog("console: title format failed");
+        LogLine("console: title format failed");
         g_fmt.Reset();
         g_dw.Reset();
-        g_host = nullptr;
-        return ERR_STATE;
+        return false;
     }
     g_titleFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     g_titleFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     g_titleFmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
-    const int sinkRc = host->subscribeLog(&OnLogLine, nullptr);
-    if (sinkRc != P_OK) {
-        if (host->publishLog != nullptr) host->publishLog("console: log sink rejected");
+    // Register the log sink: proxy mirrors every line into our ring buffer.
+    char sinkReq[128] = {};
+    _snprintf_s(sinkReq, sizeof(sinkReq), _TRUNCATE,
+                "{\"cmd\":\"logSink\",\"ptr\":\"%llu\"}",
+                static_cast<unsigned long long>(
+                    reinterpret_cast<uintptr_t>(&OnLogLine)));
+    char sinkResp[256] = {};
+    if (!GhostCall(sinkReq, sinkResp, sizeof(sinkResp))) {
+        LogLine("console: log sink rejected");
+        g_titleFmt.Reset();
         g_fmt.Reset();
         g_dw.Reset();
-        g_host = nullptr;
-        return sinkRc;
+        return false;
     }
 
-    host->publishLog("console: attached, panel is its own window");
-    return P_OK;
+    // The panel window is created by this thread and so its queue is pumped
+    // here; no other thread may touch it.
+    g_stop = false;
+    g_thread = CreateThread(nullptr, 0, PumpThread, nullptr, 0, nullptr);
+    if (g_thread == nullptr) {
+        LogLine("console: pump thread failed");
+        g_titleFmt.Reset();
+        g_fmt.Reset();
+        g_dw.Reset();
+        return false;
+    }
+
+    LogLine("console: attached, panel is its own window");
+    return true;
 }
 
-int __cdecl OnPluginShutdown(void) {
+void ModuleShutdown() {
     LogLine("console: detaching");
-    DestroyPanel();
+
+    g_stop = true;
+    if (g_thread != nullptr) {
+        WaitForSingleObject(g_thread, 3000);
+        CloseHandle(g_thread);
+        g_thread = nullptr;
+    }
+
     g_titleFmt.Reset();
     g_fmt.Reset();
     g_dw.Reset();
-    g_host = nullptr;
     g_titleHover = false;
 
     // Drop buffered lines so a reload starts clean.
@@ -1006,28 +1124,55 @@ int __cdecl OnPluginShutdown(void) {
     ReleaseSRWLockExclusive(&g_ringLock);
     InterlockedExchange(&g_dirty, 1);
     g_lastPaint = 0;
-    return P_OK;
-}
 
-const Desc kDesc = {
-    P_ABI,
-    static_cast<uint32_t>(sizeof(Desc)),
-    "console",
-    "0.4.0",
-    &OnPluginInit,
-    &OnPluginTick,     // pumps the panel window and repaints it
-    &OnPluginShutdown
-};
+    g_ready = false;
+    g_ghost = nullptr;
+    g_ghostCtx = nullptr;
+}
 
 }  // namespace
 
-// The single export the framework looks up.
-extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
-    return &kDesc;
+// The single export the host loader looks up. Contract is JSON only.
+extern "C" __declspec(dllexport)
+int __cdecl NotifyPlatform(const char* reqJson, char* respJson, int cap) {
+    if (reqJson == nullptr || respJson == nullptr || cap <= 0) return -1;
+
+    char cmd[32] = {};
+    if (!JsonStr(reqJson, "cmd", cmd, sizeof(cmd))) {
+        return WriteResp("{\"ok\":false,\"err\":\"bad json\"}", respJson, cap);
+    }
+
+    if (strcmp(cmd, "init") == 0) {
+        char dispatch[32] = {};
+        if (!JsonStr(reqJson, "dispatch", dispatch, sizeof(dispatch))) {
+            return WriteResp("{\"ok\":false,\"err\":\"no dispatch\"}", respJson, cap);
+        }
+        g_ghost = reinterpret_cast<GhostFn>(
+            static_cast<uintptr_t>(_strtoui64(dispatch, nullptr, 10)));
+        char ctx[32] = {};
+        g_ghostCtx = JsonStr(reqJson, "ctx", ctx, sizeof(ctx))
+            ? reinterpret_cast<void*>(static_cast<uintptr_t>(_strtoui64(ctx, nullptr, 10)))
+            : nullptr;
+        g_ready = true;
+        if (!ModuleInit()) {
+            g_ready = false;
+            g_ghost = nullptr;
+            g_ghostCtx = nullptr;
+            return WriteResp("{\"ok\":false,\"err\":\"init failed\"}", respJson, cap);
+        }
+        return WriteResp("{\"ok\":true,\"proto\":1}", respJson, cap);
+    }
+
+    if (strcmp(cmd, "shutdown") == 0) {
+        ModuleShutdown();
+        return WriteResp("{\"ok\":true}", respJson, cap);
+    }
+
+    return WriteResp("{\"ok\":false,\"err\":\"unknown cmd\"}", respJson, cap);
 }
 
-// Empty by design: every resource is created in init/tick and released in
-// shutdown.
+// Empty by design: every resource is created in init / the pump thread and
+// released in shutdown.
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     (void)module;
     (void)reason;

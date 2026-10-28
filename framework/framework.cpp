@@ -38,14 +38,18 @@
 #include "civetweb.h"
 #include "command_handler.h"
 #include "input_dispatcher.h"
+#include "host_caps.h"
 #include "picker.h"
-#include "pplugin.h"
 #include "script_store.h"
 #include "ws_server.h"
 
 #include "window_target.h"
 
 namespace {
+
+// 启动返回码：沿用旧 pplugin 的取值，但不再依赖 common/pplugin.h。
+constexpr int kStartOk = 0;
+constexpr int kStartState = -2;
 
 HMODULE g_hModule = nullptr;
 wchar_t g_moduleDir[MAX_PATH] = {};
@@ -117,17 +121,17 @@ class Framework {
  public:
   Framework() : input_(win_), handler_(win_, input_) {}
 
-  int start(const Host* host, const char* doc_root, int port) {
+  int start(const HostCaps* host, const char* doc_root, int port) {
     win_.set_host(host);
     ProbePort(port);  // 先自测端口是否可绑定（结果见 proxy.log）
     if (!server_.start(handler_, scripts_, doc_root, port)) {
       LogTagged("framework", "mg_start failed");
-      return ERR_STATE;
+      return kStartState;
     }
     if (!PickerStart(host, &PickerSend)) {
       LogTagged("framework", "picker: start failed");
     }
-    return P_OK;
+    return kStartOk;
   }
 
   // 正常卸载（PluginShutdown 调用）：等待推送线程退出。
@@ -154,60 +158,19 @@ Framework g_fw;
 
 }  // namespace
 
-// 旧 pplugin 插件入口（Desc::init）：仅当 framework 被当作 pplugin 加载时才走这里；
-// 新链路由 NotifyPlatform 直连，不走此路径。两种入口都让框架日志走公共 log 模块。
-static int __cdecl PluginInit(const Host* host) {
-  if (host == nullptr || host->abi != P_ABI ||
-      host->structSize < sizeof(Host)) {
-    return ERR_STATE;
-  }
-
-  const int port = 47801;
-  const char* doc_root = ModuleDirUtf8();
-  const int rc = g_fw.start(host, doc_root, port);
-  if (rc == P_OK) {
-    char ok[512] = {};
-    std::snprintf(ok, sizeof(ok), "started, ws=ws://127.0.0.1:47801/ws doc_root=%s",
-                  doc_root);
-    LogTagged("framework", "%s", ok);
-  }
-  return rc;
-}
-
-static int __cdecl PluginTick(void) { return P_OK; }
-
-static int __cdecl PluginShutdown(void) {
-  g_fw.stop();
-  return P_OK;
-}
-
-static const Desc g_desc = {
-    P_ABI,
-    static_cast<uint32_t>(sizeof(Desc)),
-    "framework",
-    "1.0",
-    &PluginInit,
-    &PluginTick,
-    &PluginShutdown,
-};
-
-extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
-  return &g_desc;
-}
-
 // ============================================================================
 // 新链路：version.dll 直连的 JSON 协议入口（NotifyPlatform）。
 //
-// 不再需要 GetDesc/pplugin：version.dll 直接 LoadLibrary(framework.dll) 后调
-// NotifyPlatform。这里把 ghost 交来的 dispatch 指针包成一张 Host 表，复用现有
-// 子模块（window_target 只认 Host*），从而零改动接入新链路。
-// GetDesc 暂时保留，等新链路验证通过后再退役。
+// version.dll 直接 LoadLibrary(framework.dll) 后调 NotifyPlatform，全部走 JSON；
+// 不需要 GetDesc/pplugin。ghost 交来的 dispatch 指针只被包成一张内部 HostCaps
+// （三根指针，函数体就是几条 JSON 调用），与插件 ABI 无关。
 // ============================================================================
 namespace {
 
 typedef int (__cdecl* NotifyGhostFn)(const char*, char*, int, void*);
 NotifyGhostFn g_dispatch = nullptr;
 void* g_dispatchCtx = nullptr;
+bool g_started = false;  // 防止重复 init 把第二次 mg_start 打到已占用的端口
 
 int WriteResp(const char* body, char* resp, int cap) {
   if (body == nullptr || resp == nullptr || cap <= 0) {
@@ -272,23 +235,15 @@ float __cdecl DispatchScale() {
   return static_cast<float>(j.Find("scale").AsNum(1.0));
 }
 
-// 用 ghost 的 dispatch 拼出 Host 表，交给现有子模块。
-const Host g_hostViaDispatch = {
-    P_ABI,
-    static_cast<uint32_t>(sizeof(Host)),
-    nullptr,            // publishLog：框架日志改由公共 log 模块直写，不再经 ghost 回传
-    &DispatchMainWindow,
-    &DispatchViewWindow,
-    &DispatchScale,
-    nullptr,
-    nullptr,
-};
+// 用 ghost 的 dispatch 拼出内部能力表，交给现有子模块。
+const HostCaps g_hostCaps = {&DispatchMainWindow, &DispatchViewWindow,
+                             &DispatchScale};
 
 int StartViaProtocol() {
   const int port = 47801;
   const char* doc_root = ModuleDirUtf8();
-  const int rc = g_fw.start(&g_hostViaDispatch, doc_root, port);
-  if (rc == P_OK) {
+  const int rc = g_fw.start(&g_hostCaps, doc_root, port);
+  if (rc == kStartOk) {
     LogTagged("framework", "framework started via protocol (NotifyPlatform)");
   }
   return rc;
@@ -315,13 +270,20 @@ int __cdecl NotifyPlatform(const char* reqJson, char* respJson, int cap) {
         static_cast<uintptr_t>(std::strtoull(req.Find("dispatch").AsStr(), nullptr, 10)));
     g_dispatchCtx = reinterpret_cast<void*>(
         static_cast<uintptr_t>(std::strtoull(req.Find("ctx").AsStr(), nullptr, 10)));
+    // 热加载会先 shutdown + FreeLibrary 再 LoadLibrary，正常不会走到这里；
+    // 但同一实例被重复 init 时必须幂等，否则第二次 mg_start 会撞端口。
+    if (g_started) {
+      return WriteResp("{\"ok\":true,\"proto\":1,\"already\":true}", respJson, cap);
+    }
+    g_started = (StartViaProtocol() == kStartOk);
     char buf[64] = {};
     std::snprintf(buf, sizeof(buf), "{\"ok\":%s,\"proto\":1}",
-                  (StartViaProtocol() == P_OK) ? "true" : "false");
+                  g_started ? "true" : "false");
     return WriteResp(buf, respJson, cap);
   }
   if (std::strcmp(cmd, "shutdown") == 0) {
     g_fw.stop();
+    g_started = false;
     return WriteResp("{\"ok\":true}", respJson, cap);
   }
   char buf[192] = {};

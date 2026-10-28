@@ -171,10 +171,11 @@ export function setScale(scale) {
 }
 
 // 拾取模式：宿主装钩子，下一次落在应用窗口内的左键被吞掉并回传坐标。
-export function beginPick() {
+// topmost=true 时宿主先把应用窗口提到最前，避免被编辑器页面挡住看不到。
+export function beginPick(opts = {}) {
   cursor.picked = null
   cursor.picking = true
-  send({ type: 'pick', action: 'start' })
+  send({ type: 'pick', action: 'start', topmost: opts.topmost === true })
 }
 
 export function cancelPick() {

@@ -50,14 +50,23 @@ flowchart LR
 | **proxy** (`version.dll`) | 宿主能力表 `{mainWindow, viewWindow, scale}`；直接 `LoadLibrary(framework.dll)` 并走 `NotifyPlatform` 协议；日志走 `common/log`（`[proxy]`） |
 | **framework** (`framework.dll`) | `ws` 服务端、后台命令执行（`PostMessage`）；日志走 `common/log`（`[framework]`）；`publishLog` 仅保留给 `plugin/` 下的插件，框架自身不再经它回写 |
 
-## 插件加载 / 热加载（`plugin/` 下的脚本插件，非 framework）
+## 模块加载与热加载（`proxy/module_loader`）
 
-- `framework.dll` **不走此路径**：它由 proxy 的 `bootstrap` 在进程启动时直接 `LoadLibrary`，经 `NotifyPlatform` JSON 握手加载，**不支持热重载**（改 framework.dll 须重启 TTVoice）。
-- `plugin/`（如 `script-engine`/`console`/`example`）才是 pplugin 插件，仍走旧 `plugin_loader`：
-  - `version.ini [loaders]` 逐行 DLL 名，从 `ModuleDir()`（`%APPDATA%\TTVoice`）加载；
-  - DLL 导出 `GetDesc`（`pplugin.h`，`P_ABI v4`），校验后调 `Desc::init(const Host*)`；
-  - `WatchPlugins()` 每 500ms 比对 DLL 写时间，变化则 卸载 + 重载（热加载）；
-  - 插件经 `Host::publishLog` 把日志回写给框架（这是 `publishLog` 字段仅剩的用途）。
+“模块”只是一个导出 `NotifyPlatform(const char*, char*, int)` 的 dll，契约全是 JSON：init 里收 `{"cmd":"init","dispatch":"<NotifyGhost 指针>","ctx":"0"}`，之后用 `{"cmd":"mainWindow"|"viewWindow"|"scale"}` 反查宿主能力，退出收 `{"cmd":"shutdown"}`。**没有共享结构体、没有 GetDesc/ABI 校验。**
+
+- `bootstrap` 在宿主 UI 就绪后调 `module_loader::Start(hostContext)`：
+  - `framework.dll` 是**核心模块**，总是第一个加载（`protocol::ProtocolStart`，同时绑好 proxy→framework 的转发通道），加载失败要打 WARN；
+  - `version.ini [modules]` 里的裸 dll 名是**额外模块**（`protocol::ModuleStart`），可选，缺文件跳过但继续监视。
+- 每个模块各有一个 slot，后台线程每 700ms 读它的**文件标识**（卷序列号 + 文件索引 + 大小）；变化且连续两次一致（写完）后：发 `shutdown` → `FreeLibrary`（解除映射）→ 重试 `LoadLibrary` + `init`（10×300ms）→ 删 `<dll>.old`。
+- 部署侧配合：`deploy_plugin.py` 用「改名换位」（`framework.dll` → `.old`，新文件放到原名），正好改变文件标识，**部署即热加载**。WS 客户端（`editor2`）用 `reconnecting-websocket` 自动重连，端口 47801 由 CivetWeb 以 `SO_REUSEADDR` 立即重绑。
+- 实测：2026-10-28 连续两次替换 framework.dll 均 `hot reload done`，替换后 WS `geometry`/`cursor` 正常回包。
+
+## pplugin 插件机制（已彻底退役，2026-10-28）
+
+- 删掉了 `version.ini [loaders]`、`proxy/plugin.cpp` 的插件加载器、`plugin/example`、`plugin/script-engine`、`libs/nlohmann`，以及契约头 `common/pplugin.h`（`P_ABI` / `Host` / `Desc` / `GetDesc` 全部不再存在）。
+- `plugin/console` 已改写成 JSON 模块：导出 `NotifyPlatform`，`{"cmd":"init"}` 里拿 dispatch 指针，用 `{"cmd":"mainWindow"|"viewWindow"|"scale"}` 查宿主能力，用 `{"cmd":"log","tag":"console","text":...}` 写 proxy.log，用 `{"cmd":"logSink","ptr":...}` 订阅日志（`proxy/log_relay` 把 `common/log` 的每行镜像过去）。
+- console 自己拥有一个 pump 线程：窗口属于该线程，创建/泵消息/重绘/AutoHide 全在它里面；`{"cmd":"shutdown"}` 里等线程退出再释放资源。
+- 启用方式：`version.ini [modules]` 写 `console.dll`，放在 `%APPDATA%\TTVoice\`（与 framework.dll 同目录）。首次启用需重启宿主，之后换文件即热加载。
 
 ## WS 协议
 

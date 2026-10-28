@@ -51,11 +51,8 @@ const dlgInitial = ref({})
 const dlgIndex = ref(-1)
 const selectedRow = ref(-1)
 
-const rows = ref([
-  { type: '鼠标', params: '300,550', action: '左键单击', wheel: '0', note: '这是A操作。' },
-  { type: '鼠标', params: '900,300', action: '左键双击', wheel: '0', note: '这是B操作。' },
-  { type: '延迟', params: '1000', action: '', wheel: '', note: '' },
-])
+// 默认空表：只有选中/新建脚本后，才用它的 events 填充
+const rows = ref([])
 
 // 当前脚本的原始 events（保存时写回，避免丢失 json 字段）
 const rawEvents = ref([])
@@ -457,6 +454,7 @@ function defaultEvent(type) {
   }
   if (type === 'input') return { type: 'input', text: '', remark: '' }
   if (type === 'key') return { type: 'key', key: 'Enter', action: 'press', remark: '' }
+  // topmost 不给默认值：留给弹窗用上次记住的"拾取时置顶"选择
   return { type: 'mouse', action: 'click', button: 'left', x: 0, y: 0, remark: '' }
 }
 
@@ -561,7 +559,10 @@ function onRowEdit(i) {
 }
 
 function onRowDelete(i) {
-  if (!rawEvents.value[i]) return
+  const ev = rawEvents.value[i]
+  if (!ev) return
+  const what = `${ev.type}${ev.action ? ':' + ev.action : ''}`
+  if (!window.confirm(`删除第 ${i + 1} 步（${what}）？`)) return
   rawEvents.value.splice(i, 1)
   refreshRows()
   if (selectedRow.value >= rawEvents.value.length) {
@@ -646,7 +647,7 @@ function onRowDelete(i) {
             <td class="ops">
               <button @click="onRowTryRun(i)">试跑</button>
               <button @click="onRowEdit(i)">修改</button>
-              <button @click="onRowDelete(i)">删除行</button>
+              <button @click="onRowDelete(i)">删除</button>
             </td>
             <td>{{ row.type }}</td>
             <td>{{ row.params }}</td>

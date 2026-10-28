@@ -173,11 +173,13 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
 
   if (std::strcmp(category, "pick") == 0) {
     if (std::strcmp(sub, "start") == 0 || sub[0] == '\0') {
-      if (!PickerBeginPick()) {
+      // topmost：拾取期间把应用窗口临时提到最前（前端"拾取时置顶"选项）。
+      const bool topmost = cmd.Find("topmost").AsBool(false);
+      if (!PickerBeginPick(topmost)) {
         return make_reply(pool, out, cap, id, false,
                           ppjson::Value::Str(pool, "push thread not running"), kErr);
       }
-      LogTagged("framework", "pick: start");
+      LogTagged("framework", "pick: start topmost=%d", topmost ? 1 : 0);
       return make_reply(pool, out, cap, id, true, ppjson::Value(), kOk);
     }
     if (std::strcmp(sub, "cancel") == 0 || std::strcmp(sub, "stop") == 0) {

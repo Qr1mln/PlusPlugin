@@ -10,12 +10,11 @@
 #include <windows.h>
 
 #include "../common/json.h"
-
-struct Host;  // 前向声明
+#include "host_caps.h"
 
 class WindowTarget {
  public:
-  void set_host(const Host* host) noexcept { host_ = host; }
+  void set_host(const HostCaps* host) noexcept { host_ = host; }
 
   // 目标窗口：优先 viewWindow（真正接收输入的 Flutter 子窗口），回退 mainWindow。
   HWND target() const;
@@ -35,7 +34,7 @@ class WindowTarget {
   void set_cursor(int x, int y) noexcept { cx_ = x; cy_ = y; }
 
  private:
-  const Host* host_ = nullptr;
+  const HostCaps* host_ = nullptr;
   int cx_ = 0;
   int cy_ = 0;
 };
