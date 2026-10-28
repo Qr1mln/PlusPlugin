@@ -8,10 +8,7 @@
 #include "config.h"
 #include "log.h"
 
-// The framework is header-only and lives at the repo root. It uses ::Log and
-// ::g_logFanout from log.h, so those declarations must be seen first.
-#include "plugin_api.inc"
-#include "plugin_loader.inc"
+#include "plugin.h"
 
 namespace {
 
