@@ -72,6 +72,19 @@ public:
     // -(need + 1) when out is too small.
     int Dump(char* out, int cap) const;
 
+    // Convenience member builders (use this value's own pool). Handy for code
+    // that composes a response in place, e.g. out.SetNum("x", rc.left).
+    static Value Obj(Pool& p);
+    static Value Arr(Pool& p);
+    void SetStr(const char* key, const char* val);
+    void SetNum(const char* key, double val);
+    void SetBool(const char* key, bool val);
+    void SetValue(const char* key, Value child);
+    void AddStr(const char* val);
+    void AddNum(double val);
+    void AddBool(bool val);
+    void AddValue(Value child);
+
 private:
     Pool* pool_ = nullptr;
     int   idx_ = -1;

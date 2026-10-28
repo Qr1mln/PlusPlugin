@@ -225,6 +225,18 @@ void ArrAddValue(Pool& p, Value arr, Value child) {
     LinkChild(p, arr.Index(), child.Index());
 }
 
+// Convenience member builders: bind the pool carried by the handle.
+Value Value::Obj(Pool& p) { return MakeObj(p); }
+Value Value::Arr(Pool& p) { return MakeArr(p); }
+void Value::SetStr(const char* key, const char* val) { if (pool_ != nullptr) ObjSetStr(*pool_, *this, key, val); }
+void Value::SetNum(const char* key, double val) { if (pool_ != nullptr) ObjSetNum(*pool_, *this, key, val); }
+void Value::SetBool(const char* key, bool val) { if (pool_ != nullptr) ObjSetBool(*pool_, *this, key, val); }
+void Value::SetValue(const char* key, Value child) { if (pool_ != nullptr) ObjSetValue(*pool_, *this, key, child); }
+void Value::AddStr(const char* val) { if (pool_ != nullptr) ArrAddStr(*pool_, *this, val); }
+void Value::AddNum(double val) { if (pool_ != nullptr) ArrAddNum(*pool_, *this, val); }
+void Value::AddBool(bool val) { if (pool_ != nullptr) ArrAddBool(*pool_, *this, val); }
+void Value::AddValue(Value child) { if (pool_ != nullptr) ArrAddValue(*pool_, *this, child); }
+
 // ---------------------------------------------------------------------------
 // Serialization.
 // ---------------------------------------------------------------------------
