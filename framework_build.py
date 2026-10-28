@@ -106,7 +106,7 @@ def framework_build(client):
         f"-static-libgcc -static-libstdc++ "
         f"-Wl,--gc-sections -s "
         f"-I../sdk -I../libs -I../libs/civetweb "
-        f"-o framework.dll *.cpp civetweb.o "
+        f"-o framework.dll *.cpp ../common/*.cpp civetweb.o "
         f"-lws2_32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lpthread"
     )
     status, out = run_status(client, cmd)
