@@ -1,73 +1,87 @@
-// json_util.h - self-contained minimal JSON reader/writer (no third-party dependency).
+// json_util.h - self-contained minimal JSON reader/writer.
 //
-// Scope: just enough for the version protocol - objects, arrays, strings,
-// numbers, booleans and null. Deliberately NOT a full RFC 8259 parser:
-// no surrogate-pair handling and no big-number precision guarantees, because
-// the protocol fields are short and simple. Keeping it local also keeps the
-// proxy free of any external JSON header.
+// No third-party dependency and no C++ standard library containers: values
+// live in a caller-owned fixed-size node pool, so this module stays STL-free
+// and allocation-free. Children are an intrusive singly-linked list, which is
+// why no arrays/vectors are needed.
+//
+// Scope: objects, arrays, strings, numbers, booleans, null. Deliberately NOT a
+// full RFC 8259 parser: no surrogate pairs, no big-number precision. Protocol
+// documents are tiny, so small caps are enough.
 //
 // Keep this file pure ASCII.
 #pragma once
 
-#include <cstddef>
-#include <string>
-#include <utility>
-#include <vector>
-
 namespace ppjson {
 
-// A lightweight JSON value: one struct with a type tag and per-type fields,
-// which keeps the implementation small and avoids templates / variants.
+// Fixed limits. Bump if a document ever needs more room.
+const int kMaxStr   = 256;   // bytes of a string value
+const int kMaxKey   = 32;    // bytes of an object key
+const int kMaxNodes = 32;    // total value nodes for one whole document
+
+enum Type { kNull = 0, kBool, kNum, kStr, kObj, kArr };
+
+// A single value node. `firstChild`/`next` form the child list; when the node
+// is an object member, `key` holds its name.
+struct Node {
+    Type   type;
+    bool   b;
+    double num;
+    char   str[kMaxStr];
+    char   key[kMaxKey];
+    int    firstChild;   // head of child list (kObj / kArr), or -1
+    int    next;         // next sibling, or -1
+};
+
+// The node pool. The caller owns one (usually on the stack).
+struct Pool {
+    Node nodes[kMaxNodes];
+    int  used;
+
+    Pool() : nodes(), used(0) {}
+    int Alloc() { return (used < kMaxNodes) ? used++ : -1; }
+};
+
+// A value handle: pool + node index. Copyable and cheap.
 class Value {
 public:
-    enum Type { kNull, kBool, kNum, kStr, kArr, kObj };
-
     Value() = default;
+    Value(Pool* pool, int index) : pool_(pool), idx_(index) {}
 
-    // Factories.
-    static Value Bool(bool b);
-    static Value Num(double n);
-    static Value Str(const std::string& s);
-    static Value Obj();
-    static Value Arr();
+    bool Valid() const { return pool_ != nullptr && idx_ >= 0; }
+    int Index() const { return idx_; }
 
-    Type type() const { return type_; }
-    bool IsNull() const { return type_ == kNull; }
-    bool IsObj() const { return type_ == kObj; }
-    bool IsArr() const { return type_ == kArr; }
-    bool IsStr() const { return type_ == kStr; }
+    Type type() const;
+    bool IsNull() const { return type() == kNull; }
+    bool IsObj() const { return type() == kObj; }
+    bool IsArr() const { return type() == kArr; }
+    bool IsStr() const { return type() == kStr; }
 
-    bool AsBool(bool def = false) const { return type_ == kBool ? bool_ : def; }
-    double AsNum(double def = 0.0) const { return type_ == kNum ? num_ : def; }
-    long long AsInt(long long def = 0) const {
-        return type_ == kNum ? static_cast<long long>(num_) : def;
-    }
-    const std::string& AsStr() const;
+    bool AsBool(bool def = false) const;
+    double AsNum(double def = 0.0) const;
+    long long AsInt(long long def = 0) const;
+    const char* AsStr() const;
 
-    // Object access. Set() turns the value into an object if it was not one.
-    void Set(const std::string& key, const Value& v);
-    const Value* Find(const std::string& key) const;
+    Value Find(const char* key) const;   // object member, or an invalid Value
+    Value At(int i) const;               // array item, or an invalid Value
+    int Size() const;                    // array length
 
-    // Array access.
-    void Push(const Value& v);
-    const Value& At(std::size_t i) const;
-    std::size_t Size() const;
+    // Parse text into pool. Returns false and writes a short reason into err.
+    static bool Parse(const char* text, Pool& pool, Value& out, char* err, int errCap);
 
-    // Parse text into out. On failure returns false and fills err (if not null).
-    static bool Parse(const std::string& text, Value& out, std::string* err);
-
-    // Compact serialization.
-    std::string Dump() const;
+    // Serialize into out (NUL-terminated). Returns length (>= 0), or
+    // -(need + 1) when out is too small.
+    int Dump(char* out, int cap) const;
 
 private:
-    void AppendTo(std::string& out) const;
-
-    Type type_ = kNull;
-    bool bool_ = false;
-    double num_ = 0.0;
-    std::string str_;
-    std::vector<Value> arr_;
-    std::vector<std::pair<std::string, Value>> obj_;
+    Pool* pool_ = nullptr;
+    int   idx_ = -1;
 };
+
+// Builders (for composing responses in the pool).
+Value MakeObj(Pool& p);
+void ObjSetStr(Pool& p, Value obj, const char* key, const char* val);
+void ObjSetNum(Pool& p, Value obj, const char* key, double val);
+void ObjSetBool(Pool& p, Value obj, const char* key, bool val);
 
 }  // namespace ppjson

@@ -9,85 +9,167 @@
 
 namespace ppjson {
 
-// ---------------------------------------------------------------------------
-// Factories.
-// ---------------------------------------------------------------------------
-Value Value::Bool(bool b) {
-    Value v;
-    v.type_ = kBool;
-    v.bool_ = b;
-    return v;
+namespace {
+
+// Fetch the node for a handle, or null when the handle is invalid.
+const Node* NodeOf(const Pool* pool, int idx) {
+    return (pool != nullptr && idx >= 0) ? &pool->nodes[idx] : nullptr;
 }
 
-Value Value::Num(double n) {
-    Value v;
-    v.type_ = kNum;
-    v.num_ = n;
-    return v;
+// Copy src into a fixed char buffer (always NUL-terminated).
+void CopyStr(char* dst, int cap, const char* src) {
+    if (cap <= 0) {
+        return;
+    }
+    if (src == nullptr) {
+        dst[0] = '\0';
+        return;
+    }
+    std::strncpy(dst, src, static_cast<size_t>(cap - 1));
+    dst[cap - 1] = '\0';
 }
 
-Value Value::Str(const std::string& s) {
-    Value v;
-    v.type_ = kStr;
-    v.str_ = s;
-    return v;
+// Append a child index to a parent node's child list (keeps source order).
+void LinkChild(Pool& p, int parentIdx, int childIdx) {
+    Node& parent = p.nodes[parentIdx];
+    p.nodes[childIdx].next = -1;
+    if (parent.firstChild < 0) {
+        parent.firstChild = childIdx;
+        return;
+    }
+    int last = parent.firstChild;
+    while (p.nodes[last].next >= 0) {
+        last = p.nodes[last].next;
+    }
+    p.nodes[last].next = childIdx;
 }
 
-Value Value::Obj() {
-    Value v;
-    v.type_ = kObj;
-    return v;
-}
-
-Value Value::Arr() {
-    Value v;
-    v.type_ = kArr;
-    return v;
-}
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Accessors.
 // ---------------------------------------------------------------------------
-const std::string& Value::AsStr() const {
-    static const std::string kEmpty;
-    return type_ == kStr ? str_ : kEmpty;
+Type Value::type() const {
+    const Node* n = NodeOf(pool_, idx_);
+    return (n != nullptr) ? n->type : kNull;
 }
 
-void Value::Set(const std::string& key, const Value& v) {
-    type_ = kObj;
-    for (auto& kv : obj_) {
-        if (kv.first == key) {
-            kv.second = v;
-            return;
+bool Value::AsBool(bool def) const {
+    const Node* n = NodeOf(pool_, idx_);
+    return (n != nullptr && n->type == kBool) ? n->b : def;
+}
+
+double Value::AsNum(double def) const {
+    const Node* n = NodeOf(pool_, idx_);
+    return (n != nullptr && n->type == kNum) ? n->num : def;
+}
+
+long long Value::AsInt(long long def) const {
+    const Node* n = NodeOf(pool_, idx_);
+    return (n != nullptr && n->type == kNum) ? static_cast<long long>(n->num) : def;
+}
+
+const char* Value::AsStr() const {
+    const Node* n = NodeOf(pool_, idx_);
+    return (n != nullptr && n->type == kStr) ? n->str : "";
+}
+
+Value Value::Find(const char* key) const {
+    const Node* n = NodeOf(pool_, idx_);
+    if (n == nullptr || n->type != kObj || key == nullptr) {
+        return Value();
+    }
+    for (int c = n->firstChild; c >= 0; c = pool_->nodes[c].next) {
+        if (std::strcmp(pool_->nodes[c].key, key) == 0) {
+            return Value(const_cast<Pool*>(pool_), c);
         }
     }
-    obj_.emplace_back(key, v);
+    return Value();
 }
 
-const Value* Value::Find(const std::string& key) const {
-    if (type_ != kObj) {
+Value Value::At(int i) const {
+    const Node* n = NodeOf(pool_, idx_);
+    if (n == nullptr || n->type != kArr || i < 0) {
+        return Value();
+    }
+    int c = n->firstChild;
+    for (int k = 0; c >= 0 && k < i; ++k) {
+        c = pool_->nodes[c].next;
+    }
+    return (c >= 0) ? Value(const_cast<Pool*>(pool_), c) : Value();
+}
+
+int Value::Size() const {
+    const Node* n = NodeOf(pool_, idx_);
+    if (n == nullptr || n->type != kArr) {
+        return 0;
+    }
+    int count = 0;
+    for (int c = n->firstChild; c >= 0; c = pool_->nodes[c].next) {
+        ++count;
+    }
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Builders.
+// ---------------------------------------------------------------------------
+Value MakeObj(Pool& p) {
+    const int i = p.Alloc();
+    if (i < 0) {
+        return Value();
+    }
+    Node& n = p.nodes[i];
+    n.type = kObj;
+    n.firstChild = -1;
+    n.next = -1;
+    return Value(&p, i);
+}
+
+namespace {
+
+// Allocate a scalar child, set its key, and link it under obj.
+Node* NewMember(Pool& p, Value obj, const char* key, Type t) {
+    if (!obj.Valid() || key == nullptr) {
         return nullptr;
     }
-    for (const auto& kv : obj_) {
-        if (kv.first == key) {
-            return &kv.second;
-        }
+    const int ci = p.Alloc();
+    if (ci < 0) {
+        return nullptr;
     }
-    return nullptr;
+    Node& c = p.nodes[ci];
+    c.type = t;
+    c.b = false;
+    c.num = 0.0;
+    c.str[0] = '\0';
+    c.firstChild = -1;
+    c.next = -1;
+    CopyStr(c.key, kMaxKey, key);
+    LinkChild(p, obj.Index(), ci);
+    return &p.nodes[ci];
 }
 
-void Value::Push(const Value& v) {
-    type_ = kArr;
-    arr_.push_back(v);
+}  // namespace
+
+void ObjSetStr(Pool& p, Value obj, const char* key, const char* val) {
+    Node* c = NewMember(p, obj, key, kStr);
+    if (c != nullptr) {
+        CopyStr(c->str, kMaxStr, val);
+    }
 }
 
-const Value& Value::At(std::size_t i) const {
-    static const Value kNull;
-    return (type_ == kArr && i < arr_.size()) ? arr_[i] : kNull;
+void ObjSetNum(Pool& p, Value obj, const char* key, double val) {
+    Node* c = NewMember(p, obj, key, kNum);
+    if (c != nullptr) {
+        c->num = val;
+    }
 }
 
-std::size_t Value::Size() const {
-    return type_ == kArr ? arr_.size() : 0;
+void ObjSetBool(Pool& p, Value obj, const char* key, bool val) {
+    Node* c = NewMember(p, obj, key, kBool);
+    if (c != nullptr) {
+        c->b = val;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -95,177 +177,202 @@ std::size_t Value::Size() const {
 // ---------------------------------------------------------------------------
 namespace {
 
-void AppendString(const std::string& s, std::string& out) {
-    out.push_back('"');
-    for (char c : s) {
-        switch (c) {
-        case '"':  out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n";  break;
-        case '\r': out += "\\r";  break;
-        case '\t': out += "\\t";  break;
-        case '\b': out += "\\b";  break;
-        case '\f': out += "\\f";  break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buf[8] = {};
-                std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                out += buf;
-            } else {
-                out.push_back(c);
-            }
+// A tiny append-only writer over a fixed buffer.
+struct Writer {
+    char* out;
+    int   cap;
+    int   pos;
+    bool  overflow;
+
+    void Ch(char c) {
+        if (pos + 1 >= cap) {
+            overflow = true;
+            return;
+        }
+        out[pos++] = c;
+    }
+    void Raw(const char* s) {
+        while (*s != '\0') {
+            Ch(*s++);
         }
     }
-    out.push_back('"');
+    void Str(const char* s) {
+        Ch('"');
+        for (; *s != '\0'; ++s) {
+            const unsigned char c = static_cast<unsigned char>(*s);
+            switch (c) {
+            case '"':  Raw("\\\""); break;
+            case '\\': Raw("\\\\"); break;
+            case '\n': Raw("\\n");  break;
+            case '\r': Raw("\\r");  break;
+            case '\t': Raw("\\t");  break;
+            case '\b': Raw("\\b");  break;
+            case '\f': Raw("\\f");  break;
+            default:
+                if (c < 0x20) {
+                    char esc[8] = {};
+                    std::snprintf(esc, sizeof(esc), "\\u%04x", c);
+                    Raw(esc);
+                } else {
+                    Ch(static_cast<char>(c));
+                }
+            }
+        }
+        Ch('"');
+    }
+};
+
+void DumpNode(const Pool& p, int idx, Writer& w);
+
+void DumpChildren(const Pool& p, int idx, Writer& w) {
+    const Node& n = p.nodes[idx];
+    if (n.type == kObj) {
+        w.Ch('{');
+        bool first = true;
+        for (int c = n.firstChild; c >= 0; c = p.nodes[c].next) {
+            if (!first) {
+                w.Ch(',');
+            }
+            first = false;
+            w.Str(p.nodes[c].key);
+            w.Ch(':');
+            DumpNode(p, c, w);
+        }
+        w.Ch('}');
+    } else {  // kArr
+        w.Ch('[');
+        bool first = true;
+        for (int c = n.firstChild; c >= 0; c = p.nodes[c].next) {
+            if (!first) {
+                w.Ch(',');
+            }
+            first = false;
+            DumpNode(p, c, w);
+        }
+        w.Ch(']');
+    }
+}
+
+void DumpNode(const Pool& p, int idx, Writer& w) {
+    const Node& n = p.nodes[idx];
+    switch (n.type) {
+    case kNull: w.Raw("null"); break;
+    case kBool: w.Raw(n.b ? "true" : "false"); break;
+    case kNum: {
+        char buf[32] = {};
+        if (n.num == static_cast<double>(static_cast<long long>(n.num))) {
+            std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(n.num));
+        } else {
+            std::snprintf(buf, sizeof(buf), "%.6g", n.num);
+        }
+        w.Raw(buf);
+        break;
+    }
+    case kStr:   w.Str(n.str); break;
+    case kObj:
+    case kArr:   DumpChildren(p, idx, w); break;
+    }
 }
 
 }  // namespace
 
-void Value::AppendTo(std::string& out) const {
-    switch (type_) {
-    case kNull:
-        out += "null";
-        break;
-    case kBool:
-        out += bool_ ? "true" : "false";
-        break;
-    case kNum: {
-        char buf[32] = {};
-        if (num_ == static_cast<double>(static_cast<long long>(num_))) {
-            std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(num_));
-        } else {
-            std::snprintf(buf, sizeof(buf), "%.6g", num_);
-        }
-        out += buf;
-        break;
+int Value::Dump(char* out, int cap) const {
+    if (out == nullptr || cap <= 0 || !Valid()) {
+        return -1;
     }
-    case kStr:
-        AppendString(str_, out);
-        break;
-    case kArr: {
-        out.push_back('[');
-        for (std::size_t i = 0; i < arr_.size(); ++i) {
-            if (i != 0) {
-                out.push_back(',');
-            }
-            arr_[i].AppendTo(out);
-        }
-        out.push_back(']');
-        break;
+    Writer w{out, cap, 0, false};
+    DumpNode(*pool_, idx_, w);
+    if (w.overflow) {
+        return -(w.pos + 1);
     }
-    case kObj: {
-        out.push_back('{');
-        bool first = true;
-        for (const auto& kv : obj_) {
-            if (!first) {
-                out.push_back(',');
-            }
-            first = false;
-            AppendString(kv.first, out);
-            out.push_back(':');
-            kv.second.AppendTo(out);
-        }
-        out.push_back('}');
-        break;
-    }
-    }
-}
-
-std::string Value::Dump() const {
-    std::string out;
-    AppendTo(out);
-    return out;
+    out[w.pos] = '\0';
+    return w.pos;
 }
 
 // ---------------------------------------------------------------------------
-// Parsing (recursive descent).
+// Parsing (recursive descent, allocating from the pool).
 // ---------------------------------------------------------------------------
 namespace {
 
 struct Parser {
     const char* p;
     const char* end;
+    Pool*       pool;
+    bool        oom;      // pool exhausted
+    const char* reason;   // first error reason
 
     void SkipWs() {
         while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
             ++p;
         }
     }
-    bool Eof() const { return p >= end; }
     char Peek() const { return (p < end) ? *p : '\0'; }
-};
-
-bool ParseValue(Parser& ps, Value& out, std::string* err);
-
-bool ParseString(Parser& ps, std::string& out, std::string* err) {
-    if (ps.Peek() != '"') {
-        if (err) *err = "expected string";
+    bool Fail(const char* why) {
+        if (reason == nullptr) {
+            reason = why;
+        }
         return false;
     }
+};
+
+bool ParseString(Parser& ps, char* dst, int cap) {
+    if (ps.Peek() != '"') {
+        return ps.Fail("expected string");
+    }
     ++ps.p;
-    out.clear();
+    int w = 0;
     while (ps.p < ps.end) {
         char c = *ps.p++;
         if (c == '"') {
+            dst[w] = '\0';
             return true;
         }
-        if (c == '\\') {
-            if (ps.p >= ps.end) {
-                break;
-            }
+        if (c == '\\' && ps.p < ps.end) {
             char e = *ps.p++;
             switch (e) {
-            case '"':  out.push_back('"');  break;
-            case '\\': out.push_back('\\'); break;
-            case '/':  out.push_back('/');  break;
-            case 'b':  out.push_back('\b'); break;
-            case 'f':  out.push_back('\f'); break;
-            case 'n':  out.push_back('\n'); break;
-            case 'r':  out.push_back('\r'); break;
-            case 't':  out.push_back('\t'); break;
+            case '"':  c = '"';  break;
+            case '\\': c = '\\'; break;
+            case '/':  c = '/';  break;
+            case 'b':  c = '\b'; break;
+            case 'f':  c = '\f'; break;
+            case 'n':  c = '\n'; break;
+            case 'r':  c = '\r'; break;
+            case 't':  c = '\t'; break;
             case 'u': {
-                // Minimal \uXXXX handling: BMP only, no surrogate pairs.
+                // Minimal \\uXXXX: BMP only, no surrogate pairs.
                 unsigned cp = 0;
                 for (int i = 0; i < 4; ++i) {
                     if (ps.p >= ps.end) {
-                        if (err) *err = "bad \\u escape";
-                        return false;
+                        return ps.Fail("bad \\u escape");
                     }
                     char h = *ps.p++;
                     cp <<= 4;
                     if (h >= '0' && h <= '9')      cp |= static_cast<unsigned>(h - '0');
                     else if (h >= 'a' && h <= 'f') cp |= static_cast<unsigned>(h - 'a' + 10);
                     else if (h >= 'A' && h <= 'F') cp |= static_cast<unsigned>(h - 'A' + 10);
-                    else {
-                        if (err) *err = "bad \\u digit";
-                        return false;
-                    }
+                    else                           return ps.Fail("bad \\u digit");
                 }
+                // Encode as UTF-8 into the destination, byte by byte.
                 if (cp < 0x80) {
-                    out.push_back(static_cast<char>(cp));
+                    if (w < cap - 1) dst[w++] = static_cast<char>(cp);
                 } else if (cp < 0x800) {
-                    out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-                    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                    if (w < cap - 2) { dst[w++] = static_cast<char>(0xC0 | (cp >> 6)); dst[w++] = static_cast<char>(0x80 | (cp & 0x3F)); }
                 } else {
-                    out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-                    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-                    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                    if (w < cap - 3) { dst[w++] = static_cast<char>(0xE0 | (cp >> 12)); dst[w++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); dst[w++] = static_cast<char>(0x80 | (cp & 0x3F)); }
                 }
-                break;
+                continue;
             }
-            default:
-                out.push_back(e);
-                break;
+            default: c = e; break;
             }
-        } else {
-            out.push_back(c);
+        }
+        if (w < cap - 1) {
+            dst[w++] = c;
         }
     }
-    if (err) *err = "unterminated string";
-    return false;
+    return ps.Fail("unterminated string");
 }
 
-bool ParseNumber(Parser& ps, double& out, std::string* err) {
+bool ParseNumber(Parser& ps, double& out) {
     const char* start = ps.p;
     if (ps.p < ps.end && (*ps.p == '-' || *ps.p == '+')) {
         ++ps.p;
@@ -276,137 +383,184 @@ bool ParseNumber(Parser& ps, double& out, std::string* err) {
         ++ps.p;
     }
     if (ps.p == start) {
-        if (err) *err = "bad number";
-        return false;
+        return ps.Fail("bad number");
     }
-    const std::string s(start, ps.p - start);
-    out = std::strtod(s.c_str(), nullptr);
+    char buf[40] = {};
+    const int len = static_cast<int>(ps.p - start);
+    const int n = (len < static_cast<int>(sizeof(buf)) - 1) ? len : static_cast<int>(sizeof(buf)) - 1;
+    std::memcpy(buf, start, static_cast<size_t>(n));
+    buf[n] = '\0';
+    out = std::strtod(buf, nullptr);
     return true;
 }
 
-bool ParseValue(Parser& ps, Value& out, std::string* err) {
+bool ParseValue(Parser& ps, int& out);
+
+bool ParseObject(Parser& ps, int parent) {
     ps.SkipWs();
-    if (ps.Eof()) {
-        if (err) *err = "unexpected end";
-        return false;
+    if (ps.Peek() == '}') {
+        ++ps.p;
+        return true;
+    }
+    while (true) {
+        ps.SkipWs();
+        char key[kMaxKey] = {};
+        if (!ParseString(ps, key, kMaxKey)) {
+            return false;
+        }
+        ps.SkipWs();
+        if (ps.Peek() != ':') {
+            return ps.Fail("expected ':'");
+        }
+        ++ps.p;
+        int child = -1;
+        if (!ParseValue(ps, child)) {
+            return false;
+        }
+        CopyStr(ps.pool->nodes[child].key, kMaxKey, key);
+        LinkChild(*ps.pool, parent, child);
+        ps.SkipWs();
+        char sep = ps.Peek();
+        if (sep == ',') {
+            ++ps.p;
+            continue;
+        }
+        if (sep == '}') {
+            ++ps.p;
+            return true;
+        }
+        return ps.Fail("expected ',' or '}'");
+    }
+}
+
+bool ParseArray(Parser& ps, int parent) {
+    ps.SkipWs();
+    if (ps.Peek() == ']') {
+        ++ps.p;
+        return true;
+    }
+    while (true) {
+        int child = -1;
+        if (!ParseValue(ps, child)) {
+            return false;
+        }
+        ps.pool->nodes[child].key[0] = '\0';
+        LinkChild(*ps.pool, parent, child);
+        ps.SkipWs();
+        char sep = ps.Peek();
+        if (sep == ',') {
+            ++ps.p;
+            continue;
+        }
+        if (sep == ']') {
+            ++ps.p;
+            return true;
+        }
+        return ps.Fail("expected ',' or ']'");
+    }
+}
+
+bool ParseValue(Parser& ps, int& out) {
+    ps.SkipWs();
+    if (ps.p >= ps.end) {
+        return ps.Fail("unexpected end");
     }
     char c = ps.Peek();
+    const int idx = ps.pool->Alloc();
+    if (idx < 0) {
+        ps.oom = true;
+        return ps.Fail("node pool exhausted");
+    }
+    Node& n = ps.pool->nodes[idx];
+    n.type = kNull;
+    n.b = false;
+    n.num = 0.0;
+    n.str[0] = '\0';
+    n.key[0] = '\0';
+    n.firstChild = -1;
+    n.next = -1;
 
     if (c == '{') {
         ++ps.p;
-        out = Value::Obj();
-        ps.SkipWs();
-        if (ps.Peek() == '}') {
-            ++ps.p;
-            return true;
-        }
-        while (true) {
-            ps.SkipWs();
-            std::string key;
-            if (!ParseString(ps, key, err)) {
-                return false;
-            }
-            ps.SkipWs();
-            if (ps.Peek() != ':') {
-                if (err) *err = "expected ':'";
-                return false;
-            }
-            ++ps.p;
-            Value v;
-            if (!ParseValue(ps, v, err)) {
-                return false;
-            }
-            out.Set(key, v);
-            ps.SkipWs();
-            char sep = ps.Peek();
-            if (sep == ',') {
-                ++ps.p;
-                continue;
-            }
-            if (sep == '}') {
-                ++ps.p;
-                return true;
-            }
-            if (err) *err = "expected ',' or '}'";
+        n.type = kObj;
+        if (!ParseObject(ps, idx)) {
             return false;
         }
-    }
-
-    if (c == '[') {
-        ++ps.p;
-        out = Value::Arr();
-        ps.SkipWs();
-        if (ps.Peek() == ']') {
-            ++ps.p;
-            return true;
-        }
-        while (true) {
-            Value v;
-            if (!ParseValue(ps, v, err)) {
-                return false;
-            }
-            out.Push(v);
-            ps.SkipWs();
-            char sep = ps.Peek();
-            if (sep == ',') {
-                ++ps.p;
-                continue;
-            }
-            if (sep == ']') {
-                ++ps.p;
-                return true;
-            }
-            if (err) *err = "expected ',' or ']'";
-            return false;
-        }
-    }
-
-    if (c == '"') {
-        std::string s;
-        if (!ParseString(ps, s, err)) {
-            return false;
-        }
-        out = Value::Str(s);
+        out = idx;
         return true;
     }
-
+    if (c == '[') {
+        ++ps.p;
+        n.type = kArr;
+        if (!ParseArray(ps, idx)) {
+            return false;
+        }
+        out = idx;
+        return true;
+    }
+    if (c == '"') {
+        n.type = kStr;
+        if (!ParseString(ps, n.str, kMaxStr)) {
+            return false;
+        }
+        out = idx;
+        return true;
+    }
     if (c == 't' && (ps.end - ps.p) >= 4 && std::strncmp(ps.p, "true", 4) == 0) {
         ps.p += 4;
-        out = Value::Bool(true);
+        n.type = kBool;
+        n.b = true;
+        out = idx;
         return true;
     }
     if (c == 'f' && (ps.end - ps.p) >= 5 && std::strncmp(ps.p, "false", 5) == 0) {
         ps.p += 5;
-        out = Value::Bool(false);
+        n.type = kBool;
+        n.b = false;
+        out = idx;
         return true;
     }
     if (c == 'n' && (ps.end - ps.p) >= 4 && std::strncmp(ps.p, "null", 4) == 0) {
         ps.p += 4;
-        out = Value();
+        n.type = kNull;
+        out = idx;
         return true;
     }
-
     double num = 0.0;
-    if (ParseNumber(ps, num, err)) {
-        out = Value::Num(num);
+    if (ParseNumber(ps, num)) {
+        n.type = kNum;
+        n.num = num;
+        out = idx;
         return true;
     }
-    if (err) *err = "unexpected token";
-    return false;
+    return ps.Fail("unexpected token");
 }
 
 }  // namespace
 
-bool Value::Parse(const std::string& text, Value& out, std::string* err) {
-    Parser ps{text.c_str(), text.c_str() + text.size()};
-    if (!ParseValue(ps, out, err)) {
+bool Value::Parse(const char* text, Pool& pool, Value& out, char* err, int errCap) {
+    if (text == nullptr) {
+        if (err != nullptr) {
+            CopyStr(err, errCap, "null input");
+        }
         return false;
     }
-    ps.SkipWs();
-    if (!ps.Eof()) {
-        if (err) *err = "trailing garbage";
+    Parser ps{text, text + std::strlen(text), &pool, false, nullptr};
+    int root = -1;
+    const bool ok = ParseValue(ps, root);
+    if (ok) {
+        ps.SkipWs();
+        if (ps.p < ps.end) {
+            ps.Fail("trailing garbage");
+        }
+    }
+    if (err != nullptr) {
+        CopyStr(err, errCap, ok ? "" : (ps.reason != nullptr ? ps.reason : "parse error"));
+    }
+    if (!ok) {
         return false;
     }
+    out = Value(&pool, root);
     return true;
 }
 

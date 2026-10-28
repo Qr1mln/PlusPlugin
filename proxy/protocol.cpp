@@ -1,12 +1,14 @@
 // protocol.cpp - implementation of the base side of the version protocol.
 //
+// No C++ standard library containers: JSON lives in a stack Pool (see
+// json_util.h) and strings are fixed char buffers.
+//
 // Keep this file pure ASCII.
 #include "protocol.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <string>
 
 #include "json_util.h"
 #include "log.h"
@@ -22,12 +24,15 @@ HostContext g_host = {};               // injected host capabilities
 // Write a JSON body into the caller's buffer.
 // Returns bytes written (excluding NUL), or -(need + 1) when the buffer is too
 // small so the caller can grow it and retry.
-int WriteResp(const std::string& body, char* resp, int cap) {
-    const int need = static_cast<int>(body.size());
+int WriteResp(const char* body, char* resp, int cap) {
+    if (body == nullptr || resp == nullptr || cap <= 0) {
+        return -1;
+    }
+    const int need = static_cast<int>(std::strlen(body));
     if (need + 1 > cap) {
         return -(need + 1);
     }
-    std::memcpy(resp, body.data(), body.size());
+    std::memcpy(resp, body, static_cast<size_t>(need));
     resp[need] = '\0';
     return need;
 }
@@ -37,49 +42,63 @@ int RespOk(char* resp, int cap) {
 }
 
 int RespErr(char* resp, int cap, int code, const char* msg) {
-    ppjson::Value o = ppjson::Value::Obj();
-    o.Set("ok", ppjson::Value::Bool(false));
-    o.Set("err", ppjson::Value::Str(msg != nullptr ? msg : ""));
-    o.Set("code", ppjson::Value::Num(code));
-    return WriteResp(o.Dump(), resp, cap);
+    ppjson::Pool pool;
+    ppjson::Value o = ppjson::MakeObj(pool);
+    ppjson::ObjSetBool(pool, o, "ok", false);
+    ppjson::ObjSetStr(pool, o, "err", (msg != nullptr) ? msg : "");
+    ppjson::ObjSetNum(pool, o, "code", code);
+    char buf[256] = {};
+    o.Dump(buf, sizeof(buf));
+    return WriteResp(buf, resp, cap);
 }
 
-// Pointer -> decimal string. Sent as a JSON string to avoid number precision
-// loss on 64-bit addresses.
-std::string PtrToString(const void* ptr) {
-    char buf[32] = {};
-    std::snprintf(buf, sizeof(buf), "%llu",
+// Pointer -> decimal string (pointer value as unsigned integer, into a caller
+// buffer). Sent as a JSON string to avoid number precision loss on 64-bit.
+void PtrToStr(const void* ptr, char* out, int cap) {
+    std::snprintf(out, static_cast<size_t>(cap), "%llu",
                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ptr)));
-    return std::string(buf);
 }
 
 // --- handlers for platform -> base commands --------------------------------
 
-int HandlePublishLog(const ppjson::Value& req, char* resp, int cap) {
-    const ppjson::Value* text = req.Find("text");
-    LogTagged("platform", "%s", (text != nullptr) ? text->AsStr().c_str() : "");
+int HandlePublishLog(ppjson::Value req, char* resp, int cap) {
+    ppjson::Value text = req.Find("text");
+    LogTagged("platform", "%s", text.AsStr());
     return RespOk(resp, cap);
 }
 
 int HandleMainWindow(char* resp, int cap) {
-    ppjson::Value o = ppjson::Value::Obj();
-    o.Set("ok", ppjson::Value::Bool(true));
-    o.Set("hwnd", ppjson::Value::Str(PtrToString(g_host.mainWindow)));
-    return WriteResp(o.Dump(), resp, cap);
+    ppjson::Pool pool;
+    ppjson::Value o = ppjson::MakeObj(pool);
+    char hwnd[32] = {};
+    PtrToStr(g_host.mainWindow, hwnd, sizeof(hwnd));
+    ppjson::ObjSetBool(pool, o, "ok", true);
+    ppjson::ObjSetStr(pool, o, "hwnd", hwnd);
+    char buf[128] = {};
+    o.Dump(buf, sizeof(buf));
+    return WriteResp(buf, resp, cap);
 }
 
 int HandleViewWindow(char* resp, int cap) {
-    ppjson::Value o = ppjson::Value::Obj();
-    o.Set("ok", ppjson::Value::Bool(true));
-    o.Set("hwnd", ppjson::Value::Str(PtrToString(g_host.viewWindow)));
-    return WriteResp(o.Dump(), resp, cap);
+    ppjson::Pool pool;
+    ppjson::Value o = ppjson::MakeObj(pool);
+    char hwnd[32] = {};
+    PtrToStr(g_host.viewWindow, hwnd, sizeof(hwnd));
+    ppjson::ObjSetBool(pool, o, "ok", true);
+    ppjson::ObjSetStr(pool, o, "hwnd", hwnd);
+    char buf[128] = {};
+    o.Dump(buf, sizeof(buf));
+    return WriteResp(buf, resp, cap);
 }
 
 int HandleScale(char* resp, int cap) {
-    ppjson::Value o = ppjson::Value::Obj();
-    o.Set("ok", ppjson::Value::Bool(true));
-    o.Set("scale", ppjson::Value::Num(g_host.scale));
-    return WriteResp(o.Dump(), resp, cap);
+    ppjson::Pool pool;
+    ppjson::Value o = ppjson::MakeObj(pool);
+    ppjson::ObjSetBool(pool, o, "ok", true);
+    ppjson::ObjSetNum(pool, o, "scale", g_host.scale);
+    char buf[128] = {};
+    o.Dump(buf, sizeof(buf));
+    return WriteResp(buf, resp, cap);
 }
 
 int HandleGrabFrame(char* resp, int cap) {
@@ -94,20 +113,20 @@ int __cdecl BaseDispatch(const char* reqJson, char* respJson, int cap, void* ctx
     if (reqJson == nullptr || respJson == nullptr || cap <= 0) {
         return -1;
     }
-    std::string err;
+    ppjson::Pool pool;
     ppjson::Value req;
-    if (!ppjson::Value::Parse(reqJson, req, &err)) {
+    char err[64] = {};
+    if (!ppjson::Value::Parse(reqJson, pool, req, err, sizeof(err))) {
         return RespErr(respJson, cap, 400, "invalid json");
     }
-    const ppjson::Value* cmdField = req.Find("cmd");
-    const std::string cmd = (cmdField != nullptr) ? cmdField->AsStr() : std::string();
+    const char* cmd = req.Find("cmd").AsStr();
 
-    if (cmd == "publishLog") return HandlePublishLog(req, respJson, cap);
-    if (cmd == "mainWindow") return HandleMainWindow(respJson, cap);
-    if (cmd == "viewWindow") return HandleViewWindow(respJson, cap);
-    if (cmd == "scale")      return HandleScale(respJson, cap);
-    if (cmd == "grabFrame")  return HandleGrabFrame(respJson, cap);
-    if (cmd == "onUiThread") return RespErr(respJson, cap, 501, "onUiThread not implemented");
+    if (std::strcmp(cmd, "publishLog") == 0) return HandlePublishLog(req, respJson, cap);
+    if (std::strcmp(cmd, "mainWindow") == 0) return HandleMainWindow(respJson, cap);
+    if (std::strcmp(cmd, "viewWindow") == 0) return HandleViewWindow(respJson, cap);
+    if (std::strcmp(cmd, "scale") == 0)      return HandleScale(respJson, cap);
+    if (std::strcmp(cmd, "grabFrame") == 0)  return HandleGrabFrame(respJson, cap);
+    if (std::strcmp(cmd, "onUiThread") == 0) return RespErr(respJson, cap, 501, "onUiThread not implemented");
     return RespErr(respJson, cap, 404, "unknown command");
 }
 
@@ -132,14 +151,18 @@ bool ProtocolStart(HMODULE frameworkDll, const HostContext& host) {
 
     // Hand platform its reverse-call pointer. The reply is best-effort: a
     // missing init reply does not break the forward path.
-    ppjson::Value init = ppjson::Value::Obj();
-    init.Set("cmd", ppjson::Value::Str("init"));
-    init.Set("dispatch",
-             ppjson::Value::Str(PtrToString(reinterpret_cast<const void*>(&BaseDispatch))));
-    init.Set("ctx", ppjson::Value::Str("0"));
+    ppjson::Pool pool;
+    char dispatch[32] = {};
+    PtrToStr(reinterpret_cast<const void*>(&BaseDispatch), dispatch, sizeof(dispatch));
+    ppjson::Value init = ppjson::MakeObj(pool);
+    ppjson::ObjSetStr(pool, init, "cmd", "init");
+    ppjson::ObjSetStr(pool, init, "dispatch", dispatch);
+    ppjson::ObjSetStr(pool, init, "ctx", "0");
+    char req[512] = {};
+    init.Dump(req, sizeof(req));
 
     char resp[4096] = {};
-    const int n = g_platform(init.Dump().c_str(), resp, static_cast<int>(sizeof(resp)));
+    const int n = g_platform(req, resp, static_cast<int>(sizeof(resp)));
     Log("protocol: init -> n=%d resp=%s", n, (n >= 0) ? resp : "(too large)");
     return true;
 }
