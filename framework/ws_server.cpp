@@ -75,10 +75,32 @@ void WsServer::on_ws_close(const mg_connection* conn, void* cbdata) {
   LogTagged("framework", "websocket client disconnected");
 }
 
-int WsServer::on_ws_data(mg_connection* conn, int /*bits*/, char* data,
+int WsServer::on_ws_data(mg_connection* conn, int bits, char* data,
                          size_t len, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
-  if (conn == nullptr || data == nullptr || len >= static_cast<size_t>(kMsgCap)) {
+  if (conn == nullptr) {
+    return 1;
+  }
+
+  // CivetWeb 把 close/ping/pong 帧也交给本回调（opcode 在 bits 低 4 位），
+  // 它们不是命令文本。以前一律当文本处理，close 帧的状态码（1000 => 0x03 0xE8）
+  // 被 %s 打成一行乱码 "recv: ?"，还会往正在关闭的连接回一条 bad json。
+  const int opcode = bits & 0x0F;
+  if (opcode == MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE) {
+    int code = 1005;  // 帧内没带状态码
+    if (data != nullptr && len >= 2) {
+      code = (static_cast<unsigned char>(data[0]) << 8) |
+             static_cast<unsigned char>(data[1]);
+    }
+    LogTagged("framework", "websocket close frame from client, code=%d", code);
+    return 1;
+  }
+  if (opcode != MG_WEBSOCKET_OPCODE_TEXT &&
+      opcode != MG_WEBSOCKET_OPCODE_CONTINUATION &&
+      opcode != MG_WEBSOCKET_OPCODE_BINARY) {
+    return 1;  // ping/pong 由 CivetWeb 自动处理，其余忽略
+  }
+  if (data == nullptr || len >= static_cast<size_t>(kMsgCap)) {
     return 1;
   }
   // 复制到 NUL 结尾的缓冲，供解析与日志使用。
