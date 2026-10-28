@@ -28,3 +28,6 @@ build/
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Agent / tooling
+.codebuddy/
