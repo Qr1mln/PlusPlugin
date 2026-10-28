@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <cstdio>
 #include <cwchar>
 #include <cstring>
 #include <cwctype>
@@ -175,48 +176,6 @@ char* NextLine(char** cursor) {
         line[len - 1] = '\0';
     }
     return line;
-}
-
-// --- path resolution --------------------------------------------------------
-
-const wchar_t* ModuleDir() {
-    static wchar_t dir[kConfigDirChars] = {};
-    static const bool init = [] {
-        HMODULE self = nullptr;
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&ModuleDir), &self);
-        if (self == nullptr) {
-            return true;
-        }
-        wchar_t buf[kConfigDirChars] = {};
-        if (GetModuleFileNameW(self, buf, kConfigDirChars) == 0) {
-            return true;
-        }
-        wchar_t* slash = wcsrchr(buf, L'\\');
-        if (slash == nullptr) {
-            return true;
-        }
-        *slash = L'\0';
-        CopyWide(dir, kConfigDirChars, buf);
-        return true;
-    }();
-    (void)init;
-    return dir;
-}
-
-const wchar_t* VersionIniPath() {
-    static wchar_t path[kConfigDirChars] = {};
-    static const bool init = [] {
-        const wchar_t* dir = ModuleDir();
-        if (dir[0] == L'\0') {
-            return true;
-        }
-        swprintf_s(path, kConfigDirChars, L"%s\\%s", dir, kIniName);
-        return true;
-    }();
-    (void)init;
-    return path;
 }
 
 // --- version.ini value reads ------------------------------------------------
@@ -433,6 +392,50 @@ int ReadLoaderSectionLines(wchar_t out[][kMaxDllNameChars], int cap) {
 }
 
 }  // namespace
+
+// --- path resolution --------------------------------------------------------
+// Defined at namespace scope (declared in config.h) so the whole translation
+// unit, and the rest of the proxy, share one definition.
+
+const wchar_t* ModuleDir() {
+    static wchar_t dir[kConfigDirChars] = {};
+    static const bool init = [] {
+        HMODULE self = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&ModuleDir), &self);
+        if (self == nullptr) {
+            return true;
+        }
+        wchar_t buf[kConfigDirChars] = {};
+        if (GetModuleFileNameW(self, buf, kConfigDirChars) == 0) {
+            return true;
+        }
+        wchar_t* slash = wcsrchr(buf, L'\\');
+        if (slash == nullptr) {
+            return true;
+        }
+        *slash = L'\0';
+        CopyWide(dir, kConfigDirChars, buf);
+        return true;
+    }();
+    (void)init;
+    return dir;
+}
+
+const wchar_t* VersionIniPath() {
+    static wchar_t path[kConfigDirChars] = {};
+    static const bool init = [] {
+        const wchar_t* dir = ModuleDir();
+        if (dir[0] == L'\0') {
+            return true;
+        }
+        swprintf_s(path, kConfigDirChars, L"%s\\%s", dir, kIniName);
+        return true;
+    }();
+    (void)init;
+    return path;
+}
 
 bool DebugEnabled() {
     static const bool enabled = [] {

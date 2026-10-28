@@ -25,6 +25,7 @@
 //      所以加载器可以撤销整套回调后再 FreeLibrary。
 
 #include <windows.h>        // Win32 API：GetSystemDirectoryW / LoadLibraryW / CreateThread 等
+#include <cstdio>           // swprintf_s：拼真身 DLL 的绝对路径
 
 #include "bootstrap.h"      // PayloadThread 声明
 #include "log.h"            // Log() 日志

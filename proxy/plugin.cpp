@@ -20,6 +20,10 @@
 
 #include <windows.h>
 
+#include <cstdio>
+#include <cstring>
+#include <cwchar>
+
 #include "../sdk/pplugin.h"
 
 #include "config.h"
