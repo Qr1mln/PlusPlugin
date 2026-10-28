@@ -20,7 +20,7 @@ ghost       version.dll     底座（导出转发 / D3D11 hook / 宿主能力 / 
 
 | 层 | DLL | 职责 | 边界符号 |
 |---|---|---|---|
-| **ghost** | `version.dll` | 代理转发、hook、宿主能力（`mainWindow`/`scale`/`publishLog`）、加载上层 | 提供 `NotifyGhost` |
+| **ghost** | `version.dll` | 代理转发、hook、宿主能力（`mainWindow`/`scale`）、加载上层 | 提供 `NotifyGhost` |
 | **platform** | `framework.dll` | WebSocket 服务、命令执行、调度 | 导出 `NotifyPlatform`，借用 `NotifyGhost` |
 | **user** | （概念） | 消费 platform 能力的一层 | 本轮不落地 |
 
@@ -85,8 +85,6 @@ sequenceDiagram
     Note over F: 启动 worker / WebSocket 线程
     V->>F: NotifyPlatform({cmd:"geometry"})
     F-->>V: {ok:true, ...}
-    F->>V: NotifyGhost({cmd:"publishLog", text})
-    V-->>F: {ok:true}
     V->>F: NotifyPlatform({cmd:"shutdown"})
     F-->>V: {ok:true}
     V->>F: FreeLibrary
@@ -111,7 +109,6 @@ sequenceDiagram
 |---|---|---|---|
 | `init` | `dispatch`(十进制指针串), `ctx`(十进制指针串), `ini`(对象, 可选) | `{"ok":true,"proto":1}` | 建立边界；platform 记下 `dispatch`/`ctx` 并启动线程 |
 | `shutdown` | — | `{"ok":true}` | 正常卸载前调用；platform 停止线程 |
-| `logLine` | `text` | `{"ok":true}` | ghost 主动把日志推给 platform（可选） |
 
 `init` 示例（指针用**十进制字符串**传，避免 JSON number 精度问题）：
 
@@ -123,15 +120,14 @@ sequenceDiagram
 
 | cmd | 参数 | 响应 | 对应旧 Host 能力 |
 |---|---|---|---|
-| `publishLog` | `text` | `{"ok":true}` | `publishLog` |
 | `mainWindow` | — | `{"ok":true,"hwnd":"12345"}` | `mainWindow` |
 | `viewWindow` | — | `{"ok":true,"hwnd":"12345"}` | `viewWindow` |
 | `scale` | — | `{"ok":true,"scale":1.25}` | `scale` |
 | `onUiThread` | `cmd`(转发的子命令) | 同子命令响应 | 新增：需要宿主线程时使用 |
 | `grabFrame` | `out`(十进制指针), `cap` | `{"ok":true,"w":..,"h":..,"format":..}` | 旁路，见 §8 |
 
-> 旧 `submitTask` / `subscribeLog` 不再作为边界能力：platform 自持 worker 线程；
-> 日志改由 platform 单向 `publishLog`，ghost 若要推给 platform 用 `logLine`。
+> 旧 `submitTask` / `subscribeLog` / `publishLog` 不再作为边界能力：platform 自持 worker 线程，
+> 日志改由 ghost 与 platform 共用 `common/log` 模块直写同一 `proxy.log`，不再经协议往返。
 
 ## 8. 大二进制旁路
 

@@ -5,16 +5,15 @@
 //   浏览器 --WebSocket--> framework.dll --> 宿主窗口（动鼠标/按键/等待）--> 回日志
 //
 // 设计要点：
-//   - 作为 pplugin 插件，经 GetDesc/init(const Host*) 拿到 proxy 交来的能力
-//     （Host: publishLog / mainWindow / viewWindow / scale）。
+//   - 作为独立 DLL，由 version.dll 的 bootstrap 直接 LoadLibrary 后调 NotifyPlatform
+//     拿到宿主能力（Host: mainWindow / viewWindow / scale；日志走公共 log 模块）。
 //   - 用 CivetWeb（libs/civetweb，C，裸 TCP/WS，零协议风险）起一个
 //     127.0.0.1 的 WebSocket 服务端，URI 为 /ws；顺带把 DLL 所在目录当 document_root，
 //     可直接 http 托管 index.html。
 //   - 事件执行：鼠标/键盘/滚轮/文本走 PostMessage 后台投递到目标窗口（不动物理鼠标）。
-//   - 每条命令执行后，把日志写回 proxy.log（host->log）并通过 WS 回一个 JSON 包。
+//   - 每条命令执行后，把日志写进公共 log 模块（同一份 proxy.log）并通过 WS 回一个 JSON 包。
 //
 // 模块化拆分（见 framework/ 各 .h/.cpp）：
-//   logger          日志桥（host->publishLog）
 //   window_target   目标窗口 + 坐标换算 + 虚拟光标
 //   input_dispatcher 后台输入派发（PostMessage）
 //   script_store    脚本文件持久化（%APPDATA%\TTVoice\scripts）
@@ -34,15 +33,16 @@
 #include <cwchar>
 
 #include "../common/json_util.h"
+#include "../common/log.h"
 
 #include "civetweb.h"
 #include "command_handler.h"
 #include "input_dispatcher.h"
-#include "logger.h"
 #include "picker.h"
 #include "pplugin.h"
 #include "script_store.h"
 #include "ws_server.h"
+
 #include "window_target.h"
 
 namespace {
@@ -70,21 +70,18 @@ const char* ModuleDirUtf8() {
   return buf;
 }
 
-// 在 mg_start 之前自己先绑一次端口，把 WSA 错误号打进 proxy.log。
+// 在 mg_start 之前自己先绑一次端口，把结果打进 proxy.log（公共 log 模块）。
 // 这样即便 CivetWeb 没把 bind 失败原因通过 log_message 回调吐出来，也能定位
 // （例如 WSA=10048 表示端口已被占用）。
-static void ProbePort(const Host* host, int port) {
-  if (host == nullptr || host->publishLog == nullptr) {
-    return;
-  }
+static void ProbePort(int port) {
   WSADATA wd;
   if (WSAStartup(MAKEWORD(2, 2), &wd) != 0) {
-    host->publishLog("ProbePort: WSAStartup failed");
+    LogTagged("framework", "ProbePort: WSAStartup failed");
     return;
   }
   SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
   if (s == INVALID_SOCKET) {
-    host->publishLog("ProbePort: socket() failed");
+    LogTagged("framework", "ProbePort: socket() failed");
     WSACleanup();
     return;
   }
@@ -101,35 +98,34 @@ static void ProbePort(const Host* host, int port) {
     char buf[192];
     snprintf(buf, sizeof(buf),
              "ProbePort: bind 127.0.0.1:%d failed, WSA=%d", port, e);
-    host->publishLog(buf);
+    LogTagged("framework", "%s", buf);
   } else {
     char buf[192];
     snprintf(buf, sizeof(buf), "ProbePort: bind 127.0.0.1:%d ok (端口可用)",
              port);
-    host->publishLog(buf);
+    LogTagged("framework", "%s", buf);
   }
   closesocket(s);
   WSACleanup();
 }
 
 // 组合根：持有全部子模块。成员按依赖顺序声明，使引用成员的构造先于使用。
-//   Logger / WindowTarget / ScriptStore 无依赖；InputDispatcher 依赖 WindowTarget；
-//   CommandHandler 依赖 Logger/WindowTarget/InputDispatcher；WsServer 依赖
-//   Logger/CommandHandler/ScriptStore。
+//   WindowTarget / ScriptStore 无依赖；InputDispatcher 依赖 WindowTarget；
+//   CommandHandler 依赖 WindowTarget/InputDispatcher；WsServer 依赖
+//   CommandHandler/ScriptStore。日志统一走公共 log 模块（组件 framework）。
 class Framework {
  public:
-  Framework() : input_(win_), handler_(log_, win_, input_) {}
+  Framework() : input_(win_), handler_(win_, input_) {}
 
   int start(const Host* host, const char* doc_root, int port) {
-    log_.set_host(host);
     win_.set_host(host);
-    ProbePort(host, port);  // 先自测端口是否可绑定（结果见 proxy.log）
-    if (!server_.start(log_, handler_, scripts_, doc_root, port)) {
-      host->publishLog("mg_start failed");
+    ProbePort(port);  // 先自测端口是否可绑定（结果见 proxy.log）
+    if (!server_.start(handler_, scripts_, doc_root, port)) {
+      LogTagged("framework", "mg_start failed");
       return ERR_STATE;
     }
     if (!PickerStart(host, &PickerSend)) {
-      host->publishLog("picker: start failed");
+      LogTagged("framework", "picker: start failed");
     }
     return P_OK;
   }
@@ -147,11 +143,10 @@ class Framework {
   }
 
  private:
-  Logger log_;
   WindowTarget win_;
   InputDispatcher input_;  // 依赖 win_
   ScriptStore scripts_;
-  CommandHandler handler_;  // 依赖 log_/win_/input_/scripts_
+  CommandHandler handler_;  // 依赖 win_/input_/scripts_
   WsServer server_;
 };
 
@@ -159,14 +154,12 @@ Framework g_fw;
 
 }  // namespace
 
-// pplugin 插件入口：Desc::init(const Host*) 由 framework 的 plugin_loader 调用。
+// 旧 pplugin 插件入口（Desc::init）：仅当 framework 被当作 pplugin 加载时才走这里；
+// 新链路由 NotifyPlatform 直连，不走此路径。两种入口都让框架日志走公共 log 模块。
 static int __cdecl PluginInit(const Host* host) {
   if (host == nullptr || host->abi != P_ABI ||
       host->structSize < sizeof(Host)) {
     return ERR_STATE;
-  }
-  if (host->publishLog == nullptr) {
-    return ERR_PARAM;
   }
 
   const int port = 47801;
@@ -176,7 +169,7 @@ static int __cdecl PluginInit(const Host* host) {
     char ok[512] = {};
     std::snprintf(ok, sizeof(ok), "started, ws=ws://127.0.0.1:47801/ws doc_root=%s",
                   doc_root);
-    host->publishLog(ok);
+    LogTagged("framework", "%s", ok);
   }
   return rc;
 }
@@ -207,7 +200,7 @@ extern "C" __declspec(dllexport) const Desc* __cdecl GetDesc(void) {
 //
 // 不再需要 GetDesc/pplugin：version.dll 直接 LoadLibrary(framework.dll) 后调
 // NotifyPlatform。这里把 ghost 交来的 dispatch 指针包成一张 Host 表，复用现有
-// 子模块（logger/window_target 只认 Host*），从而零改动接入新链路。
+// 子模块（window_target 只认 Host*），从而零改动接入新链路。
 // GetDesc 暂时保留，等新链路验证通过后再退役。
 // ============================================================================
 namespace {
@@ -241,18 +234,6 @@ bool CallBase(const char* req, char* out, int cap) {
     return false;
   }
   return true;
-}
-
-void __cdecl DispatchPublishLog(const char* text) {
-  ppjson::Node nodes[8] = {};
-  ppjson::Pool pool(nodes, 8);
-  ppjson::Value j = ppjson::Value::Obj(pool);
-  j.SetStr("cmd", "publishLog");
-  j.SetStr("text", (text != nullptr) ? text : "");
-  char buf[1024] = {};
-  j.Dump(buf, sizeof(buf));
-  char resp[128] = {};
-  CallBase(buf, resp, sizeof(resp));  // 响应忽略，仅转发日志
 }
 
 // 调 base 取一个 hwnd（"mainWindow"/"viewWindow"），解析 {"hwnd":"..."}。
@@ -295,7 +276,7 @@ float __cdecl DispatchScale() {
 const Host g_hostViaDispatch = {
     P_ABI,
     static_cast<uint32_t>(sizeof(Host)),
-    &DispatchPublishLog,
+    nullptr,            // publishLog：框架日志改由公共 log 模块直写，不再经 ghost 回传
     &DispatchMainWindow,
     &DispatchViewWindow,
     &DispatchScale,
@@ -308,7 +289,7 @@ int StartViaProtocol() {
   const char* doc_root = ModuleDirUtf8();
   const int rc = g_fw.start(&g_hostViaDispatch, doc_root, port);
   if (rc == P_OK) {
-    DispatchPublishLog("framework started via protocol (NotifyPlatform)");
+    LogTagged("framework", "framework started via protocol (NotifyPlatform)");
   }
   return rc;
 }

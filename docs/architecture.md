@@ -1,6 +1,6 @@
 # PlusPlugin 架构（粗粒度）
 
-> 浏览器通过 WebSocket 遥控 TTVoice 宿主窗口。`version.dll`(proxy) 提供宿主能力并热加载插件；`framework.dll` 以 pplugin 插件形式提供 WS 服务端与命令执行。
+> 浏览器通过 WebSocket 遥控 TTVoice 宿主窗口。`version.dll`(proxy) 提供宿主能力并直接加载 `framework.dll`；`framework.dll` 提供 WS 服务端与命令执行，两者共用 `common/log` 模块写同一份 `proxy.log`。
 
 ## 分层图
 
@@ -9,15 +9,16 @@ flowchart LR
   B["浏览器\nindex.html"] -- "WebSocket JSON\n127.0.0.1:47801/ws" --> F
 
   subgraph H["TTVoice.exe 宿主进程"]
-    V["version.dll (proxy)\nHost: publishLog / mainWindow / viewWindow / scale\n热加载: plugin_loader ← version.ini [loaders]"]
-    F["framework.dll (pplugin 插件)\nGetDesc → init(Host*)\nws + 命令执行"]
+    V["version.dll (proxy)\n宿主能力: mainWindow / viewWindow / scale\n直接 LoadLibrary(framework.dll)"]
+    F["framework.dll\nNotifyPlatform(JSON) 握手\nws + 命令执行(PostMessage)"]
     W["Flutter 窗口\nmainWindow → viewWindow"]
 
-    V -- "GetDesc → init(Host*)" --> F
-    F -- "SendInput" --> W
+    V -- "LoadLibrary + NotifyPlatform" --> F
+    F -- "PostMessage" --> W
   end
 
-  F -- "publishLog → Log()" --> L[("proxy.log")]
+  V -- "common/log 写" --> L[("proxy.log")]
+  F -- "common/log 写" --> L
 ```
 
 ## ASCII 版
@@ -28,17 +29,17 @@ flowchart LR
    ▼
 ┌────────────────────────── TTVoice.exe 宿主进程 ──────────────────────────┐
 │ version.dll (proxy)                                                      │
-│   Host: publishLog / mainWindow / viewWindow / scale                     │
-│   plugin_loader: 读 version.ini [loaders]，逐行 DLL，从 ModuleDir() 加载  │
-│        │ GetDesc → init(Host*)                                           │
+│   bootstrap: 直接 LoadLibrary(framework.dll) → NotifyPlatform(JSON) 握手  │
+│   Host 能力: mainWindow / viewWindow / scale（不含 publishLog）          │
+│        │                                                                 │
 │        ▼                                                                 │
-│ framework.dll (pplugin 插件)                                             │
-│   CivetWeb :47801 (/ws) + 命令执行(mouse/key/delay/geometry)             │
-│        │ SendInput                                                       │
+│ framework.dll                                                            │
+│   CivetWeb :47801 (/ws) + 命令执行(mouse/key/delay/geometry, PostMessage)│
+│        │ PostMessage                                                     │
 │        ▼                                                                 │
 │ Flutter 窗口 (mainWindow → viewWindow)                                   │
 │                                                                          │
-│ 日志: [HH:MM:SS.mmm]-[proxy|framework] ...    → proxy.log                │
+│ 日志: [HH:MM:SS.mmm]-[proxy|framework] ...    → proxy.log（共用 common/log）│
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,20 +47,17 @@ flowchart LR
 
 | 组件 | 提供 |
 |---|---|
-| **proxy** (`version.dll`) | Host 能力表 `{publishLog, mainWindow, viewWindow, scale}`；热加载（`plugin_loader`，见下） |
-| **framework** (`framework.dll`) | pplugin 插件：`ws` 服务端、命令执行（后台）、`publishLog` 回日志 |
+| **proxy** (`version.dll`) | 宿主能力表 `{mainWindow, viewWindow, scale}`；直接 `LoadLibrary(framework.dll)` 并走 `NotifyPlatform` 协议；日志走 `common/log`（`[proxy]`） |
+| **framework** (`framework.dll`) | `ws` 服务端、后台命令执行（`PostMessage`）；日志走 `common/log`（`[framework]`）；`publishLog` 仅保留给 `plugin/` 下的插件，框架自身不再经它回写 |
 
-## 插件加载 / 热加载
+## 插件加载 / 热加载（`plugin/` 下的脚本插件，非 framework）
 
-- `version.ini`：
-  ```ini
-  [loaders]
-  framework.dll
-  framework2.dll
-  ```
-- `plugin_loader` 逐行读取，从 `ModuleDir()`（`%APPDATA%\TTVoice`）加载；
-- DLL 必须导出 `GetDesc`（`pplugin.h`，`P_ABI v4`），校验 `abi`/`structSize` 后调 `Desc::init(const Host*)`；
-- `WatchPlugins()` 每 500ms 比对 DLL 写时间，变化则 卸载 + 重载（热加载）。
+- `framework.dll` **不走此路径**：它由 proxy 的 `bootstrap` 在进程启动时直接 `LoadLibrary`，经 `NotifyPlatform` JSON 握手加载，**不支持热重载**（改 framework.dll 须重启 TTVoice）。
+- `plugin/`（如 `script-engine`/`console`/`example`）才是 pplugin 插件，仍走旧 `plugin_loader`：
+  - `version.ini [loaders]` 逐行 DLL 名，从 `ModuleDir()`（`%APPDATA%\TTVoice`）加载；
+  - DLL 导出 `GetDesc`（`pplugin.h`，`P_ABI v4`），校验后调 `Desc::init(const Host*)`；
+  - `WatchPlugins()` 每 500ms 比对 DLL 写时间，变化则 卸载 + 重载（热加载）；
+  - 插件经 `Host::publishLog` 把日志回写给框架（这是 `publishLog` 字段仅剩的用途）。
 
 ## WS 协议
 
@@ -130,10 +128,10 @@ editor2 的「添加/修改事件」弹窗（仅 `mouse` 类型）开着时约 7
 ## 日志格式
 
 ```
-[HH:MM:SS.mmm]-[proxy|framework|platform] <正文>
+[HH:MM:SS.mmm]-[proxy|framework] <正文>
 ```
-- proxy 侧（`Log`）打 `[proxy]`；framework 自身打 `[framework]`；framework 经 `Host::publishLog` 回写打 `[platform]`；
-- 加载时由 proxy 打 `fw:` / `proto:` 等前缀；写入 `%APPDATA%\TTVoice\proxy.log`。
+- proxy 与 framework 共用 `common/log` 模块，分别打 `[proxy]` / `[framework]`，写入同一 `%APPDATA%\TTVoice\proxy.log`；
+- 加载握手时 proxy 还会打 `fw:` / `proto:` 等前缀；framework 不再经 `publishLog` 回写（已去掉订阅/发布往返）。
 
 ## 构建 / 部署
 

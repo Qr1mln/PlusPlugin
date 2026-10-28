@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../common/log.h"
+
 namespace {
 
 const Host* g_host = nullptr;
@@ -73,9 +75,7 @@ void LogLine(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     buf[sizeof(buf) - 1] = 0;
-    if (g_host != nullptr && g_host->publishLog != nullptr) {
-        g_host->publishLog(buf);
-    }
+    LogTagged("framework", "%s", buf);
 }
 
 // 目标窗口：优先 viewWindow（真正收输入的 Flutter 子窗口），回退 mainWindow。

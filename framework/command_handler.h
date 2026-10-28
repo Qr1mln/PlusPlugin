@@ -16,13 +16,12 @@
 
 #include "window_target.h"
 
-class Logger;
 class InputDispatcher;
 
 class CommandHandler {
  public:
-  CommandHandler(Logger& log, WindowTarget& win, InputDispatcher& input)
-      : log_(log), win_(win), input_(input) {}
+  CommandHandler(WindowTarget& win, InputDispatcher& input)
+      : win_(win), input_(input) {}
 
   // 解析并分发一条命令（msg 为 NUL 结尾 UTF-8）。响应写入 out，返回字节数
   // （>=0），或 -(need+1)（out 不够）。conn 为发起连接（cursor watch/pick 需要）。
@@ -35,7 +34,6 @@ class CommandHandler {
   static int make_reply(ppjson::Pool& pool, char* out, int cap, const char* id,
                         bool success, ppjson::Value data, const char* code);
 
-  Logger& log_;
   WindowTarget& win_;
   InputDispatcher& input_;
 };

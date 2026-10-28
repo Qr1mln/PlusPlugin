@@ -62,12 +62,6 @@ void PtrToStr(const void* ptr, char* out, int cap) {
 
 // --- handlers for platform -> ghost commands --------------------------------
 
-int HandlePublishLog(ppjson::Value req, char* resp, int cap) {
-    ppjson::Value text = req.Find("text");
-    LogTagged("platform", "%s", text.AsStr());
-    return RespOk(resp, cap);
-}
-
 int HandleMainWindow(char* resp, int cap) {
     ppjson::Node poolNodes[32] = {};
     ppjson::Pool pool(poolNodes, 32);
@@ -126,7 +120,6 @@ int __cdecl NotifyGhost(const char* reqJson, char* respJson, int cap, void* ctx)
     }
     const char* cmd = req.Find("cmd").AsStr();
 
-    if (std::strcmp(cmd, "publishLog") == 0) return HandlePublishLog(req, respJson, cap);
     if (std::strcmp(cmd, "mainWindow") == 0) return HandleMainWindow(respJson, cap);
     if (std::strcmp(cmd, "viewWindow") == 0) return HandleViewWindow(respJson, cap);
     if (std::strcmp(cmd, "scale") == 0)      return HandleScale(respJson, cap);

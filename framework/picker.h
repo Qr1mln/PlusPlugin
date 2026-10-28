@@ -32,7 +32,7 @@
 // 把一帧文本写给某个 WS 连接（由 framework.cpp 用 mg_websocket_write 实现）。
 using PickerBroadcast = void (*)(void* conn, const char* data, size_t len);
 
-// 启动/停止推送线程。host 里的 publishLog 用于写 proxy.log，broadcast 用于下发。
+// 启动/停止推送线程。日志走公共 log 模块（组件 framework），broadcast 用于下发。
 bool PickerStart(const Host* host, PickerBroadcast broadcast);
 void PickerStop();          // 停线程并等待退出（PluginShutdown 用）
 void PickerRequestStop();   // 只发退出信号、不等待（DllMain 里不能 join）

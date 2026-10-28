@@ -124,11 +124,11 @@ def proxy_build(client):
         sftp.close()
 
     # 去掉 CRLF（Linux 下 GAS 不喜欢），汇编桩，再用 mingw 链接 exports.def。
-    # 注意：远端 proxy/ 可能残留旧架构的 json_util.{cpp,h}（与 common/ 头不一致，
-    # 会被 *.cpp 一并编入导致运行时访问违例）。先删掉它们，改用 common/json_util.cpp
-    # （与 protocol.cpp 用的 ../common/json_util.h 同一份实现）。
+    # 注意：远端 proxy/ 可能残留旧架构的 json_util.{cpp,h} 或旧版 log.{cpp,h}
+    # （与 common/ 头不一致，会被 *.cpp 一并编入导致运行时访问违例 / 符号重定义）。
+    # 先删掉它们，改用 common/ 的实现（json_util.cpp + log.cpp）。
     cmd = (
-        f"cd {REMOTE_PROXY} && rm -f json_util.cpp json_util.h && "
+        f"cd {REMOTE_PROXY} && rm -f json_util.cpp json_util.h log.cpp log.h && "
         f"for f in *.cpp *.S; do [ -e \"$f\" ] && sed -i 's/\\r$//' \"$f\"; done && "
         f"x86_64-w64-mingw32-as -o stubs.o stubs.S && "
         f"x86_64-w64-mingw32-g++ -std=c++17 -Os -shared -static "
@@ -136,7 +136,7 @@ def proxy_build(client):
         f"-static-libgcc -static-libstdc++ "
         f"-Wl,--gc-sections -s "
         f"-I{REMOTE_ROOT} -I{REMOTE_ROOT}/common "
-        f"-o version.dll *.cpp ../common/json_util.cpp stubs.o exports.def -luser32"
+        f"-o version.dll *.cpp ../common/json_util.cpp ../common/log.cpp stubs.o exports.def -luser32"
     )
     status, out = run_status(client, cmd)
     if out.strip():

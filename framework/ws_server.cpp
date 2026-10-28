@@ -8,9 +8,10 @@
 
 #include "civetweb.h"
 #include "command_handler.h"
-#include "logger.h"
 #include "picker.h"
 #include "script_store.h"
+
+#include "../common/log.h"
 
 namespace {
 const char* kOk = "0000";
@@ -22,14 +23,10 @@ const int kMsgCap = 16384;     // 一帧命令文本上限
 const int kBodyCap = 4 * 1024 * 1024;  // 请求体上限（与原 4MB 一致）
 }  // namespace
 
-WsServer* WsServer::g_log_self_ = nullptr;
-
-bool WsServer::start(Logger& log, CommandHandler& handler, ScriptStore& scripts,
+bool WsServer::start(CommandHandler& handler, ScriptStore& scripts,
                      const char* doc_root, int port) {
-  log_ = &log;
   handler_ = &handler;
   scripts_ = &scripts;
-  g_log_self_ = this;
 
   std::snprintf(port_opt_, sizeof(port_opt_), "127.0.0.1:%d", port);
   const char* options[] = {
@@ -44,7 +41,7 @@ bool WsServer::start(Logger& log, CommandHandler& handler, ScriptStore& scripts,
   cb.log_message = &on_log;
   ctx_ = mg_start(&cb, this, options);
   if (ctx_ == nullptr) {
-    log_->publish("mg_start failed");
+    LogTagged("framework", "mg_start failed");
     return false;
   }
   mg_set_websocket_handler(ctx_, "/ws", &on_ws_connect, &on_ws_ready,
@@ -69,13 +66,13 @@ int WsServer::on_ws_connect(const mg_connection*, void* /*cbdata*/) {
 void WsServer::on_ws_ready(mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
   PickerAddClient(static_cast<void*>(conn));
-  self->log_->publish("websocket client connected");
+  LogTagged("framework", "websocket client connected");
 }
 
 void WsServer::on_ws_close(const mg_connection* conn, void* cbdata) {
   auto* self = static_cast<WsServer*>(cbdata);
   PickerRemoveClient(const_cast<mg_connection*>(conn));
-  self->log_->publish("websocket client disconnected");
+  LogTagged("framework", "websocket client disconnected");
 }
 
 int WsServer::on_ws_data(mg_connection* conn, int /*bits*/, char* data,
@@ -91,7 +88,7 @@ int WsServer::on_ws_data(mg_connection* conn, int /*bits*/, char* data,
 
   // 取点轮询频繁，跳过回显。
   if (std::strstr(msg, "\"cursor\"") == nullptr) {
-    self->log_->publish("recv: %s", msg);
+    LogTagged("framework", "recv: %s", msg);
   }
   char reply[kReplyCap] = {};
   const int n = self->handler_->handle(msg, reply, kReplyCap, conn);
@@ -103,8 +100,8 @@ int WsServer::on_ws_data(mg_connection* conn, int /*bits*/, char* data,
 }
 
 int WsServer::on_log(const mg_connection*, const char* message) {
-  if (g_log_self_ != nullptr && message != nullptr) {
-    g_log_self_->log_->publish_line_prefix("civetweb: ", message);
+  if (message != nullptr) {
+    LogTagged("framework", "civetweb: %s", message);
   }
   return 1;
 }

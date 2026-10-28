@@ -1,8 +1,8 @@
 // ============================================================================
 // ws_server.h - CivetWeb 封装：WS 端点 /ws + HTTP REST 端点。
 //
-// 只负责网络层：把 CivetWeb 的 C 回调转成成员调用，再转发给 Logger /
-// CommandHandler / ScriptStore。无 STL：参数/缓冲用 const char* / char[]。
+// 只负责网络层：把 CivetWeb 的 C 回调转成成员调用，再转发给 CommandHandler /
+// ScriptStore。日志统一走公共 log 模块。无 STL：参数/缓冲用 const char* / char[]。
 // ============================================================================
 #ifndef FRAMEWORK_WS_SERVER_H
 #define FRAMEWORK_WS_SERVER_H
@@ -14,15 +14,14 @@
 struct mg_context;
 struct mg_connection;
 
-class Logger;
 class CommandHandler;
 class ScriptStore;
 
 class WsServer {
  public:
   // 启动 CivetWeb：监听 127.0.0.1:<port>，doc_root 用于托管静态文件。
-  bool start(Logger& log, CommandHandler& handler, ScriptStore& scripts,
-             const char* doc_root, int port);
+  bool start(CommandHandler& handler, ScriptStore& scripts, const char* doc_root,
+             int port);
 
   void stop() noexcept;
 
@@ -46,12 +45,9 @@ class WsServer {
   static void send_json(mg_connection* conn, ppjson::Value resp);
 
   mg_context* ctx_ = nullptr;
-  Logger* log_ = nullptr;
   CommandHandler* handler_ = nullptr;
   ScriptStore* scripts_ = nullptr;
   char port_opt_[32] = {};  // "127.0.0.1:<port>"，mg_start 期间保持有效
-
-  static WsServer* g_log_self_;
 };
 
 #endif  // FRAMEWORK_WS_SERVER_H

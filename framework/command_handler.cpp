@@ -6,9 +6,10 @@
 #include <cstring>
 
 #include "input_dispatcher.h"
-#include "logger.h"
 #include "picker.h"
 #include "window_target.h"
+
+#include "../common/log.h"
 
 namespace {
 const char* kOk = "0000";
@@ -85,7 +86,7 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
       const int dx = static_cast<int>(cmd.Find("dx").AsInt(0));
       const int dy = static_cast<int>(cmd.Find("dy").AsInt(0));
       input_.move(dx, dy);
-      log_.publish("mouse move dx=%d dy=%d", dx, dy);
+      LogTagged("framework", "mouse move dx=%d dy=%d", dx, dy);
     } else if (std::strcmp(sub, "moveTo") == 0) {
       const int x = static_cast<int>(cmd.Find("x").AsInt(-1));
       const int y = static_cast<int>(cmd.Find("y").AsInt(-1));
@@ -94,21 +95,21 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
                           ppjson::Value::Str(pool, "moveTo needs x,y"), kErr);
       }
       input_.move_to(x, y, space);
-      log_.publish("mouse moveTo %s=%d,%d", space, x, y);
+      LogTagged("framework", "mouse moveTo %s=%d,%d", space, x, y);
     } else if (std::strcmp(sub, "click") == 0) {
       const int x = static_cast<int>(cmd.Find("x").AsInt(-1));
       const int y = static_cast<int>(cmd.Find("y").AsInt(-1));
       input_.click(x, y, space, button);
-      log_.publish("mouse click %s=%d,%d button=%s", space, x, y, button);
+      LogTagged("framework", "mouse click %s=%d,%d button=%s", space, x, y, button);
     } else if (std::strcmp(sub, "down") == 0 || std::strcmp(sub, "up") == 0) {
       const int x = static_cast<int>(cmd.Find("x").AsInt(-1));
       const int y = static_cast<int>(cmd.Find("y").AsInt(-1));
       input_.button(x, y, space, button, std::strcmp(sub, "down") == 0);
-      log_.publish("mouse %s %s=%d,%d button=%s", sub, space, x, y, button);
+      LogTagged("framework", "mouse %s %s=%d,%d button=%s", sub, space, x, y, button);
     } else if (std::strcmp(sub, "scroll") == 0) {
       const int delta = static_cast<int>(cmd.Find("delta").AsInt(0));
       input_.scroll(delta);
-      log_.publish("mouse scroll delta=%d", delta);
+      LogTagged("framework", "mouse scroll delta=%d", delta);
     } else {
       return make_reply(pool, out, cap, id, false,
                         ppjson::Value::Str(pool, "unknown mouse action"), kErr);
@@ -122,7 +123,7 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
       return make_reply(pool, out, cap, id, false, ppjson::Value::Str(pool, "invalid vk"), kErr);
     }
     input_.key(static_cast<WORD>(vk));
-    log_.publish("key vk=%d", vk);
+    LogTagged("framework","key vk=%d", vk);
     return make_reply(pool, out, cap, id, true, ppjson::Value(), kOk);
   }
 
@@ -133,14 +134,14 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
                         ppjson::Value::Str(pool, "text is empty"), kErr);
     }
     input_.text(text);
-    log_.publish("text len=%d", static_cast<int>(std::strlen(text)));
+    LogTagged("framework","text len=%d", static_cast<int>(std::strlen(text)));
     return make_reply(pool, out, cap, id, true, ppjson::Value(), kOk);
   }
 
   if (std::strcmp(category, "delay") == 0) {
     const int ms = static_cast<int>(cmd.Find("ms").AsInt(0));
     input_.delay(ms);
-    log_.publish("delay ms=%d", ms);
+    LogTagged("framework","delay ms=%d", ms);
     return make_reply(pool, out, cap, id, true, ppjson::Value(), kOk);
   }
 
@@ -157,7 +158,7 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
     if (std::strcmp(sub, "watch") == 0 || std::strcmp(sub, "unwatch") == 0) {
       const bool on = (std::strcmp(sub, "watch") == 0);
       const bool state = PickerSetWatch(conn, on);
-      log_.publish("cursor %s -> %s", sub, state ? "on" : "off");
+      LogTagged("framework", "cursor %s -> %s", sub, state ? "on" : "off");
       ppjson::Value d = ppjson::Value::Obj(pool);
       d.SetBool("watch", state);
       return make_reply(pool, out, cap, id, true, d, kOk);
@@ -176,12 +177,12 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
         return make_reply(pool, out, cap, id, false,
                           ppjson::Value::Str(pool, "push thread not running"), kErr);
       }
-      log_.publish("pick: start");
+      LogTagged("framework", "pick: start");
       return make_reply(pool, out, cap, id, true, ppjson::Value(), kOk);
     }
     if (std::strcmp(sub, "cancel") == 0 || std::strcmp(sub, "stop") == 0) {
       PickerCancelPick();
-      log_.publish("pick: cancel");
+      LogTagged("framework", "pick: cancel");
       return make_reply(pool, out, cap, id, true, ppjson::Value(), kOk);
     }
     return make_reply(pool, out, cap, id, false,
