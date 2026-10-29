@@ -42,6 +42,7 @@
 #include "picker.h"
 #include "script_store.h"
 #include "task_scheduler.h"
+#include "schedule_engine.h"
 #include "ws_server.h"
 
 #include "window_target.h"
@@ -120,16 +121,21 @@ static void ProbePort(int port) {
 //   CommandHandler/ScriptStore。日志统一走公共 log 模块（组件 framework）。
 class Framework {
  public:
-  Framework() : input_(win_), handler_(win_, input_), task_(win_, input_, scripts_) {}
+  Framework()
+      : input_(win_),
+        handler_(win_, input_),
+        task_(win_, input_, scripts_),
+        sched_(win_, input_, scripts_, task_) {}
 
   int start(const HostCaps* host, const char* doc_root, int port) {
     win_.set_host(host);
     ProbePort(port);  // 先自测端口是否可绑定（结果见 proxy.log）
-    if (!server_.start(handler_, scripts_, &task_, doc_root, port)) {
+    if (!server_.start(handler_, scripts_, &task_, &sched_, doc_root, port)) {
       LogTagged("framework", "mg_start failed");
       return kStartState;
     }
     handler_.set_task(&task_);
+    sched_.start();  // 加载 schedule.json 并启动触发线程
     if (!PickerStart(host, &PickerSend)) {
       LogTagged("framework", "picker: start failed");
     }
@@ -140,6 +146,7 @@ class Framework {
   void stop() {
     PickerStop();
     task_.stop_all();
+    sched_.stop_all();
     server_.stop();
   }
 
@@ -147,6 +154,7 @@ class Framework {
   void unload() {
     PickerRequestStop();
     task_.signal_stop();
+    sched_.signal_stop();
     server_.stop();
   }
 
@@ -156,6 +164,7 @@ class Framework {
   ScriptStore scripts_;
   CommandHandler handler_;  // 依赖 win_/input_/scripts_
   TaskScheduler task_;      // 依赖 win_/input_/scripts_
+  ScheduleEngine sched_;    // 依赖 win_/input_/scripts_/task_
   WsServer server_;
 };
 

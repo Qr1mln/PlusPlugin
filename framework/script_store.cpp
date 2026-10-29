@@ -189,6 +189,54 @@ void ScriptStore::read(ppjson::Pool& pool, const char* name,
   WriteOk(pool, out, parsed);
 }
 
+bool ScriptStore::safe_rel(const char* rel) {
+  if (rel == nullptr || rel[0] == '\0') return false;
+  if (std::strstr(rel, "..") != nullptr) return false;
+  for (const char* p = rel; *p != '\0'; ++p) {
+    const char c = *p;
+    if (c == '\\' || c == ':' || c == '/') {
+      // 只允许一个子目录分隔（'/'），其余非法
+      if (c != '/') return false;
+    }
+  }
+  return true;
+}
+
+void ScriptStore::read_rel(ppjson::Pool& pool, const char* relpath,
+                           ppjson::Value& out) const {
+  if (!safe_rel(relpath)) {
+    WriteFail(pool, out, "bad script path");
+    return;
+  }
+  wchar_t dir[kPathCap] = {};
+  if (!scripts_dir(dir, kPathCap)) {
+    WriteFail(pool, out, "script not found");
+    return;
+  }
+  wchar_t wide[512] = {};
+  if (!Utf8ToWide(relpath, wide, 512)) {
+    WriteFail(pool, out, "bad script path");
+    return;
+  }
+  wchar_t path[kPathCap] = {};
+  if (swprintf_s(path, kPathCap, L"%s\\%s.json", dir, wide) <= 0) {
+    WriteFail(pool, out, "script not found");
+    return;
+  }
+  char text[65536] = {};
+  if (read_text(path, text, sizeof(text)) < 0 || text[0] == '\0') {
+    WriteFail(pool, out, "script not found");
+    return;
+  }
+  ppjson::Value parsed;
+  char err[64] = {};
+  if (!ppjson::Value::Parse(text, pool, parsed, err, sizeof(err))) {
+    WriteFail(pool, out, "bad json");
+    return;
+  }
+  WriteOk(pool, out, parsed);
+}
+
 void ScriptStore::write(ppjson::Pool& pool, const char* name,
                         const char* payload, ppjson::Value& out) {
   ppjson::Value parsed;

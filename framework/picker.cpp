@@ -452,6 +452,11 @@ void PickerCancelPick() {
     QueuePick(jbuf, true);
 }
 
+// 广播任意一帧 JSON。非阻塞：拿不到锁就丢这一帧，避免任务/调度线程被 WS 写卡住。
+void PickerBroadcastText(const char* msg, int len) {
+    Broadcast(msg, len, false, false);
+}
+
 // 一次性光标读数：屏幕坐标、view 客户区物理像素、逻辑像素（x/scale）、窗口尺寸。
 bool PickerCursorInfo(ppjson::Value& out) {
     const HWND wnd = TargetWindow();

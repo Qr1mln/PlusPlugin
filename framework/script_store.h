@@ -17,9 +17,14 @@ class ScriptStore {
 
   void list(ppjson::Pool& pool, ppjson::Value& out) const;
   void read(ppjson::Pool& pool, const char* name, ppjson::Value& out) const;
+  // 读相对子目录下的脚本：relpath 形如 "subdir/name"（允许一个 '/'，禁止 '..'）。
+  void read_rel(ppjson::Pool& pool, const char* relpath, ppjson::Value& out) const;
   void write(ppjson::Pool& pool, const char* name, const char* payload,
              ppjson::Value& out);
   void remove(ppjson::Pool& pool, const char* name, ppjson::Value& out);
+
+  // 相对路径是否安全（允许单个子目录 + 文件名，无 '..' / '\\' / ':'）。
+  static bool safe_rel(const char* rel);
 
  private:
   // 拼出 <scriptsDir>\<name>.json 到 out（wchar）。返回 false 表示无法解析。

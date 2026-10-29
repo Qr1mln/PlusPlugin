@@ -12,6 +12,8 @@
 
 #include "command_handler.h"
 #include "picker.h"
+#include "schedule_engine.h"
+#include "schedule_store.h"
 #include "script_store.h"
 #include "task_scheduler.h"
 
@@ -21,7 +23,10 @@ namespace {
 const char* kOk = "0000";
 const char* kErr = "9999";
 
-const int kHttpPoolNodes = 256;
+// HTTP 响应的 JSON 池：定时任务最多 64 条、每条含脚本列表/触发条件（约 30 个
+// 节点），256 会在任务多时被耗尽 —— 池满后节点被静默丢弃，返回的 jobs 残缺，
+// 前端再保存就会把没返回的任务覆盖掉。这里放大到能装下 64 条任务全量。
+const int kHttpPoolNodes = 4096;
 const int kReplyCap = 16384;          // WS 响应缓冲（脚本列表等可能偏大）
 const int kMsgCap = 16384;            // 一帧命令文本上限
 const int kBodyCap = 4 * 1024 * 1024; // 请求体上限（与原 4MB 一致）
@@ -91,13 +96,25 @@ int SendOom(mg_connection* conn) {
 
 // on_http_tasks 用的轻量成功封套（与 script_store 的 WriteOk 同构，避免跨 TU 依赖）。
 void TaskReplyOk(ppjson::Pool& pool, ppjson::Value& out, ppjson::Value data);
+
+// 校验 body 为合法 {jobs:[...]} 并规范化写回 schedule.json（tmp + MoveFileEx）。
+// 具体解析与序列化在 ScheduleStore::save_text 里（只落持久化字段，丢弃 next/
+// next_run/running/pending 这些运行时字段）。
+bool SaveScheduleFile(const char* body) {
+  if (body == nullptr || body[0] == '\0') return false;
+  wchar_t path[640] = {};
+  if (!ScheduleStore::get_path(path, 640)) return false;
+  return ScheduleStore::save_text(path, body);
+}
 }  // namespace
 
 bool WsServer::start(CommandHandler& handler, ScriptStore& scripts,
-                     TaskScheduler* task, const char* doc_root, int port) {
+                     TaskScheduler* task, ScheduleEngine* sched,
+                     const char* doc_root, int port) {
   handler_ = &handler;
   scripts_ = &scripts;
   task_ = task;
+  sched_ = sched;
 
   std::snprintf(port_opt_, sizeof(port_opt_), "127.0.0.1:%d", port);
   const char* options[] = {
@@ -121,6 +138,7 @@ bool WsServer::start(CommandHandler& handler, ScriptStore& scripts,
   mg_set_request_handler(ctx_, "/api/app", &on_http_app, this);
   mg_set_request_handler(ctx_, "/api/cursor", &on_http_cursor, this);
   mg_set_request_handler(ctx_, "/api/tasks", &on_http_tasks, this);
+  mg_set_request_handler(ctx_, "/api/schedule", &on_http_schedule, this);
   return true;
 }
 
@@ -385,6 +403,82 @@ int WsServer::on_http_tasks(mg_connection* conn, void* cbdata) {
       resp.SetBool("success", false);
       resp.SetStr("data", "bad request");
       resp.SetStr("code", kErr);
+    }
+  }
+
+  send_json(conn, resp);
+  return 200;
+}
+
+int WsServer::on_http_schedule(mg_connection* conn, void* cbdata) {
+  auto* self = static_cast<WsServer*>(cbdata);
+  const struct mg_request_info* ri = mg_get_request_info(conn);
+  const char* method =
+      (ri != nullptr && ri->request_method != nullptr) ? ri->request_method : "GET";
+
+  HeapNodes hp(kHttpPoolNodes);
+  if (!hp.ok()) {
+    return SendOom(conn);
+  }
+  ppjson::Pool& pool = hp.pool;
+  ppjson::Value resp = ppjson::Value::Obj(pool);
+
+  if (std::strcmp(method, "GET") == 0) {
+    if (self->sched_ != nullptr) {
+      self->sched_->get_status(pool, resp);
+    } else {
+      ppjson::Value d = ppjson::Value::Obj(pool);
+      d.SetValue("jobs", ppjson::Value::Arr(pool));
+      TaskReplyOk(pool, resp, d);
+    }
+  } else if (std::strcmp(method, "POST") == 0) {
+    // 立即执行某任务：?job=<id>；或 ?action=reload 重新加载文件。
+    char jobBuf[64] = {};
+    bool hasJob = false;
+    char actBuf[32] = {};
+    bool hasAct = false;
+    if (ri != nullptr && ri->query_string != nullptr) {
+      const int ql = static_cast<int>(std::strlen(ri->query_string));
+      if (mg_get_var(ri->query_string, ql, "job", jobBuf, sizeof(jobBuf)) > 0) {
+        hasJob = true;
+      }
+      if (mg_get_var(ri->query_string, ql, "action", actBuf, sizeof(actBuf)) > 0) {
+        hasAct = true;
+      }
+    }
+    if (hasJob && self->sched_ != nullptr) {
+      const bool started = self->sched_->run_now(jobBuf);
+      resp.SetBool("success", started);
+      resp.SetStr("code", started ? kOk : kErr);
+      if (!started) resp.SetStr("data", "job not found or start failed");
+    } else if (hasAct && std::strcmp(actBuf, "reload") == 0 &&
+               self->sched_ != nullptr) {
+      self->sched_->reload();
+      self->sched_->get_status(pool, resp);
+    } else {
+      resp.SetBool("success", false);
+      resp.SetStr("data", "bad request");
+      resp.SetStr("code", kErr);
+    }
+  } else {  // PUT：保存整份配置（body 即 {jobs:[...]}），随后引擎重新加载。
+    if (self->sched_ == nullptr) {
+      resp.SetBool("success", false);
+      resp.SetStr("code", kErr);
+    } else {
+      const int bodyCap = RequestBodyCap(ri);
+      HeapText body(bodyCap);
+      if (!body.ok()) {
+        return SendOom(conn);
+      }
+      read_body(conn, ri, body.p, bodyCap);
+      if (SaveScheduleFile(body.p)) {
+        self->sched_->reload();
+        self->sched_->get_status(pool, resp);
+      } else {
+        resp.SetBool("success", false);
+        resp.SetStr("data", "save failed");
+        resp.SetStr("code", kErr);
+      }
     }
   }
 

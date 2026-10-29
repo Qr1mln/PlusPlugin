@@ -48,6 +48,10 @@ bool PickerSetWatch(void* conn, bool on);
 bool PickerBeginPick(bool topmost);
 void PickerCancelPick();
 
+// 把一帧 JSON 文本广播给所有 WS 连接（定时任务执行日志等主动推送用）。
+// msg 必须以 NUL 结尾；len 为有效字节数。
+void PickerBroadcastText(const char* msg, int len);
+
 // 一次性读数（与推送帧同 payload），供 /api/cursor 与 {"type":"cursor"} 复用。
 bool PickerCursorInfo(ppjson::Value& out);
 

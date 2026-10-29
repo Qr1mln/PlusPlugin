@@ -261,7 +261,7 @@ function onKeydown(e) {
 </script>
 
 <template>
-  <div v-if="open" class="mask" @mousedown.self="close">
+  <div v-if="props.open" class="mask" @mousedown.self="close">
     <div class="dlg" @keydown="onKeydown">
       <div class="title">{{ title }}</div>
 

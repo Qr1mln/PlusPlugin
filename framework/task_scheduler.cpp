@@ -4,17 +4,34 @@
 #include "task_scheduler.h"
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "../common/log.h"
 #include "input_dispatcher.h"
+#include "picker.h"
 #include "script_store.h"
 #include "window_target.h"
 
 namespace {
 const char* kOk = "0000";
 const char* kErr = "9999";
+
+// 任务执行日志：写 proxy.log 并广播给编辑器日志面板（{t:"log"}）。
+void TaskLog(const char* level, const char* text) {
+  if (text == nullptr) return;
+  LogTagged("framework", "task: %s", text);
+  ppjson::Node nodes[8] = {};
+  ppjson::Pool pool(nodes, 8);
+  ppjson::Value v = ppjson::Value::Obj(pool);
+  v.SetStr("t", "log");
+  v.SetStr("level", level != nullptr ? level : "info");
+  v.SetStr("text", text);
+  char buf[768] = {};
+  const int n = v.Dump(buf, sizeof(buf));
+  if (n > 0) PickerBroadcastText(buf, n);
+}
 
 // --- 堆上的请求缓冲（解析脚本用，复用 ws_server 的思路）----------------------
 struct HeapNodes {
@@ -223,6 +240,17 @@ void TaskScheduler::exec_event(const TaskEvent& ev, float scale) {
     case 4:  // findImage 暂不支持
       LogTagged("framework", "task: findImage skipped (unsupported)");
       break;
+    case kGap: {  // 脚本间等待（可中断）
+      int remaining = ev.ms;
+      while (remaining > 0) {
+        const int step = remaining > 50 ? 50 : remaining;
+        if (WaitForSingleObject(stop_ev_, static_cast<DWORD>(step)) == WAIT_OBJECT_0) {
+          return;
+        }
+        remaining -= step;
+      }
+      break;
+    }
   }
 }
 
@@ -249,7 +277,11 @@ done:
   EnterCriticalSection(&cs_);
   status_ = (WaitForSingleObject(stop_ev_, 0) == WAIT_OBJECT_0) ? kStopped : kDone;
   LeaveCriticalSection(&cs_);
-  LogTagged("framework", "task: run finished (status=%s)", StatusStr(status_));
+  char buf[192] = {};
+  std::snprintf(buf, sizeof(buf), "「%s」%s（第 %ld 轮，共 %d 步）", name_,
+                status_ == kDone ? "执行完成" : "已停止",
+                static_cast<long>(loop_cur_), event_count_);
+  TaskLog(status_ == kDone ? "info" : "warn", buf);
 }
 
 void TaskScheduler::start(ppjson::Pool& pool, const char* name, int loop,
@@ -331,8 +363,132 @@ void TaskScheduler::start(ppjson::Pool& pool, const char* name, int loop,
   d.SetNum("count", event_count_);
   TaskReply(pool, out, true, d, kOk);
   LeaveCriticalSection(&cs_);
-  LogTagged("framework", "task: start '%s' id=%d events=%d loop=%d", name, task_id_,
-            event_count_, loop_total_);
+  char sbuf[192] = {};
+  std::snprintf(sbuf, sizeof(sbuf), "脚本「%s」开始执行：%d 步，循环 %d 轮", name,
+                event_count_, loop_total_);
+  TaskLog("info", sbuf);
+}
+
+void TaskScheduler::start_job(ppjson::Pool& pool, const char* job_name,
+                              const char* dir, const char* scripts[],
+                              int script_count, int loop, int gap_ms,
+                              ppjson::Value& out) {
+  if (script_count <= 0) {
+    ppjson::Value d = ppjson::Value::Obj(pool);
+    d.SetStr("msg", "no scripts");
+    TaskReply(pool, out, false, d, kErr);
+    return;
+  }
+  EnterCriticalSection(&cs_);
+  if (active_ && (status_ == kRunning || status_ == kPaused)) {
+    ppjson::Value d = ppjson::Value::Obj(pool);
+    d.SetStr("msg", "已有活跃任务，先停止");
+    TaskReply(pool, out, false, d, kErr);
+    LeaveCriticalSection(&cs_);
+    return;
+  }
+  free_events();
+
+  // 两遍：先统计事件总数（含脚本间 gap），再提取。
+  int total = 0;
+  for (int s = 0; s < script_count; ++s) {
+    HeapNodes hn(2048);
+    if (!hn.ok()) {
+      TaskReply(pool, out, false, ppjson::Value(), kErr);
+      LeaveCriticalSection(&cs_);
+      return;
+    }
+    ppjson::Value resp = ppjson::Value::Obj(hn.pool);
+    if (dir != nullptr && dir[0] != '\0') {
+      char rel[384] = {};
+      std::snprintf(rel, sizeof(rel), "%s/%s", dir, scripts[s]);
+      scripts_.read_rel(hn.pool, rel, resp);
+    } else {
+      scripts_.read(hn.pool, scripts[s], resp);
+    }
+    if (resp.Find("success").AsBool(false)) {
+      ppjson::Value evs = resp.Find("data").Find("events");
+      if (evs.IsArr()) total += evs.Size();
+    }
+    if (s < script_count - 1) total += 1;  // 脚本间 gap
+  }
+  if (total <= 0) {
+    ppjson::Value d = ppjson::Value::Obj(pool);
+    d.SetStr("msg", "所有脚本都没有 events");
+    TaskReply(pool, out, false, d, kErr);
+    LeaveCriticalSection(&cs_);
+    return;
+  }
+
+  events_ = static_cast<TaskEvent*>(HeapAlloc(
+      GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TaskEvent) * total));
+  event_count_ = 0;
+  for (int s = 0; s < script_count; ++s) {
+    HeapNodes hn(2048);
+    if (!hn.ok()) {
+      TaskReply(pool, out, false, ppjson::Value(), kErr);
+      free_events();
+      LeaveCriticalSection(&cs_);
+      return;
+    }
+    ppjson::Value resp = ppjson::Value::Obj(hn.pool);
+    if (dir != nullptr && dir[0] != '\0') {
+      char rel[384] = {};
+      std::snprintf(rel, sizeof(rel), "%s/%s", dir, scripts[s]);
+      scripts_.read_rel(hn.pool, rel, resp);
+    } else {
+      scripts_.read(hn.pool, scripts[s], resp);
+    }
+    if (resp.Find("success").AsBool(false)) {
+      ppjson::Value evs = resp.Find("data").Find("events");
+      if (evs.IsArr()) {
+        for (int i = 0; i < evs.Size(); ++i) {
+          TaskEvent ev;
+          std::memset(&ev, 0, sizeof(ev));
+          extract_event(evs.At(i), ev);
+          events_[event_count_++] = ev;
+        }
+      }
+    }
+    if (s < script_count - 1) {
+      TaskEvent gap;
+      std::memset(&gap, 0, sizeof(gap));
+      gap.type = kGap;
+      gap.ms = gap_ms;
+      events_[event_count_++] = gap;
+    }
+  }
+
+  loop_total_ = (loop > 0) ? loop : 1;
+  std::strncpy(name_, job_name, sizeof(name_) - 1);
+  task_id_ = (task_id_ >= 0x7fffffff) ? 1 : task_id_ + 1;
+  idx_ = 0;
+  loop_cur_ = 0;
+  status_ = kRunning;
+  stop_ev_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+  active_ = true;
+  thread_ = CreateThread(nullptr, 0, RunThunk, this, 0, nullptr);
+  if (thread_ == nullptr) {
+    status_ = kError;
+    active_ = false;
+    if (stop_ev_ != nullptr) {
+      CloseHandle(stop_ev_);
+      stop_ev_ = nullptr;
+    }
+    free_events();
+    TaskReply(pool, out, false, ppjson::Value(), kErr);
+    LeaveCriticalSection(&cs_);
+    return;
+  }
+  ppjson::Value d = ppjson::Value::Obj(pool);
+  d.SetNum("id", task_id_);
+  d.SetNum("count", event_count_);
+  TaskReply(pool, out, true, d, kOk);
+  LeaveCriticalSection(&cs_);
+  char jbuf[192] = {};
+  std::snprintf(jbuf, sizeof(jbuf), "定时任务「%s」开始执行：%d 步，循环 %d 轮", job_name,
+                event_count_, loop_total_);
+  TaskLog("info", jbuf);
 }
 
 void TaskScheduler::stop(ppjson::Pool& pool, int /*id*/, ppjson::Value& out) {
@@ -392,4 +548,8 @@ void TaskScheduler::stop_all() {
 
 void TaskScheduler::signal_stop() {
   if (stop_ev_ != nullptr) SetEvent(stop_ev_);
+}
+
+bool TaskScheduler::is_busy() const {
+  return active_ && (status_ == kRunning || status_ == kPaused);
 }

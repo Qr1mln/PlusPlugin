@@ -42,11 +42,22 @@ class TaskScheduler {
   // 启动脚本任务（单任务：已有活跃任务则失败）。loop<=0 用脚本自带 loop，再缺省 1。
   // out 直接写封套 {success,data,code}。
   void start(ppjson::Pool& pool, const char* name, int loop, ppjson::Value& out);
+
+  // 启动一个定时任务（多脚本顺序执行，脚本间等待 gap_ms；整套重复 loop 次）。
+  // scripts 为脚本名数组（scripts 在相对 dir 子目录下，dir 为空则用默认 scripts 根）。
+  // 单任务：已有活跃任务则失败。
+  void start_job(ppjson::Pool& pool, const char* job_name, const char* dir,
+                 const char* scripts[], int script_count, int loop, int gap_ms,
+                 ppjson::Value& out);
+
   void stop(ppjson::Pool& pool, int id, ppjson::Value& out);
   void pause(ppjson::Pool& pool, int id, ppjson::Value& out);
   void resume(ppjson::Pool& pool, int id, ppjson::Value& out);
   // 返回任务状态数组（out 为封套 {success,data:{tasks:[...]}}）。
   void list(ppjson::Pool& pool, ppjson::Value& out);
+
+  // 当前是否有任务在跑（运行或暂停中）。调度引擎据此判断是否到点排队。
+  bool is_busy() const;
 
   // 正常关闭：发停止信号并等待线程退出。
   void stop_all();
@@ -54,6 +65,15 @@ class TaskScheduler {
   void signal_stop();
 
   enum Status { kStopped = 0, kRunning, kPaused, kDone, kError };
+
+  enum EventType {  // TaskEvent.type
+    kMouse = 0,
+    kDelay = 1,
+    kKey = 2,
+    kText = 3,
+    kFindImage = 4,  // 暂不支持，执行时跳过
+    kGap = 5,        // 脚本间等待（可中断）
+  };
 
  private:
   static DWORD WINAPI RunThunk(LPVOID self);
