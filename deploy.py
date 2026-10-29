@@ -11,8 +11,9 @@ PlusPlugin 运行时部署脚本（把本地编译的 version.dll 更新到本�
 说明：
   - 本脚本只部署 version.dll（代理）。插件（framework.dll + 前端页面）用
     deploy_plugin.py 单独部署。
-  - 不编译。编译请跑 framework_build.py（framework.dll）与 proxy_build.py（version.dll）；插件（plugin\ 下）用 build_plugin.py。
-  - 与 build_plugin.py 的 deploy_local 保持一致：运行时（TTVoice）就跑在本机，
+  - 不编译。编译请跑 scripts\framework_build.py（framework.dll）与
+    scripts\proxy_build.py（version.dll）；插件（plugin\ 下）用 scripts\build_plugin.py。
+  - 与 scripts\build_plugin.py 的 deploy_local 保持一致：运行时（TTVoice）就跑在本机，
     因此直接在本机停/启 + 复制，不再 SSH 到远程 Windows（旧版是这么做的，已废弃）。
 前置：本机需能 taskkill / 启动 TTVoice.exe，无需联网。
 """
@@ -90,7 +91,7 @@ def start_app():
 
 def main():
     if not os.path.isfile(PROJECT_DLL):
-        log(f"未找到 {PROJECT_DLL}，请先跑 proxy_build.py 编译。")
+        log(f"未找到 {PROJECT_DLL}，请先跑 scripts/proxy_build.py 编译。")
         raise SystemExit(1)
 
     appdata = os.environ.get("APPDATA", "")

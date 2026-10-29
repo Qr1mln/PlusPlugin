@@ -17,11 +17,14 @@
 #include "window_target.h"
 
 class InputDispatcher;
+class TaskScheduler;
 
 class CommandHandler {
  public:
   CommandHandler(WindowTarget& win, InputDispatcher& input)
       : win_(win), input_(input) {}
+
+  void set_task(TaskScheduler* task) { task_ = task; }
 
   // 解析并分发一条命令（msg 为 NUL 结尾 UTF-8）。响应写入 out，返回字节数
   // （>=0），或 -(need+1)（out 不够）。conn 为发起连接（cursor watch/pick 需要）。
@@ -40,6 +43,7 @@ class CommandHandler {
 
   WindowTarget& win_;
   InputDispatcher& input_;
+  TaskScheduler* task_ = nullptr;
 };
 
 #endif  // FRAMEWORK_COMMAND_HANDLER_H

@@ -6,10 +6,10 @@ PlusPlugin 模块：交叉编译 + 部署到运行时目录
 部署位置是 `%APPDATA%\TTVoice\<dll>`（与 framework.dll 同目录），由 version.ini
 的 `[modules]` 列出后由 proxy 加载；换文件即触发 proxy 的热加载。
 
-用法：
-  python build_plugin.py                      # 默认编 console
-  python build_plugin.py console
-  python build_plugin.py console --no-build   # 跳过编译，直接用已有 dll
+用法（在仓库根目录执行）：
+  python scripts/build_plugin.py                      # 默认编 console
+  python scripts/build_plugin.py console
+  python scripts/build_plugin.py console --no-build   # 跳过编译，直接用已有 dll
 
 流程（每个模块）：
   1) SSH 到 Linux 编译机，mingw 交叉编译 -> 产物落回 `plugin\<名称>\<名称>.dll`；
@@ -17,8 +17,8 @@ PlusPlugin 模块：交叉编译 + 部署到运行时目录
      （dll -> dll.old，再写新 dll），proxy 的 watcher 会在 ~1s 内热加载；
      应用没跑就直接覆盖。
 
-说明：version.dll 由 proxy_build.py 编译、deploy.py 部署；framework.dll 由
-framework_build.py 编译、deploy_plugin.py 部署。
+说明：version.dll 由 scripts/proxy_build.py 编译、deploy.py 部署；framework.dll 由
+scripts/framework_build.py 编译、deploy_plugin.py 部署。
 依赖：pip install paramiko。
 """
 import glob
@@ -36,7 +36,8 @@ PASSWORD = os.getenv("VM_PASSWORD", "n123456")   # 密钥认证失败时兜底
 KEY_FILE = os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519")
 LINUX_REMOTE_ROOT = "/home/n111/plusplugin-build"
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 脚本放在 scripts/ 下，仓库根目录是它的上一级
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 每个模块：源码相对目录、产物名（部署名与产物名一致）
 PLUGINS = {

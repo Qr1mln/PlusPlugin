@@ -12,7 +12,7 @@ framework.dll 在运行中被 TTVoice 映射占用，直接 copy2 覆盖会失�
 这正是热加载的触发点；若被占用阻止则回退到停/启 TTVoice。
 
 本脚本只部署插件，不动 version.dll（那是 deploy.py 的职责）。
-前置：先跑 framework_build.py 产出 framework/framework.dll；前端先 `cd editor2 && npm run build`。
+前置：先跑 scripts/framework_build.py 产出 framework/framework.dll；前端先 `cd editor2 && npm run build`。
 
 用法：
   python deploy_plugin.py
@@ -103,7 +103,7 @@ def deploy_frontend(runtime_dir):
 
 def main():
     if not os.path.isfile(FRAMEWORK_DLL):
-        log(f"未找到 {FRAMEWORK_DLL}，请先跑 framework_build.py 编译。")
+        log(f"未找到 {FRAMEWORK_DLL}，请先跑 scripts/framework_build.py 编译。")
         raise SystemExit(1)
 
     runtime_dir = appdata_runtime_dir()

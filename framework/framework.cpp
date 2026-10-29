@@ -41,6 +41,7 @@
 #include "host_caps.h"
 #include "picker.h"
 #include "script_store.h"
+#include "task_scheduler.h"
 #include "ws_server.h"
 
 #include "window_target.h"
@@ -119,15 +120,16 @@ static void ProbePort(int port) {
 //   CommandHandler/ScriptStore。日志统一走公共 log 模块（组件 framework）。
 class Framework {
  public:
-  Framework() : input_(win_), handler_(win_, input_) {}
+  Framework() : input_(win_), handler_(win_, input_), task_(win_, input_, scripts_) {}
 
   int start(const HostCaps* host, const char* doc_root, int port) {
     win_.set_host(host);
     ProbePort(port);  // 先自测端口是否可绑定（结果见 proxy.log）
-    if (!server_.start(handler_, scripts_, doc_root, port)) {
+    if (!server_.start(handler_, scripts_, &task_, doc_root, port)) {
       LogTagged("framework", "mg_start failed");
       return kStartState;
     }
+    handler_.set_task(&task_);
     if (!PickerStart(host, &PickerSend)) {
       LogTagged("framework", "picker: start failed");
     }
@@ -137,12 +139,14 @@ class Framework {
   // 正常卸载（PluginShutdown 调用）：等待推送线程退出。
   void stop() {
     PickerStop();
+    task_.stop_all();
     server_.stop();
   }
 
   // 进程卸载（DllMain 调用）：只发退出信号、不等待，避免与加载器锁互等。
   void unload() {
     PickerRequestStop();
+    task_.signal_stop();
     server_.stop();
   }
 
@@ -151,6 +155,7 @@ class Framework {
   InputDispatcher input_;  // 依赖 win_
   ScriptStore scripts_;
   CommandHandler handler_;  // 依赖 win_/input_/scripts_
+  TaskScheduler task_;      // 依赖 win_/input_/scripts_
   WsServer server_;
 };
 

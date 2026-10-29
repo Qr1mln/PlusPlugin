@@ -13,6 +13,7 @@
 #include "command_handler.h"
 #include "picker.h"
 #include "script_store.h"
+#include "task_scheduler.h"
 
 #include "../common/log.h"
 
@@ -87,12 +88,16 @@ int SendOom(mg_connection* conn) {
   mg_write(conn, kOom, sizeof(kOom) - 1);
   return 500;
 }
+
+// on_http_tasks 用的轻量成功封套（与 script_store 的 WriteOk 同构，避免跨 TU 依赖）。
+void TaskReplyOk(ppjson::Pool& pool, ppjson::Value& out, ppjson::Value data);
 }  // namespace
 
 bool WsServer::start(CommandHandler& handler, ScriptStore& scripts,
-                     const char* doc_root, int port) {
+                     TaskScheduler* task, const char* doc_root, int port) {
   handler_ = &handler;
   scripts_ = &scripts;
+  task_ = task;
 
   std::snprintf(port_opt_, sizeof(port_opt_), "127.0.0.1:%d", port);
   const char* options[] = {
@@ -115,6 +120,7 @@ bool WsServer::start(CommandHandler& handler, ScriptStore& scripts,
   mg_set_request_handler(ctx_, "/api/scripts", &on_http_scripts, this);
   mg_set_request_handler(ctx_, "/api/app", &on_http_app, this);
   mg_set_request_handler(ctx_, "/api/cursor", &on_http_cursor, this);
+  mg_set_request_handler(ctx_, "/api/tasks", &on_http_tasks, this);
   return true;
 }
 
@@ -325,3 +331,77 @@ int WsServer::on_http_cursor(mg_connection* conn, void* cbdata) {
   send_json(conn, resp);
   return 200;
 }
+
+int WsServer::on_http_tasks(mg_connection* conn, void* cbdata) {
+  auto* self = static_cast<WsServer*>(cbdata);
+  const struct mg_request_info* ri = mg_get_request_info(conn);
+  const char* method =
+      (ri != nullptr && ri->request_method != nullptr) ? ri->request_method : "GET";
+
+  HeapNodes hp(kHttpPoolNodes);
+  if (!hp.ok()) {
+    return SendOom(conn);
+  }
+  ppjson::Pool& pool = hp.pool;
+  ppjson::Value resp = ppjson::Value::Obj(pool);
+
+  if (std::strcmp(method, "GET") == 0) {
+    if (self->task_ != nullptr) {
+      self->task_->list(pool, resp);
+    } else {
+      ppjson::Value d = ppjson::Value::Obj(pool);
+      d.SetValue("tasks", ppjson::Value::Arr(pool));
+      TaskReplyOk(pool, resp, d);
+    }
+  } else if (std::strcmp(method, "DELETE") == 0) {
+    char taskBuf[32] = {};
+    if (ri != nullptr && ri->query_string != nullptr) {
+      mg_get_var(ri->query_string, strlen(ri->query_string), "task", taskBuf,
+                 sizeof(taskBuf));
+    }
+    if (self->task_ != nullptr) {
+      self->task_->stop(pool, atoi(taskBuf), resp);
+    } else {
+      resp.SetBool("success", false);
+      resp.SetStr("code", kErr);
+    }
+  } else {  // POST/PUT：启动任务（name 必填，loop 可选）
+    char nameBuf[256] = {};
+    char loopBuf[32] = {};
+    bool hasName = false;
+    int loop = 0;
+    if (ri != nullptr && ri->query_string != nullptr) {
+      const int qlen = static_cast<int>(strlen(ri->query_string));
+      if (mg_get_var(ri->query_string, qlen, "name", nameBuf, sizeof(nameBuf)) > 0) {
+        hasName = true;
+      }
+      if (mg_get_var(ri->query_string, qlen, "loop", loopBuf, sizeof(loopBuf)) > 0) {
+        loop = atoi(loopBuf);
+      }
+    }
+    if (self->task_ != nullptr && hasName) {
+      self->task_->start(pool, nameBuf, loop, resp);
+    } else {
+      resp.SetBool("success", false);
+      resp.SetStr("data", "bad request");
+      resp.SetStr("code", kErr);
+    }
+  }
+
+  send_json(conn, resp);
+  return 200;
+}
+
+namespace {
+
+void TaskReplyOk(ppjson::Pool& pool, ppjson::Value& out, ppjson::Value data) {
+  out = ppjson::Value::Obj(pool);
+  out.SetBool("success", true);
+  if (data.Valid()) {
+    out.SetValue("data", data);
+  } else {
+    out.SetValue("data", ppjson::Value::Str(pool, ""));
+  }
+  out.SetStr("code", "0000");
+}
+}  // namespace

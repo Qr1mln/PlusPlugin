@@ -25,7 +25,8 @@ USER = "n111"
 PASSWORD = os.getenv("VM_PASSWORD", "n123456")     # 密钥认证失败时兜底；优先走下面的 KEY_FILE
 KEY_FILE = os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519")
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 脚本放在 scripts/ 下，仓库根目录是它的上一级
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REMOTE_ROOT = "/home/n111/plusplugin-build"
 FRAMEWORK_DLL = os.path.join(REPO_ROOT, "framework", "framework.dll")
 # =============================================================

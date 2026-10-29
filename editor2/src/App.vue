@@ -1,9 +1,19 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { connect, onMessage, onStatus, request } from './ws'
 import EventDialog from './EventDialog.vue'
 import { setScale } from './cursorStore'
 import { logs, pushLog, clearLogs } from './logStore'
+import {
+  tasks,
+  refreshTasks,
+  startPolling,
+  stopPolling,
+  startTask,
+  stopTask,
+  pauseTask,
+  resumeTask,
+} from './taskStore'
 
 // ---- 演示数据（真实数据后续从脚本文件加载）----
 const scripts = ref([])
@@ -40,6 +50,63 @@ watch(size, (value) => {
 
 // 连接状态（占位，未接 WS）
 const status = ref('未连接')
+
+// 任务调度：循环次数输入
+const loopInput = ref(1)
+
+function statusLabel(s) {
+  return (
+    { running: '运行中', paused: '已暂停', done: '已完成', error: '错误', stopped: '已停止' }[s] ||
+    s
+  )
+}
+
+async function onStartTask() {
+  if (!currentScript.value) {
+    pushLog('warn', '启动任务：先选择或新建一个脚本')
+    return
+  }
+  try {
+    const loop = Math.max(1, parseInt(loopInput.value, 10) || 1)
+    const j = await startTask(currentScript.value, loop)
+    if (j && j.success) {
+      pushLog('info', `已启动任务「${currentScript.value}」循环 ${loop} 次`)
+      await refreshTasks()
+    } else {
+      pushLog('error', `启动任务失败：${(j && j.data) || '未知错误'}`)
+    }
+  } catch (e) {
+    pushLog('error', `启动任务失败：${e.message}`)
+  }
+}
+
+async function onStopTask(t) {
+  try {
+    await stopTask(t.id)
+    pushLog('info', `已停止任务 ${t.id}`)
+    await refreshTasks()
+  } catch (e) {
+    pushLog('error', `停止任务失败：${e.message}`)
+  }
+}
+
+async function onPauseTask(t) {
+  try {
+    await pauseTask(t.id)
+    await refreshTasks()
+  } catch (e) {
+    pushLog('error', `暂停任务失败：${e.message}`)
+  }
+}
+
+async function onResumeTask(t) {
+  try {
+    await resumeTask(t.id)
+    await refreshTasks()
+  } catch (e) {
+    pushLog('error', `继续任务失败：${e.message}`)
+  }
+}
 
 // 目标应用信息（“刷新应用”时从 /api/app 读回窗口几何）
 const appInfo = ref('TTVoice.exe view -')
@@ -126,6 +193,11 @@ onMounted(() => {
     }
   })
   connect()
+  startPolling()
+})
+
+onUnmounted(() => {
+  stopPolling()
 })
 
 // ---- 读取脚本内容并填充表格 ----
@@ -749,6 +821,26 @@ function onRowDelete(i) {
       <span class="case-count">共 {{ rows.length }} 条</span>
     </div>
 
+    <!-- 任务调度 -->
+    <div class="taskbar">
+      <span class="label">任务</span>
+      <button @click="onStartTask" :disabled="!currentScript">启动</button>
+      <span class="loop-wrap">循环
+        <input v-model="loopInput" class="loop-input" type="number" min="1" max="9999" />
+      </span>
+      <span class="spacer"></span>
+      <span class="label">当前任务</span>
+      <span v-if="tasks.length === 0" class="app-info">无</span>
+      <span v-for="t in tasks" :key="t.id" class="task-chip">
+        <b>{{ t.name }}</b>
+        <span class="task-status" :class="'st-' + t.status">{{ statusLabel(t.status) }}</span>
+        <span class="task-prog">第{{ t.loop_cur }}/{{ t.loop_total }}轮 · 步{{ t.idx }}/{{ t.count }}</span>
+        <button v-if="t.status === 'running'" @click="onPauseTask(t)">暂停</button>
+        <button v-if="t.status === 'paused'" @click="onResumeTask(t)">继续</button>
+        <button @click="onStopTask(t)">停止</button>
+      </span>
+    </div>
+
     <!-- 脚本步骤表 -->
     <div class="table-wrap">
       <table>
@@ -931,6 +1023,61 @@ button:active {
   padding: var(--bar-pad);
   background: #f6f6f6;
   border-bottom: 1px solid #d4d4d4;
+}
+
+/* 任务调度栏 */
+.taskbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: var(--bar-pad);
+  background: #eef3fb;
+  border-bottom: 1px solid #c4d4ea;
+}
+.taskbar .label {
+  color: #333;
+  font-size: var(--font);
+}
+.taskbar .loop-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #333;
+  font-size: var(--font);
+}
+.taskbar .loop-input {
+  width: 56px;
+  height: var(--btn-h);
+  font-size: var(--font);
+  padding: 0 4px;
+}
+.task-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid #b6c8e0;
+  border-radius: 3px;
+  background: #fff;
+  font-size: var(--font);
+}
+.task-chip b {
+  font-weight: 600;
+}
+.task-status {
+  padding: 0 5px;
+  border-radius: 2px;
+  color: #fff;
+  background: #888;
+}
+.task-status.st-running { background: #27ae60; }
+.task-status.st-paused { background: #f39c12; }
+.task-status.st-done { background: #2980b9; }
+.task-status.st-error { background: #c0392b; }
+.task-status.st-stopped { background: #888; }
+.task-prog {
+  color: #555;
 }
 .divider {
   width: 1px;

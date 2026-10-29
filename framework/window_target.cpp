@@ -80,6 +80,10 @@ bool WindowTarget::refresh() const {
              : false;
 }
 
+float WindowTarget::scale() const {
+  return (host_ != nullptr && host_->scale != nullptr) ? host_->scale() : 1.0f;
+}
+
 bool WindowTarget::target_minimized() const {
   const HWND w = target();
   if (w == nullptr) {

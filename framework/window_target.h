@@ -31,6 +31,9 @@ class WindowTarget {
   // 让宿主重新解析目标窗口（编辑器"刷新应用"用）；宿主不支持则返回 false。
   bool refresh() const;
 
+  // DPI 缩放（96dpi = 1.0）；宿主不支持返回 1.0。调度器换算逻辑坐标用。
+  float scale() const;
+
   // 目标窗口的顶层窗口是否最小化（最小化时客户区屏幕坐标是 -32000，不能算几何）。
   bool target_minimized() const;
 

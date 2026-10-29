@@ -16,12 +16,13 @@ struct mg_connection;
 
 class CommandHandler;
 class ScriptStore;
+class TaskScheduler;
 
 class WsServer {
  public:
   // 启动 CivetWeb：监听 127.0.0.1:<port>，doc_root 用于托管静态文件。
-  bool start(CommandHandler& handler, ScriptStore& scripts, const char* doc_root,
-             int port);
+  bool start(CommandHandler& handler, ScriptStore& scripts, TaskScheduler* task,
+             const char* doc_root, int port);
 
   void stop() noexcept;
 
@@ -36,6 +37,7 @@ class WsServer {
   static int on_http_scripts(mg_connection* conn, void* cbdata);
   static int on_http_app(mg_connection* conn, void* cbdata);
   static int on_http_cursor(mg_connection* conn, void* cbdata);
+  static int on_http_tasks(mg_connection* conn, void* cbdata);
 
   // 读请求体（限 4MB），写入 out，返回字节数。
   static int read_body(mg_connection* conn, const struct mg_request_info* ri,
@@ -47,6 +49,7 @@ class WsServer {
   mg_context* ctx_ = nullptr;
   CommandHandler* handler_ = nullptr;
   ScriptStore* scripts_ = nullptr;
+  TaskScheduler* task_ = nullptr;
   char port_opt_[32] = {};  // "127.0.0.1:<port>"，mg_start 期间保持有效
 };
 

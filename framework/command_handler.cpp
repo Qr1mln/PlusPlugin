@@ -7,6 +7,7 @@
 
 #include "input_dispatcher.h"
 #include "picker.h"
+#include "task_scheduler.h"
 #include "window_target.h"
 
 #include "../common/log.h"
@@ -74,6 +75,37 @@ int CommandHandler::handle(const char* msg, char* out, int cap, void* conn) {
 
   const char* category = (type[0] != '\0') ? type : action;
   const char* sub = (type[0] != '\0') ? action : op;
+
+  // 任务调度：type=="task"，action=start/stop/pause/resume/list。
+  if (std::strcmp(category, "task") == 0) {
+    if (task_ == nullptr) {
+      return make_reply(pool, out, cap, id, false,
+                        ppjson::Value::Str(pool, "task disabled"), kErr);
+    }
+    const char* tname = cmd.Find("name").AsStr();
+    const int tloop = static_cast<int>(cmd.Find("loop").AsInt(0));
+    const int tid = static_cast<int>(cmd.Find("task").AsInt(0));
+    ppjson::Value resp = ppjson::Value::Obj(pool);
+    if (std::strcmp(sub, "start") == 0) {
+      task_->start(pool, tname, tloop, resp);
+    } else if (std::strcmp(sub, "stop") == 0) {
+      task_->stop(pool, tid, resp);
+    } else if (std::strcmp(sub, "pause") == 0) {
+      task_->pause(pool, tid, resp);
+    } else if (std::strcmp(sub, "resume") == 0) {
+      task_->resume(pool, tid, resp);
+    } else if (std::strcmp(sub, "list") == 0) {
+      task_->list(pool, resp);
+    } else {
+      ppjson::Value d = ppjson::Value::Obj(pool);
+      d.SetStr("msg", "unknown task action");
+      resp = ppjson::Value::Obj(pool);
+      resp.SetBool("success", false);
+      resp.SetValue("data", d);
+      resp.SetStr("code", kErr);
+    }
+    return resp.Dump(out, cap);
+  }
 
   const char* space = cmd.Find("space").IsStr() ? cmd.Find("space").AsStr() : "view";
   const char* button = cmd.Find("button").IsStr() ? cmd.Find("button").AsStr() : "left";
